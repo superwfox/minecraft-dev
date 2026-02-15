@@ -1,0 +1,15 @@
+html.dark {
+    --vp-c-brand-1: #eee1c4;
+    --vp-c-brand-2: #eee1c4;
+    --vp-c-brand-3: #eee1c4;
+}
+
+:root {
+    --vp-c-brand-1: #4b3b23;
+    --vp-c-brand-2: #4b3b23;
+    --vp-c-brand-3: #4b3b23;
+    --vp-font-family-base: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Noto Sans", sans-serif;
+}

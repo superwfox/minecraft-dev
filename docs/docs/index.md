@@ -3,8 +3,10 @@ layout: home
 
 hero:
   name: "踏海"
-  text: "设计大赛作品---Minecraft插件开发辅助Web"
-  tagline: 这是项目文档 在这里了解详情
+  text: |
+    设计大赛作品
+    MC辅助开发网站
+  tagline: 这是项目文档 在这里了解 运作机制、使用方法
   actions:
     - theme: sponsor
       text: 浏览网站
