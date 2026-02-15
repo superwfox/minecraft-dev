@@ -7,10 +7,10 @@
 <style>
 .glass2 {
   display: flex;
-  position: fixed; /* 或 absolute */
-  top: 20px; /* 贴顶 */
+  position: fixed;
+  top: 20px;
   left: 16px;
-  right: 16px; /* 这样就不需要 width: calc(...) 了 */
+  right: 16px;
   height: 32px;
   padding: 22px;
   color: wheat;
@@ -27,6 +27,7 @@
   align-items: center;
   justify-content: space-between;
   box-sizing: border-box;
+  user-select: none;
 }
 
 .center {
@@ -39,22 +40,31 @@
   text-shadow:
       0 0 8px rgba(255,255,255,0.25),
       0 0 18px rgba(255,255,255,0.12);
+  user-select: none;
 }
 
 .right {
   display: flex;
-  color: white;
   align-items: center;
   justify-content: end;
   text-shadow: 0 1px 8px rgba(0,0,0,.35);
   gap : 24px;
+  color: white;
 }
 
 .link {
-  color: wheat;
+  color: white;
   opacity: 0.9;
   cursor: pointer;
   user-select: none;
+  text-decoration: none;
+}
+
+.link:hover{
+  opacity: 1;
+  text-shadow:
+      0 0 8px rgba(255,255,255,0.35),
+      0 0 18px rgba(255,255,255,0.22);
 }
 
 </style>

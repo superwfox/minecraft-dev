@@ -10,10 +10,8 @@
     </div>
 
     <div class="right">
-      <a class="link" href="https://docs.xxx.com" target="_blank">文档</a>
-      <a class="link" href="https://github.com/xxx/yyy" target="_blank" rel="noreferrer">
-        GitHub
-      </a>
+      <a class="link" href="https://docs.xxx.com" rel="noreferrer">文档</a>
+      <a class="link" href="https://github.com/superwfox/minecraft-dev" rel="noreferrer">GitHub</a>
     </div>
   </GlassCard>
 </template>
