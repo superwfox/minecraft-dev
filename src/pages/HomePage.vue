@@ -5,5 +5,5 @@
 
 <script setup lang="ts">
 import ConsistantTypingText from "../index/consistentTypingText.vue";
-import FloorDown from "../index/FloorDown.vue";
+import FloorDown from "../index/floorDown.vue";
 </script>
