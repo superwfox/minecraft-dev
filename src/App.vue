@@ -2,7 +2,8 @@
   <CubeBackground/>
   <GlassCard>
     <div class="header">
-      踏海
+      <img class="header-icon" src="/icon.png" alt="icon">
+      TAHAI
     </div>
 
     <div class="center">

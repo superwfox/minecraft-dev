@@ -14,6 +14,7 @@
   height: 32px;
   padding: 22px;
   color: wheat;
+  font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "HarmonyOS Sans SC", "Source Han Sans SC", sans-serif;
   background: rgba(255, 255, 255, 0.02);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -25,9 +26,15 @@
   display: flex;
   font-size: 32px;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   box-sizing: border-box;
   user-select: none;
+}
+
+.header-icon {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
 }
 
 .center {
