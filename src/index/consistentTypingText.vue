@@ -85,7 +85,7 @@ onBeforeUnmount(() => clearTimeout(timer));
   z-index: 0;
   font-size: 58px;
   color: white;
-  text-shadow: 0 0 5px wheat;
+  text-shadow: 0 0 8px wheat;
   font-family: system-ui, sans-serif;
   white-space: nowrap;
   user-select: none;
