@@ -1,5 +1,5 @@
 <template>
-  <div class="glass2">
+  <div class="glass2 glass2-nav">
     <slot/>
   </div>
 </template>
@@ -7,11 +7,6 @@
 <style>
 .glass2 {
   display: flex;
-  position: fixed;
-  top: 20px;
-  left: 16px;
-  right: 16px;
-  height: 32px;
   padding: 22px;
   color: wheat;
   font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "HarmonyOS Sans SC", "Source Han Sans SC", sans-serif;
@@ -22,6 +17,16 @@
   border: 3px solid rgba(255, 255, 255, 0.03);
 }
 
+.glass2-nav {
+  position: fixed;
+  top: 20px;
+  left: 16px;
+  right: 16px;
+  height: 32px;
+  z-index: 20;
+  align-items: center;
+}
+
 .header {
   display: flex;
   font-size: 32px;
@@ -29,6 +34,7 @@
   gap: 8px;
   box-sizing: border-box;
   user-select: none;
+  cursor: pointer;
 }
 
 .header-icon {
@@ -40,6 +46,7 @@
 .center {
   display: flex;
   font-size: 24px;
+  offset-position: 9px;
   justify-content: center;
   flex: 1; /* 中间占剩余空间 */
   min-width: 0;

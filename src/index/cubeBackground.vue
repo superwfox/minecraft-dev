@@ -17,6 +17,7 @@ let h = 0;
 
 const cursor: V2 = { x: 0, y: 0 };
 let hasPointer = false;
+let pointerEverEntered = false;
 let lastMoveAt = 0;
 
 const CONFIG = {
@@ -35,7 +36,7 @@ const CONFIG = {
   // 出现/消失（用“缩放”实现）
   appearSpeed: 0.02,     // scale 变大速度
   disappearSpeed: 0.005,  // scale 变小速度
-  idleHideMs: 2560,
+  idleHideMs: 5120,
 
   // 大小随距离变化
   minSize: 3,
@@ -286,6 +287,7 @@ function resize() {
 
 function onPointerMove(e: PointerEvent) {
   hasPointer = true;
+  pointerEverEntered = true;
   lastMoveAt = performance.now();
   cursor.x = e.clientX;
   cursor.y = e.clientY;
@@ -321,7 +323,7 @@ function loop(t: number) {
   ctx.fillRect(0, 0, w, h);
 
   const now = performance.now();
-  const visible = hasPointer && (now - lastMoveAt) <= CONFIG.idleHideMs;
+  const visible = !pointerEverEntered || (hasPointer && (now - lastMoveAt) <= CONFIG.idleHideMs);
 
   if (burst.active && !burst.didReset) {
     const k = getBurstScale(now);
@@ -357,6 +359,9 @@ onMounted(() => {
   el.style.height = "100vh";
 
   resize();
+
+  cursor.x = w / 2;
+  cursor.y = h / 2;
 
   cubes = Array.from({ length: CONFIG.count }, () => new Cube());
 

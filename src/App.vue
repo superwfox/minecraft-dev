@@ -1,13 +1,13 @@
 <template>
   <CubeBackground/>
   <GlassCard>
-    <div class="header">
-      <img class="header-icon" src="/icon.png" alt="icon">
+    <div class="header" @click = goHome>
+      <img class="header-icon" src="/icon.png" alt="icon" @click = goHome>
       TAHAI
     </div>
 
     <div class="center">
-      NOW_ON_WORKING
+      <span>{{ centerText }}</span>
     </div>
 
     <div class="right">
@@ -15,29 +15,31 @@
       <a class="link" href="https://github.com/superwfox/minecraft-dev" rel="noreferrer">GitHub</a>
     </div>
   </GlassCard>
+  <router-view/>
 </template>
 
 <script setup lang="ts">
+import {provide, ref} from "vue";
 import CubeBackground from "./index/cubeBackground.vue";
-import GlassCard from "./index/glassCard.vue"; // 注意大小写/路径
+import GlassCard from "./index/glassCard.vue";
+import {useRouter} from "vue-router";
+
+const router = useRouter();
+const goHome = () => router.push("/");
+
+const centerText = ref("建设中");
+provide("centerText", centerText);
 </script>
 
 <style>
-.ui-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  pointer-events: none; /* 让你可以控制哪些区域可交互 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
-/* 让卡片本身可交互 */
-.ui-layer > * {
-  pointer-events: auto;
-}
-
-.btn {
-  margin-top: 12px;
+body {
+  background: #000;
+  font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 </style>
