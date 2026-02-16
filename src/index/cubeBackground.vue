@@ -44,6 +44,52 @@ const CONFIG = {
   sizeJitter: 3,    // 你要的 ±5 波动
 };
 
+type Burst = {
+  active: boolean;
+  start: number;
+  origin: V2;
+  durIn: number;   // 收束时长
+  durOut: number;  // 散开时长
+  didReset: boolean;
+};
+
+const burst: Burst = {
+  active: false,
+  start: 0,
+  origin: { x: 0, y: 0 },
+  durIn: 220,
+  durOut: 520,
+  didReset: false,
+};
+
+function easeInOutCubic(x: number) {
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
+function getBurstScale(now: number) {
+  if (!burst.active) return 1;
+
+  const t = now - burst.start;
+  const total = burst.durIn + burst.durOut;
+
+  if (t >= total) {
+    burst.active = false;
+    burst.didReset = false;
+    return 1;
+  }
+
+  // 收束：1->0
+  if (t <= burst.durIn) {
+    const u = easeInOutCubic(clamp(t / burst.durIn, 0, 1));
+    // u:0->1  => scale:1->0
+    return 1 - u;
+  }
+
+  // 散开：0->1
+  const v = easeInOutCubic(clamp((t - burst.durIn) / burst.durOut, 0, 1));
+  return v;
+}
+
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
@@ -100,7 +146,6 @@ class Cube {
       return;
     }
 
-    // 目标位置：cursor + 偏移（可轻微绕行）
     let ox = this.off.x;
     let oy = this.off.y;
 
@@ -112,10 +157,19 @@ class Cube {
       ox = rx; oy = ry;
     }
 
-    const tx = cursor.x + ox;
-    const ty = cursor.y + oy;
+    const now = performance.now();
+    const k = getBurstScale(now); // 1(正常) → 0(收束到中心) → 1(再散开)
 
-    // 第一次出现：直接放到目标附近，避免从屏外飞进来
+    const cx = burst.active ? burst.origin.x : cursor.x;
+    const cy = burst.active ? burst.origin.y : cursor.y;
+
+    if (burst.active && !burst.didReset && k <= 0.02) {
+      burst.didReset = true;
+    }
+
+    const tx = cx + ox * k;
+    const ty = cy + oy * k;
+
     if (this.p.x < -1000) {
       this.p.x = tx + (Math.random() - 0.5) * 30;
       this.p.y = ty + (Math.random() - 0.5) * 30;
@@ -241,6 +295,24 @@ function onPointerLeave() {
   hasPointer = false;
 }
 
+function onPointerDown(e: PointerEvent) {
+  // 只处理左键（鼠标）/触摸
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+
+  // 以“点击点”为中心收束（你也可以改成屏幕中心：{x: w/2, y: h/2}）
+  burst.active = true;
+  burst.start = performance.now();
+  burst.origin.x = e.clientX;
+  burst.origin.y = e.clientY;
+  burst.didReset = false;
+
+  // 顺手让它也算“有指针”，避免你 idleHide 的可见性逻辑突然把它关掉
+  hasPointer = true;
+  lastMoveAt = performance.now();
+  cursor.x = e.clientX;
+  cursor.y = e.clientY;
+}
+
 function loop(t: number) {
   if (!ctx) return;
 
@@ -251,11 +323,31 @@ function loop(t: number) {
   const now = performance.now();
   const visible = hasPointer && (now - lastMoveAt) <= CONFIG.idleHideMs;
 
+  if (burst.active && !burst.didReset) {
+    const k = getBurstScale(now);
+    if (k <= 0.02) {
+      burst.didReset = true;
+      for (const c of cubes) c.resetOffset();
+    }
+  }
+
+  for (const c of cubes) c.step(t, visible);
+  for (const c of cubes) c.draw(ctx, t);
   for (const c of cubes) c.step(t, visible);
   for (const c of cubes) c.draw(ctx, t);
 
   raf = requestAnimationFrame(loop);
 }
+
+function scrollToCoord(x: number, y: number, smooth = true) {
+  window.scrollTo({
+    left: Math.max(0, x),
+    top: Math.max(0, y),
+    behavior: smooth ? "smooth" : "auto",
+  });
+}
+
+defineExpose({ scrollToCoord });
 
 onMounted(() => {
   if (!cv.value) return;
@@ -271,6 +363,7 @@ onMounted(() => {
   window.addEventListener("resize", resize, { passive: true });
   window.addEventListener("pointermove", onPointerMove, { passive: true });
   window.addEventListener("pointerleave", onPointerLeave, { passive: true });
+  window.addEventListener("pointerdown", onPointerDown, { passive: true });
 
   raf = requestAnimationFrame(loop);
 });
@@ -280,6 +373,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", resize);
   window.removeEventListener("pointermove", onPointerMove);
   window.removeEventListener("pointerleave", onPointerLeave);
+  window.removeEventListener("pointerdown", onPointerDown);
 });
 </script>
 
