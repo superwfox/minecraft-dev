@@ -10,7 +10,7 @@ hero:
   actions:
     - theme: sponsor
       text: 浏览网站
-      link: 
+      link: https://minecraft-dev-platform.pages.dev/
 
 features:
   - title: 服务器相关
