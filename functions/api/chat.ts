@@ -8,7 +8,7 @@ interface Env {
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const {messages} = await context.request.json() as { messages: any[] };
+    const body = await context.request.json() as any;
     const key = context.env.DEEPSEEK_API_KEY;
 
     if (!key) return new Response("API key not configured", {status: 500});
@@ -19,7 +19,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + key,
         },
-        body: JSON.stringify({model: "deepseek-chat", messages}),
+        body: JSON.stringify({model: body.model || "deepseek-chat", messages: body.messages}),
     });
 
     if (!resp.ok) return new Response(await resp.text(), {status: resp.status});

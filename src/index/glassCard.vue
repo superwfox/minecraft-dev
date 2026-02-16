@@ -15,6 +15,7 @@
   -webkit-backdrop-filter: blur(8px);
   border-radius: 22px;
   border: 3px solid rgba(255, 255, 255, 0.03);
+  max-width: 1500px;
 }
 
 .glass2-nav {
@@ -25,6 +26,7 @@
   height: 32px;
   z-index: 20;
   align-items: center;
+  margin: 0 auto;
 }
 
 .header {

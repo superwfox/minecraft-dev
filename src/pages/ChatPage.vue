@@ -32,6 +32,9 @@
 
       <!-- fallback stream -->
       <div v-if="block.streamText" class="chat-stream">{{ block.streamText }}</div>
+
+      <!-- 错误提示 -->
+      <div v-if="block.phase === 'error'" class="chat-error">{{ block.error }}</div>
     </div>
 
     <!-- 输入框 -->
@@ -122,6 +125,11 @@ async function send() {
   font-size: 15px;
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.chat-error {
+  color: #999;
+  font-size: 14px;
 }
 
 .chat-input-wrap {

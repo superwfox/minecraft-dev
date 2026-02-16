@@ -1,5 +1,3 @@
-// 前端请求层，通过 Cloudflare Pages Functions 代理访问 DeepSeek
-
 export type ChatMsg = {
     role: string;
     content: string;
@@ -18,11 +16,11 @@ export async function askDeepSeek(prompt: string, preset: string): Promise<strin
     const response = await fetch("/api/chat", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({messages}),
+        body: JSON.stringify({model: "deepseek-chat", messages}),
     });
     if (!response.ok) throw new Error(await response.text());
-    const data = await response.json();
-    return (data as any).content;
+    const data = await response.json() as any;
+    return data.content ?? data.choices?.[0]?.message?.content ?? "";
 }
 
 export function consistChat(
@@ -38,7 +36,7 @@ export function consistChat(
         const response = await fetch("/api/stream", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({messages}),
+            body: JSON.stringify({model: "deepseek-chat", messages, stream: true}),
             signal: controller.signal,
         });
 
@@ -61,10 +59,7 @@ export function consistChat(
                 const trimmed = line.trim();
                 if (!trimmed.startsWith("data:")) continue;
                 const payload = trimmed.slice(5).trim();
-                if (payload === "[DONE]") {
-                    onDone();
-                    return;
-                }
+                if (payload === "[DONE]") { onDone(); return; }
                 try {
                     const json = JSON.parse(payload);
                     const chunk = json?.choices?.[0]?.delta?.content ?? "";

@@ -11,12 +11,13 @@ export type TodoStep = {
 export type ChatBlock = {
     id: number;
     userInput: string;
-    phase: "analyzing" | "fetching" | "rendering" | "streaming" | "done";
+    phase: "analyzing" | "fetching" | "rendering" | "streaming" | "done" | "error";
     coreType?: string;
     version?: string;
     title?: string;
     steps?: TodoStep[];
     streamText?: string;
+    error?: string;
 };
 
 let nextId = 0;

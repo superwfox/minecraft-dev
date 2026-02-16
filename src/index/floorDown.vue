@@ -36,13 +36,13 @@ const sections = [
   {
     title: "全版本覆盖",
     desc: "支持 Paper / Bukkit / Spigot / Forge / Fabric，从 1.8 到 1.21 全版本适配",
-    img: "/pageA.png",
+    img: "/pageC.png",
     action: null,
   },
   {
     title: "步骤化输出",
     desc: "返回结构化的开发步骤，每一步标注需要的事件、方法和参数，直接对照实现",
-    img: "/pageB.png",
+    img: "/pageD.png",
     action: "开始对话",
   },
 ];

@@ -1,14 +1,13 @@
 import type {Ref} from "vue";
 import type {ChatBlock} from "./chatState";
 import {addBlock} from "./chatState";
-import {getInfo, getTodoList} from "../../funtions/AdvancedRequest";
-import {consistChat} from "../../funtions/DeepseekRequester";
-import type {ChatMsg} from "../../funtions/DeepseekRequester";
+import {getInfo, getTodoList} from "../api/AdvancedRequest";
+import {consistChat} from "../api/DeepseekRequester";
+import type {ChatMsg} from "../api/DeepseekRequester";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
 const VERSIONS = [
-    "1.8", "1.9", "1.10", "1.11", "1.12", "1.13",
-    "1.14", "1.15", "1.16", "1.17", "1.18", "1.19", "1.20", "1.21",
+    "1.21", "1.20", "1.19", "1.18", "1.17", "1.16", "1.15", "1.14", "1.13", "1.12", "1.11", "1.10", "1.9", "1.8", "1.7"
 ];
 
 export {CORE_TYPES, VERSIONS};
@@ -28,10 +27,10 @@ export async function handleUserInput(
     try {
         const raw = await getInfo(input);
         info = tryParseJson(raw);
-    } catch {
-        block.phase = "streaming";
-        centerText.value = "对话中";
-        fallbackStream(block, input, centerText);
+    } catch (e: any) {
+        block.phase = "error";
+        block.error = "需求分析失败: " + (e?.message || e);
+        centerText.value = "请求失败";
         return;
     }
 
@@ -74,10 +73,10 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
     try {
         const raw = await getTodoList(prompt);
         steps = tryParseJson(raw);
-    } catch {
-        block.phase = "streaming";
-        centerText.value = "对话中";
-        fallbackStream(block, block.userInput, centerText);
+    } catch (e: any) {
+        block.phase = "error";
+        block.error = "步骤生成失败: " + (e?.message || e);
+        centerText.value = "请求失败";
         return;
     }
 
