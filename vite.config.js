@@ -29,9 +29,15 @@ export default defineConfig(({mode}) => {
                     target: 'https://api.deepseek.com',
                     changeOrigin: true,
                     rewrite: () => '/v1/chat/completions',
+                    headers: {'Accept-Encoding': 'identity'},
                     configure: (proxy) => {
                         proxy.on('proxyReq', (proxyReq) => {
                             proxyReq.setHeader('Authorization', 'Bearer ' + apiKey)
+                            proxyReq.setHeader('Accept-Encoding', 'identity')
+                        })
+                        proxy.on('proxyRes', (proxyRes) => {
+                            delete proxyRes.headers['content-encoding']
+                            delete proxyRes.headers['content-length']
                         })
                     },
                 },

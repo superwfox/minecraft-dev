@@ -16,7 +16,7 @@ export type ChatBlock = {
     version?: string;
     title?: string;
     steps?: TodoStep[];
-    streamText?: string;
+    streamText: string;
     error?: string;
 };
 

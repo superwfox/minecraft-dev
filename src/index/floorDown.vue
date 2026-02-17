@@ -8,7 +8,8 @@
         <button v-if="item.action" class="floor-btn" @click="goChat">{{ item.action }}</button>
       </div>
       <div class="floor-img-wrap">
-        <img :src="item.img" class="floor-img" alt="">
+        <img :src="item.img" class="floor-img floor-img-loading"
+             @load="(e: Event) => (e.target as HTMLElement).classList.remove('floor-img-loading')" alt="">
       </div>
     </section>
   </div>
@@ -111,6 +112,12 @@ const sections = [
   display: block;
   border-radius: 16px;
   opacity: 0.95;
+  transition: filter 0.6s ease, opacity 0.6s ease;
+}
+
+.floor-img-loading {
+  filter: blur(20px);
+  opacity: 0;
 }
 
 .floor-img-wrap::before,

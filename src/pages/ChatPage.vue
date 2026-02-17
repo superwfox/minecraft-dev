@@ -125,6 +125,7 @@ async function send() {
   font-size: 15px;
   line-height: 1.6;
   white-space: pre-wrap;
+  font-family: system-ui, sans-serif;
 }
 
 .chat-error {

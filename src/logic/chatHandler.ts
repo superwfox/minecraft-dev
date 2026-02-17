@@ -12,12 +12,22 @@ const VERSIONS = [
 
 export {CORE_TYPES, VERSIONS};
 
+let hasRendered = false;
+const chatHistory: ChatMsg[] = [];
+
 export async function handleUserInput(
     input: string,
     centerText: Ref<string>,
     onNeedSelect: (block: ChatBlock, missing: ("coreType" | "version")[]) => void,
 ) {
     const block = addBlock(input);
+
+    if (hasRendered) {
+        block.phase = "streaming";
+        centerText.value = "对话中";
+        fallbackStream(block, input, centerText);
+        return;
+    }
 
     // 阶段1: 需求分析
     centerText.value = "正在分析需求...";
@@ -91,6 +101,7 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
     centerText.value = "渲染完成";
     block.phase = "rendering";
     block.steps = steps;
+    hasRendered = true;
 
     setTimeout(() => {
         block.phase = "done";
@@ -98,11 +109,12 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
 }
 
 function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>) {
-    const history: ChatMsg[] = [];
     block.streamText = "";
-    consistChat(history, input, (chunk) => {
-        block.streamText += chunk;
+    consistChat(chatHistory, input, (chunk) => {
+        block.streamText = block.streamText + chunk;
     }, () => {
+        chatHistory.push({role: "user", content: input});
+        chatHistory.push({role: "assistant", content: block.streamText || ""});
         block.phase = "done";
         centerText.value = "就绪";
     });

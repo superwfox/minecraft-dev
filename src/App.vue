@@ -32,6 +32,14 @@ provide("centerText", centerText);
 </script>
 
 <style>
+@font-face {
+  font-family: "ZhuoKai";
+  src: url("/jiangxizhuokai_subset.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -40,6 +48,6 @@ provide("centerText", centerText);
 
 body {
   background: #000;
-  font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 </style>

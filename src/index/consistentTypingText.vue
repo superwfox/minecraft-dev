@@ -86,7 +86,7 @@ onBeforeUnmount(() => clearTimeout(timer));
   font-size: 58px;
   color: white;
   text-shadow: 0 0 8px wheat;
-  font-family: system-ui, sans-serif;
+  font-family: "ZhuoKai", system-ui, sans-serif;
   white-space: nowrap;
   user-select: none;
   pointer-events: none;

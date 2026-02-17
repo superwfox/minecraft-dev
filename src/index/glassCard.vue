@@ -9,7 +9,7 @@
   display: flex;
   padding: 22px;
   color: wheat;
-  font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "HarmonyOS Sans SC", "Source Han Sans SC", sans-serif;
+  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: rgba(255, 255, 255, 0.02);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
