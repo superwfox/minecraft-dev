@@ -1,4 +1,4 @@
-import {reactive} from "vue";
+import {reactive, ref} from "vue";
 
 export type TodoStep = {
     step: number;
@@ -23,6 +23,7 @@ export type ChatBlock = {
 let nextId = 0;
 
 export const chatBlocks = reactive<ChatBlock[]>([]);
+export const streamTick = ref(0);
 
 export function addBlock(userInput: string): ChatBlock {
     const block: ChatBlock = {

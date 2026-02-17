@@ -1,6 +1,6 @@
 import type {Ref} from "vue";
 import type {ChatBlock} from "./chatState";
-import {addBlock} from "./chatState";
+import {addBlock, streamTick} from "./chatState";
 import {getInfo, getTodoList} from "../api/AdvancedRequest";
 import {consistChat} from "../api/DeepseekRequester";
 import type {ChatMsg} from "../api/DeepseekRequester";
@@ -112,6 +112,7 @@ function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>
     block.streamText = "";
     consistChat(chatHistory, input, (chunk) => {
         block.streamText = block.streamText + chunk;
+        streamTick.value++;
     }, () => {
         chatHistory.push({role: "user", content: input});
         chatHistory.push({role: "assistant", content: block.streamText || ""});

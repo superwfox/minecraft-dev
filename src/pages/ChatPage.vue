@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-page">
+  <div class="chat-page" :data-tick="streamTick">
     <div v-for="block in chatBlocks" :key="block.id" class="glass2 chat-block">
       <div class="chat-user-input">{{ block.userInput }}</div>
 
@@ -49,7 +49,7 @@
 import {ref, inject, nextTick} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
-import {chatBlocks} from "../logic/chatState";
+import {chatBlocks, streamTick} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS} from "../logic/chatHandler";
 import StepRender from "../logic/StepRender.vue";
 
