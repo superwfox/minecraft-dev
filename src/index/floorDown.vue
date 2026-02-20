@@ -29,8 +29,8 @@ const sections = [
     action: "立即体验",
   },
   {
-    title: "AI 驱动的开发指导",
-    desc: "描述你的需求，AI 会将其拆解为可执行的开发步骤，包含事件监听、方法调用和参数说明",
+    title: "由 DeepSeek 驱动",
+    desc: "6710亿参数模型，全面助力您的插件开发",
     img: "/pageB.png",
     action: null,
   },
