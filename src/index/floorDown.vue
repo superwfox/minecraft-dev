@@ -75,7 +75,7 @@ const sections = [
 .floor-title {
   font-size: 36px;
   margin-bottom: 16px;
-  font-family: system-ui, sans-serif;
+  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 .floor-desc {
@@ -92,6 +92,7 @@ const sections = [
   background: rgba(255,255,255,0.05);
   color: wheat;
   font-size: 15px;
+  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   cursor: pointer;
   backdrop-filter: blur(6px);
   transition: background 0.2s;
