@@ -4,6 +4,6 @@
 </template>
 
 <script setup lang="ts">
-import ConsistantTypingText from "../index/consistentTypingText.vue";
-import FloorDown from "../index/floorDown.vue";
+import ConsistantTypingText from "../components/consistentTypingText.vue";
+import FloorDown from "../components/floorDown.vue";
 </script>

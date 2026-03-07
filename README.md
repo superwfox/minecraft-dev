@@ -6,28 +6,28 @@
 
 ```
 src/
-├── api/                  # 前端请求层，调用 /api/* 代理接口
-│   ├── DeepseekRequester.ts   # 底层请求：非流式 + SSE 流式
-│   └── AdvancedRequest.ts     # 业务请求：需求分析、步骤生成
+├── api/                  # 前端请求层
+│   └── deepseek.ts            # 非流式 + SSE 流式 + 业务 prompt
 ├── logic/                # 对话状态与处理流程
 │   ├── chatState.ts           # 响应式对话状态（reactive）
-│   ├── chatHandler.ts         # 三阶段处理：分析 → 生成 → 渲染
+│   └── chatHandler.ts         # 三阶段处理：分析 → 生成 → 渲染
+├── components/           # 通用组件
+│   ├── cubeBackground.vue     # Canvas 粒子背景
+│   ├── glassCard.vue          # 毛玻璃导航栏 + 通用样式
+│   ├── consistentTypingText.vue  # 打字机效果
+│   ├── floorDown.vue          # 滚动展示区
 │   └── StepRender.vue         # 步骤渲染组件
 ├── pages/                # 路由页面
 │   ├── HomePage.vue           # 首页：打字机 + 滚动展示
 │   └── ChatPage.vue           # 对话页：输入 → 选择 → 结果
-├── index/                # 首页子组件
-│   ├── cubeBackground.vue     # Canvas 粒子背景
-│   ├── glassCard.vue          # 毛玻璃导航栏 + 通用样式
-│   ├── ConsistantTypingText.vue  # 打字机效果
-│   └── FloorDown.vue          # 滚动展示区
 ├── App.vue               # 根组件：背景 + 导航 + router-view
 ├── router.ts             # vue-router 路由配置
 └── main.js               # 入口
 
 functions/api/            # Cloudflare Pages Functions（服务端）
 ├── chat.ts               # 非流式代理，注入 API Key 转发 DeepSeek
-└── stream.ts             # 流式代理，SSE 透传
+├── stream.ts             # 流式代理，SSE 透传
+└── generate.ts           # 占位：代码生成接口（待实现）
 
 docs/                     # VitePress 项目文档
 ```

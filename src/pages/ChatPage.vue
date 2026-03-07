@@ -51,7 +51,7 @@ import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, streamTick} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS} from "../logic/chatHandler";
-import StepRender from "../logic/StepRender.vue";
+import StepRender from "../components/StepRender.vue";
 
 const centerText = inject<Ref<string>>("centerText")!;
 

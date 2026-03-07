@@ -1,16 +1,15 @@
-import type {Ref} from "vue";
-import type {ChatBlock} from "./chatState";
-import {addBlock, streamTick} from "./chatState";
-import {getInfo, getTodoList} from "../api/AdvancedRequest";
-import {consistChat} from "../api/DeepseekRequester";
-import type {ChatMsg} from "../api/DeepseekRequester";
+import type { Ref } from "vue";
+import type { ChatBlock } from "./chatState";
+import { addBlock, streamTick } from "./chatState";
+import { getInfo, getTodoList, consistChat } from "../api/deepseek";
+import type { ChatMsg } from "../api/deepseek";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
 const VERSIONS = [
     "1.21", "1.20", "1.19", "1.18", "1.17", "1.16", "1.15", "1.14", "1.13", "1.12", "1.11", "1.10", "1.9", "1.8", "1.7"
 ];
 
-export {CORE_TYPES, VERSIONS};
+export { CORE_TYPES, VERSIONS };
 
 let hasRendered = false;
 const chatHistory: ChatMsg[] = [];
@@ -114,8 +113,8 @@ function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>
         block.streamText = block.streamText + chunk;
         streamTick.value++;
     }, () => {
-        chatHistory.push({role: "user", content: input});
-        chatHistory.push({role: "assistant", content: block.streamText || ""});
+        chatHistory.push({ role: "user", content: input });
+        chatHistory.push({ role: "assistant", content: block.streamText || "" });
         block.phase = "done";
         centerText.value = "就绪";
     });

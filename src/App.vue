@@ -20,8 +20,8 @@
 
 <script setup lang="ts">
 import {provide, ref} from "vue";
-import CubeBackground from "./index/cubeBackground.vue";
-import GlassCard from "./index/glassCard.vue";
+import CubeBackground from "./components/cubeBackground.vue";
+import GlassCard from "./components/glassCard.vue";
 import {useRouter} from "vue-router";
 
 const router = useRouter();

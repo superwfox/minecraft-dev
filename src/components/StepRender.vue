@@ -20,7 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import type {ChatBlock} from "./chatState";
+import type {ChatBlock} from "../logic/chatState";
 defineProps<{ block: ChatBlock }>();
 </script>
 
