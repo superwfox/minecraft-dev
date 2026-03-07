@@ -35,23 +35,26 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         genTask.logs.push(`✅ 项目规划完成，共 ${genTask.files.length} 个文件`);
 
         setPhase("generating");
-        for (let i = 0; i < genTask.files.length; i++) {
+        let remaining = genTask.files.length;
+        for (let i = 0; i < genTask.files.length && remaining > 0; i++) {
             genTask.files[i].status = "generating";
             genTask.currentIndex = i;
-            genTask.logs.push(`正在生成 ${genTask.files[i].path}...`);
 
             const fileResult = await post("/api/generate/file", { taskId: genTask.taskId });
+            if (fileResult.done) break;
+
             genTask.files[i].content = fileResult.content;
             genTask.files[i].status = "done";
-            genTask.logs.push(`✅ ${genTask.files[i].path}`);
+            genTask.logs.push(`✅ ${genTask.files[i].path}${fileResult.reworkCount > 0 ? ` (修正${fileResult.reworkCount}次)` : ""}`);
+            remaining = fileResult.remaining ?? (genTask.files.length - i - 1);
         }
 
         setPhase("verifying", "正在校验文件完整性...");
         const verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
         if (!verifyResult.verified) {
-            throw new Error(`文件校验失败，缺失: ${verifyResult.missing.join(", ")}`);
+            throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
         }
-        genTask.logs.push("✅ 文件校验通过");
+        genTask.logs.push(`✅ 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
 
         setPhase("uploading", "正在上传到 GitHub 并触发构建...");
         const buildResult = await post("/api/generate/build", { taskId: genTask.taskId });
