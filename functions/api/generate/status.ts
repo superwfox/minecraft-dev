@@ -1,4 +1,4 @@
-import { getRunStatus, getArtifactInfo, findRunByBranch } from "../../_lib/github";
+import { getRunStatus, getArtifactInfo, findRunByBranch, deleteBranch } from "../../_lib/github";
 
 interface Env {
     GITHUB_PAT: string;
@@ -52,6 +52,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         state.status = "error";
         state.error = `构建失败: ${conclusion}`;
         state.logs.push(`❌ 构建结果: ${conclusion}`);
+    }
+
+    // 构建结束后始终删除临时分支
+    if (state.buildBranch) {
+        deleteBranch(token, state.buildBranch).catch(() => { });
     }
 
     await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });

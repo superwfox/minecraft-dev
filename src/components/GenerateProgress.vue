@@ -1,64 +1,75 @@
 <template>
-  <div class="gen-progress">
-    <!-- 阶段指示 -->
-    <div class="gen-phases">
-      <span v-for="p in phases" :key="p.key" class="gen-phase"
-            :class="{active: p.key === genTask.phase, done: phaseOrder(p.key) < phaseOrder(genTask.phase)}">
-        {{ p.label }}
-      </span>
-    </div>
-
-    <!-- 项目信息 -->
-    <div v-if="genTask.projectName" class="gen-info">
-      <span class="tag">{{ genTask.projectName }}</span>
-      <span class="tag">Java {{ genTask.javaVersion }}</span>
-      <span class="tag">{{ genTask.packageName }}</span>
-    </div>
-
-    <!-- 文件列表 -->
-    <div v-if="genTask.files.length" class="gen-files">
-      <div v-for="(f, i) in genTask.files" :key="f.path" class="gen-file"
-           :class="f.status" @click="toggleExpand(i)">
-        <span class="gen-file-icon">
-          {{ f.status === "done" ? "✅" : f.status === "generating" ? "🔄" : "⏳" }}
+  <div class="gen-wrap" ref="wrapRef">
+    <!-- 规划卡片 -->
+    <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
+      <div class="gen-card-title">📋 项目规划</div>
+      <div class="gen-phases">
+        <span v-for="p in phases" :key="p.key" class="gen-phase"
+              :class="{active: p.key === genTask.phase, done: phaseOrder(p.key) < phaseOrder(genTask.phase)}">
+          {{ p.label }}
         </span>
-        <span class="gen-file-path">{{ f.path }}</span>
-        <span class="gen-file-role">{{ f.role }}</span>
       </div>
-      <!-- 当前文件内容预览 -->
+      <div v-if="genTask.projectName" class="gen-info">
+        <span class="tag">{{ genTask.projectName }}</span>
+        <span class="tag">Java {{ genTask.javaVersion }}</span>
+        <span class="tag">{{ genTask.packageName }}</span>
+      </div>
+    </div>
+
+    <!-- 文件生成卡片 -->
+    <div class="glass2 gen-card" v-if="genTask.files.length">
+      <div class="gen-card-title">📝 代码生成</div>
+      <div class="gen-files">
+        <div v-for="(f, i) in genTask.files" :key="f.path" class="gen-file"
+             :class="f.status" @click="toggleExpand(i)">
+          <span class="gen-file-icon">
+            {{ f.status === "done" ? "✅" : f.status === "generating" ? "🔄" : "⏳" }}
+          </span>
+          <span class="gen-file-path">{{ f.path }}</span>
+          <span class="gen-file-role">{{ f.role }}</span>
+        </div>
+      </div>
       <div v-if="expandedIndex >= 0 && genTask.files[expandedIndex]?.content" class="gen-preview">
         <pre>{{ genTask.files[expandedIndex].content }}</pre>
       </div>
     </div>
 
-    <!-- 构建等待 -->
-    <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
-      <div class="gen-spinner"></div>
-      <span>{{ genTask.phase === "uploading" ? "上传中..." : "构建中，请稍候..." }}</span>
+    <!-- 构建卡片 -->
+    <div class="glass2 gen-card" v-if="showBuild">
+      <div class="gen-card-title">🔨 构建</div>
+      <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
+        <div class="gen-spinner"></div>
+        <span>{{ genTask.phase === "uploading" ? "上传中..." : "构建中，请稍候..." }}</span>
+      </div>
+      <div v-if="genTask.phase === 'done'" class="gen-done">
+        <a :href="downloadUrl" class="gen-download-btn">📦 下载 JAR</a>
+      </div>
+      <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
     </div>
 
-    <!-- 完成 -->
-    <div v-if="genTask.phase === 'done'" class="gen-done">
-      <a :href="downloadUrl" class="gen-download-btn">下载 JAR</a>
-    </div>
-
-    <!-- 错误 -->
-    <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
-
-    <!-- 日志 -->
-    <div class="gen-logs">
-      <div v-for="(log, i) in genTask.logs" :key="i" class="gen-log">{{ log }}</div>
+    <!-- 日志卡片 -->
+    <div class="glass2 gen-card" v-if="genTask.logs.length">
+      <div class="gen-card-title">📜 日志</div>
+      <div class="gen-logs" ref="logRef">
+        <div v-for="(log, i) in genTask.logs" :key="i" class="gen-log">{{ log }}</div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import {ref, computed} from "vue";
+import {ref, computed, watch, nextTick} from "vue";
 import {genTask} from "../logic/generateState";
 import {getDownloadUrl} from "../logic/generateHandler";
 
 const expandedIndex = ref(-1);
 const downloadUrl = computed(() => getDownloadUrl());
+const wrapRef = ref<HTMLElement | null>(null);
+const logRef = ref<HTMLElement | null>(null);
+
+const showBuild = computed(() =>
+    ["uploading", "building", "polling", "done", "error"].includes(genTask.phase)
+);
 
 const phases = [
     {key: "planning", label: "规划"},
@@ -71,13 +82,35 @@ const phases = [
 const ORDER: Record<string, number> = {idle: 0, planning: 1, generating: 2, verifying: 3, uploading: 4, building: 4, polling: 4, done: 5, error: -1};
 function phaseOrder(key: string) { return ORDER[key] ?? 0; }
 function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value === i ? -1 : i; }
+
+watch(() => genTask.logs.length, async () => {
+    await nextTick();
+    logRef.value?.scrollTo({top: logRef.value.scrollHeight, behavior: "smooth"});
+    wrapRef.value?.lastElementChild?.scrollIntoView({behavior: "smooth", block: "end"});
+});
+
+watch(() => genTask.phase, async () => {
+    await nextTick();
+    wrapRef.value?.lastElementChild?.scrollIntoView({behavior: "smooth", block: "end"});
+});
 </script>
 
 <style scoped>
-.gen-progress {
+.gen-wrap {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.gen-card {
+  flex-direction: column;
+  gap: 12px;
+  height: auto;
+}
+.gen-card-title {
+  font-size: 14px;
+  color: rgba(255,255,255,0.5);
+  user-select: none;
 }
 
 .gen-phases {
@@ -120,6 +153,8 @@ function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value ===
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 .gen-file {
   display: flex;
@@ -135,7 +170,6 @@ function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value ===
 .gen-file.done { color: rgba(255,255,255,0.8); }
 .gen-file.generating { color: wheat; }
 .gen-file.pending { color: rgba(255,255,255,0.3); }
-
 .gen-file-icon { flex: 0 0 20px; }
 .gen-file-path { color: inherit; font-family: monospace; }
 .gen-file-role { margin-left: auto; color: rgba(255,255,255,0.3); font-size: 12px; }
@@ -144,9 +178,8 @@ function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value ===
   background: rgba(0,0,0,0.3);
   border-radius: 10px;
   padding: 14px;
-  overflow-x: auto;
   max-height: 300px;
-  overflow-y: auto;
+  overflow: auto;
 }
 .gen-preview pre {
   color: rgba(255,255,255,0.8);
@@ -198,6 +231,7 @@ function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value ===
   gap: 2px;
   max-height: 200px;
   overflow-y: auto;
+  scroll-behavior: smooth;
 }
 .gen-log {
   font-size: 12px;

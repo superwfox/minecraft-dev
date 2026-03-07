@@ -1,28 +1,54 @@
 const REPO = "superwfox/minecraft-dev-workflow";
 const BASE = `https://api.github.com/repos/${REPO}`;
 
-function headers(token: string) {
+function gh(token: string) {
     return {
         Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
         "Content-Type": "application/json",
+        "User-Agent": "mc-devtool",
     };
 }
 
 async function ghFetch(token: string, path: string, init?: RequestInit) {
-    const resp = await fetch(`${BASE}${path}`, { ...init, headers: { ...headers(token), ...init?.headers } });
+    const url = `${BASE}${path}`;
+    const resp = await fetch(url, {
+        ...init,
+        headers: { ...gh(token), ...init?.headers },
+    });
     if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`GitHub ${resp.status}: ${text}`);
+        const body = await resp.text();
+        throw new Error(`GitHub ${init?.method || "GET"} ${path} → ${resp.status}: ${body}`);
     }
     return resp;
 }
 
+function toBase64(text: string): string {
+    const bytes = new TextEncoder().encode(text);
+    let binary = "";
+    for (const b of bytes) binary += String.fromCharCode(b);
+    return btoa(binary);
+}
+
 export async function getDefaultBranchSha(token: string): Promise<{ branch: string; sha: string }> {
     const repo = await (await ghFetch(token, "")).json() as any;
-    const branch = repo.default_branch;
-    const ref = await (await ghFetch(token, `/git/ref/heads/${branch}`)).json() as any;
-    return { branch, sha: ref.object.sha };
+    const branch = repo.default_branch || "main";
+
+    try {
+        const ref = await (await ghFetch(token, `/git/ref/heads/${branch}`)).json() as any;
+        return { branch, sha: ref.object.sha };
+    } catch {
+        // 空仓库，创建初始 commit
+        await ghFetch(token, "/contents/README.md", {
+            method: "PUT",
+            body: JSON.stringify({
+                message: "init",
+                content: toBase64("# minecraft-dev-workflow\nBuild repository for MC DevTool\n"),
+            }),
+        });
+        const ref = await (await ghFetch(token, `/git/ref/heads/${branch}`)).json() as any;
+        return { branch, sha: ref.object.sha };
+    }
 }
 
 export async function createBranch(token: string, sha: string, name: string) {
@@ -33,10 +59,9 @@ export async function createBranch(token: string, sha: string, name: string) {
 }
 
 export async function uploadFile(token: string, branch: string, path: string, content: string) {
-    const encoded = btoa(unescape(encodeURIComponent(content)));
     await ghFetch(token, `/contents/${path}`, {
         method: "PUT",
-        body: JSON.stringify({ message: `add ${path}`, content: encoded, branch }),
+        body: JSON.stringify({ message: `add ${path}`, content: toBase64(content), branch }),
     });
 }
 
@@ -48,7 +73,8 @@ export async function triggerWorkflow(token: string, branch: string, javaVersion
 }
 
 export async function findRunByBranch(token: string, branch: string, afterTime: string): Promise<number | null> {
-    const resp = await ghFetch(token, `/actions/workflows/maven.yml/runs?branch=${branch}&created=>${afterTime}&per_page=1`);
+    const q = afterTime ? `&created=>${afterTime}` : "";
+    const resp = await ghFetch(token, `/actions/workflows/maven.yml/runs?branch=${branch}${q}&per_page=1`);
     const data = await resp.json() as any;
     return data.workflow_runs?.[0]?.id ?? null;
 }
@@ -66,9 +92,16 @@ export async function getArtifactInfo(token: string, runId: number): Promise<{ i
 
 export async function downloadArtifact(token: string, artifactId: number): Promise<Response> {
     const resp = await fetch(`${BASE}/actions/artifacts/${artifactId}/zip`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
-        redirect: "follow",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mc-devtool" },
+        redirect: "manual",
     });
+    if (resp.status === 302) {
+        const location = resp.headers.get("Location");
+        if (!location) throw new Error("No redirect URL");
+        const dl = await fetch(location);
+        if (!dl.ok) throw new Error(`Download failed: ${dl.status}`);
+        return dl;
+    }
     if (!resp.ok) throw new Error(`Download failed: ${resp.status}`);
     return resp;
 }

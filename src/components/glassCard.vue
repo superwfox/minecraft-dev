@@ -11,8 +11,8 @@
   color: wheat;
   font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px) brightness(0.75);
+  -webkit-backdrop-filter: blur(8px) brightness(0.75);
   border-radius: 22px;
   border: 3px solid rgba(255, 255, 255, 0.03);
   max-width: 1500px;

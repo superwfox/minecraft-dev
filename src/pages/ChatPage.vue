@@ -44,9 +44,7 @@
     </div>
 
     <!-- 生成进度 -->
-    <div v-if="genTask.phase !== 'idle'" class="glass2 chat-block">
-      <GenerateProgress/>
-    </div>
+    <GenerateProgress v-if="genTask.phase !== 'idle'"/>
 
     <!-- 输入框 -->
     <div class="glass2 chat-input-wrap">
@@ -104,12 +102,26 @@ async function send() {
     window.scrollTo({top: document.body.scrollHeight, behavior: "smooth"});
 }
 
-import type {ChatBlock} from "../logic/chatState";
 function onGenerate(block: ChatBlock) {
     if (!block.coreType || !block.version) return;
-    centerText.value = "正在生成项目...";
     startGenerate(block.userInput, block.coreType, block.version);
 }
+
+import {watch} from "vue";
+const phaseLabels: Record<string, string> = {
+    planning: "正在规划项目...",
+    generating: "正在生成代码...",
+    verifying: "正在校验文件...",
+    uploading: "正在上传构建...",
+    building: "正在编译打包...",
+    polling: "正在编译打包...",
+    done: "JAR 已就绪",
+    error: "生成失败",
+};
+watch(() => genTask.phase, (p) => {
+    if (p !== "idle") centerText.value = phaseLabels[p] || p;
+});
+
 </script>
 
 <style scoped>
