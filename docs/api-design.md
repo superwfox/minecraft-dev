@@ -43,3 +43,40 @@ AI 返回的开发步骤使用 JSON 数组格式：
 **第二次：getTodoList** — 将确认后的参数 + 原始需求组合为精确的 JSON prompt 发送，返回步骤数组。
 
 这种拆分的好处是：第一次请求轻量快速，用于校验和补全信息；第二次请求带着完整上下文，生成质量更高。避免了一次性发送模糊需求导致 AI 返回不可用结果的问题。
+
+## 代码生成 API
+
+代码生成通过 6 个端点逐步完成：
+
+### `POST /api/generate/plan`
+
+输入：`{ userPrompt, coreType, version }`
+
+Planner 使用 `response_format: json_object` 强制 DeepSeek 输出结构化 JSON。返回项目名、Java 版本、包名和文件树。同时在 Cloudflare KV 中创建任务记录。
+
+### `POST /api/generate/file`
+
+输入：`{ taskId }`
+
+从 KV 读取任务状态，取下一个待生成文件，调用 DeepSeek 生成代码。每次传入已生成文件的摘要（前 3 行截断），保证跨文件引用一致。前端循环调用直到所有文件生成完毕。
+
+### `POST /api/generate/verify`
+
+输入：`{ taskId }`
+
+对比 plan 中的文件列表和 generatedFiles，返回是否全部生成。
+
+### `POST /api/generate/build`
+
+输入：`{ taskId }`
+
+从 KV 读取所有文件 → 创建 GitHub 临时分支 → 逐个上传 → 触发 `workflow_dispatch` → 返回 runId。
+
+### `GET /api/generate/status?taskId=xxx`
+
+轮询 GitHub Actions run 状态。构建完成后自动获取 artifact 信息写入 KV。
+
+### `GET /api/generate/download?taskId=xxx`
+
+代理下载 GitHub artifact（zip 包含 JAR），同时清理临时分支和 KV 记录。
+

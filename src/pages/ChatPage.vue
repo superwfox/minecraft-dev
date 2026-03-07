@@ -30,11 +30,22 @@
       <!-- 渲染结构化步骤 -->
       <StepRender v-if="block.steps && block.steps.length" :block="block"/>
 
+      <!-- 生成项目按钮 -->
+      <button v-if="block.phase === 'done' && block.steps && block.steps.length && genTask.phase === 'idle'"
+              class="floor-btn" @click="onGenerate(block)">
+        生成项目 & 构建 JAR
+      </button>
+
       <!-- fallback stream -->
       <div v-if="block.streamText" class="chat-stream">{{ block.streamText }}</div>
 
       <!-- 错误提示 -->
       <div v-if="block.phase === 'error'" class="chat-error">{{ block.error }}</div>
+    </div>
+
+    <!-- 生成进度 -->
+    <div v-if="genTask.phase !== 'idle'" class="glass2 chat-block">
+      <GenerateProgress/>
     </div>
 
     <!-- 输入框 -->
@@ -52,6 +63,9 @@ import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, streamTick} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS} from "../logic/chatHandler";
 import StepRender from "../components/StepRender.vue";
+import GenerateProgress from "../components/GenerateProgress.vue";
+import {genTask} from "../logic/generateState";
+import {startGenerate} from "../logic/generateHandler";
 
 const centerText = inject<Ref<string>>("centerText")!;
 
@@ -88,6 +102,13 @@ async function send() {
     sending.value = false;
     await nextTick();
     window.scrollTo({top: document.body.scrollHeight, behavior: "smooth"});
+}
+
+import type {ChatBlock} from "../logic/chatState";
+function onGenerate(block: ChatBlock) {
+    if (!block.coreType || !block.version) return;
+    centerText.value = "正在生成项目...";
+    startGenerate(block.userInput, block.coreType, block.version);
 }
 </script>
 

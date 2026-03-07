@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "wrangler pages dev --compatibility-date=2024-01-01 --kv TASKS -- npx vite",
+    "cf:dev": "wrangler pages dev dist",
+    "cf:dev:proxy": "wrangler pages dev -- npx vite",
     "build": "vite build",
     "preview": "vite preview",
+    "deploy": "npm run build && wrangler pages deploy dist",
     "font:subset": "node scripts/build-font-subset.mjs"
   },
   "dependencies": {
@@ -17,7 +20,8 @@
     "@vitejs/plugin-vue": "^6.0.3",
     "subset-font": "^2.4.0",
     "vite": "^7.3.1",
-    "vite-plugin-vue-devtools": "^8.0.5"
+    "vite-plugin-vue-devtools": "^8.0.5",
+    "wrangler": "^4.71.0"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

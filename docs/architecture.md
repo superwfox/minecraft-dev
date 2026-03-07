@@ -47,3 +47,28 @@ Vite proxy 在转发时自动注入 Authorization 头，开发体验与线上一
 首页的方块粒子背景使用原生 Canvas 2D 绘制，通过 `requestAnimationFrame` 驱动渲染循环，不使用 `setInterval`。这样渲染频率自动跟随显示器刷新率，页面不可见时浏览器会自动暂停 rAF 回调，避免后台空转。
 
 方块的出现和消失通过 `scale` 属性渐变实现，`scale` 降到 0 时跳过该方块的全部物理计算和绘制调用，减少不可见元素的开销。
+
+## 项目生成与构建架构
+
+项目代码生成采用三层架构：
+
+### AI 生成层
+
+Planner 使用 `response_format: json_object` 强制模型输出结构化 JSON，包含 `projectName`、`javaVersion`、`packageName` 和文件树。文件树中每个文件带有 `path`、`role`（职责描述）和 `order`（生成顺序）。
+
+逐文件生成时，每次调用只传目标文件路径和职责，同时附带已生成文件的摘要（前 3 行，截断 120 字符），保证后续文件的 import 和引用与已生成文件一致。
+
+### 任务编排层
+
+使用 Cloudflare KV 持久化任务状态（TTL 1 小时），前端按步骤依次调用 6 个 API 端点：
+
+```
+plan → file (循环) → verify → build → status (轮询) → download
+```
+
+每个端点执行完更新 KV，前端读取返回值更新 UI。用户刷新页面后可通过 `taskId` 从 KV 恢复状态。
+
+### 构建打包层
+
+生成的文件上传到 `superwfox/minecraft-dev-workflow` 仓库的临时分支 `build-{taskId}`，通过 `workflow_dispatch` 触发 GitHub Actions 执行 Maven 构建。构建完成后，JAR 作为 artifact 上传，由 `download` 端点代理下载给用户，同时清理临时分支和 KV 记录。
+

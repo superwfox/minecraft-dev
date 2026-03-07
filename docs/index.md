@@ -6,7 +6,7 @@ hero:
   text: |
     MC 辅助开发平台
     项目文档
-  tagline: 了解技术架构、API 设计与使用方法
+  tagline: 了解技术架构、API 设计、代码生成与使用方法
   actions:
     - theme: sponsor
       text: 浏览网站
@@ -24,6 +24,10 @@ features:
   - title: 使用方法
     details: 从输入需求到获取开发步骤的完整流程
     link: /usage
+    linkText: 查看详情
+  - title: 代码生成与构建
+    details: 需求拆解 → 逐文件生成 → GitHub Actions 编译 → JAR 下载的完整链路
+    link: /code-generation
     linkText: 查看详情
 ---
 
