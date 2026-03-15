@@ -6,14 +6,23 @@ function setPhase(phase: GenPhase, log?: string) {
     if (log) genTask.logs.push(log);
 }
 
-async function post(url: string, body: any) {
-    const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    return resp.json() as any;
+async function post(url: string, body: any, maxRetries = 3) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const resp = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            return await resp.json() as any;
+        } catch (e: any) {
+            if (attempt >= maxRetries) throw e;
+            const delay = 2000 * Math.pow(2, attempt);
+            genTask.logs.push(`⚠️ 请求失败，${delay / 1000}s 后重试 (${attempt + 1}/${maxRetries})...`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
 }
 
 async function get(url: string) {

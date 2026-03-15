@@ -1,4 +1,4 @@
-﻿---
+---
 layout: home
 
 hero:
@@ -36,6 +36,10 @@ features:
   - title: 部署要点
     details: GitHub Actions 构建与 Cloudflare Pages 部署中的关键挑战
     link: /jar/deployment
+    linkText: 查看详情
+  - title: 语音识别
+    details: 讯飞 WSS 鉴权、PCM 录音采集、wpgs 动态修正流式识别
+    link: /voice-recognition
     linkText: 查看详情
 ---
 

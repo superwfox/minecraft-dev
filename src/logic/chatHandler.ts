@@ -1,6 +1,6 @@
 import type { Ref } from "vue";
 import type { ChatBlock } from "./chatState";
-import { addBlock, streamTick } from "./chatState";
+import { addBlock, chatBlocks, streamTick } from "./chatState";
 import { getInfo, getTodoList, consistChat } from "../api/deepseek";
 import type { ChatMsg } from "../api/deepseek";
 
@@ -14,6 +14,11 @@ export { CORE_TYPES, VERSIONS };
 let hasRendered = false;
 const chatHistory: ChatMsg[] = [];
 
+export type RebuildInfo = { prompt: string; coreType: string; version: string } | null;
+let _rebuildInfo: RebuildInfo = null;
+export function getRebuildInfo(): RebuildInfo { return _rebuildInfo; }
+export function clearRebuildInfo() { _rebuildInfo = null; }
+
 export async function handleUserInput(
     input: string,
     centerText: Ref<string>,
@@ -22,6 +27,17 @@ export async function handleUserInput(
     const block = addBlock(input);
 
     if (hasRendered) {
+        if (input.includes("重新生成")) {
+            const prev = [...chatBlocks].reverse().find(b => b.coreType && b.version && b.steps?.length);
+            if (prev) {
+                const combined = prev.userInput + "；追加需求：" + input.replace("重新生成", "").trim();
+                _rebuildInfo = { prompt: combined, coreType: prev.coreType!, version: prev.version! };
+                block.phase = "done";
+                block.streamText = "正在基于追加需求重新生成...";
+                centerText.value = "重新生成中";
+                return;
+            }
+        }
         block.phase = "streaming";
         centerText.value = "对话中";
         fallbackStream(block, input, centerText);

@@ -62,7 +62,7 @@ import {ref, inject, nextTick, watch} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, streamTick} from "../logic/chatState";
-import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS} from "../logic/chatHandler";
+import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo} from "../logic/chatHandler";
 import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import {genTask} from "../logic/generateState";
@@ -102,6 +102,11 @@ async function send() {
     inputText.value = "";
     sending.value = true;
     await handleUserInput(text, centerText, onNeedSelect);
+    const rebuildInfo = getRebuildInfo();
+    if (rebuildInfo && genTask.phase === "idle") {
+        clearRebuildInfo();
+        startGenerate(rebuildInfo.prompt, rebuildInfo.coreType, rebuildInfo.version);
+    }
     sending.value = false;
     await nextTick();
     window.scrollTo({top: document.body.scrollHeight, behavior: "smooth"});

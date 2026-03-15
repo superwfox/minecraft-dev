@@ -1,4 +1,4 @@
-﻿import { defineConfig } from "vitepress"
+import { defineConfig } from "vitepress"
 
 export default defineConfig({
     title: "踏海",
@@ -19,6 +19,7 @@ export default defineConfig({
                 ],
             },
             { text: "设计决策", link: "/decisions" },
+            { text: "语音识别", link: "/voice-recognition" },
         ],
         sidebar: [
             {
@@ -27,6 +28,7 @@ export default defineConfig({
                     { text: "使用方法", link: "/usage" },
                     { text: "前端实现", link: "/frontend" },
                     { text: "步骤生成", link: "/step-generation" },
+                    { text: "语音识别", link: "/voice-recognition" },
                 ],
             },
             {
