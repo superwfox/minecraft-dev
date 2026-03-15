@@ -1,4 +1,4 @@
-import { getDefaultBranchSha, createBranch, uploadFile, triggerWorkflow, findRunByBranch } from "../../_lib/github";
+import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch } from "../../_lib/github";
 
 interface Env {
     GITHUB_PAT: string;
@@ -24,10 +24,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.buildBranch = branch;
         state.logs.push(`已创建临时分支 ${branch}`);
 
+        const treeFiles: { path: string; blobSha: string }[] = [];
         for (const file of state.generatedFiles) {
-            await uploadFile(token, branch, file.path, file.content);
-            state.logs.push(`已上传 ${file.path}`);
+            const blobSha = await createBlob(token, file.content);
+            treeFiles.push({ path: file.path, blobSha });
+            state.logs.push(`已创建 blob: ${file.path}`);
         }
+
+        const treeSha = await createTree(token, sha, treeFiles);
+        await createCommitAndUpdateRef(token, treeSha, sha, branch, `build ${taskId}: ${treeFiles.length} files`);
+        state.logs.push(`已一次性提交 ${treeFiles.length} 个文件`);
 
         const beforeTrigger = new Date().toISOString();
         await triggerWorkflow(token, branch, state.javaVersion);

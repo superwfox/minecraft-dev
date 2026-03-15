@@ -106,6 +106,46 @@ export async function downloadArtifact(token: string, artifactId: number): Promi
     return resp;
 }
 
+export async function createBlob(token: string, content: string): Promise<string> {
+    const resp = await ghFetch(token, "/git/blobs", {
+        method: "POST",
+        body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+    });
+    const data = await resp.json() as any;
+    return data.sha;
+}
+
+export async function createTree(
+    token: string, baseSha: string,
+    files: { path: string; blobSha: string }[],
+): Promise<string> {
+    const tree = files.map(f => ({
+        path: f.path, mode: "100644" as const, type: "blob" as const, sha: f.blobSha,
+    }));
+    const resp = await ghFetch(token, "/git/trees", {
+        method: "POST",
+        body: JSON.stringify({ base_tree: baseSha, tree }),
+    });
+    const data = await resp.json() as any;
+    return data.sha;
+}
+
+export async function createCommitAndUpdateRef(
+    token: string, treeSha: string, parentSha: string,
+    branch: string, message: string,
+): Promise<string> {
+    const commitResp = await ghFetch(token, "/git/commits", {
+        method: "POST",
+        body: JSON.stringify({ message, tree: treeSha, parents: [parentSha] }),
+    });
+    const commit = await commitResp.json() as any;
+    await ghFetch(token, `/git/refs/heads/${branch}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sha: commit.sha }),
+    });
+    return commit.sha;
+}
+
 export async function deleteBranch(token: string, name: string) {
     try {
         await ghFetch(token, `/git/refs/heads/${name}`, { method: "DELETE" });

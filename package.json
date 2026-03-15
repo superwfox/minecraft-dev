@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler pages dev --compatibility-date=2024-01-01 --kv TASKS -- npx vite",
+    "dev": "wrangler pages dev --compatibility-date=2024-01-01 --kv TASKS --proxy=5173 -- npx vite",
     "cf:dev": "wrangler pages dev dist",
     "cf:dev:proxy": "wrangler pages dev -- npx vite",
     "build": "vite build",

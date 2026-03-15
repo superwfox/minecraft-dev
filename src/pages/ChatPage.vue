@@ -48,6 +48,9 @@
 
     <!-- 输入框 -->
     <div class="glass2 chat-input-wrap">
+      <button class="voice-btn" :class="{recording: isRecording}" @click="toggleVoice" :disabled="sending">
+        🎤
+      </button>
       <input class="chat-input" v-model="inputText" placeholder="描述你的开发需求..."
              @keydown.enter="send" :disabled="sending"/>
     </div>
@@ -55,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import {ref, inject, nextTick} from "vue";
+import {ref, inject, nextTick, watch} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, streamTick} from "../logic/chatState";
@@ -64,11 +67,13 @@ import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import {genTask} from "../logic/generateState";
 import {startGenerate} from "../logic/generateHandler";
+import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
 const centerText = inject<Ref<string>>("centerText")!;
 
 const inputText = ref("");
 const sending = ref(false);
+let voiceBaseText = "";
 
 const selectingBlock = ref<ChatBlock | null>(null);
 const missingFields = ref<("coreType" | "version")[]>([]);
@@ -107,7 +112,19 @@ function onGenerate(block: ChatBlock) {
     startGenerate(block.userInput, block.coreType, block.version);
 }
 
-import {watch} from "vue";
+function toggleVoice() {
+    if (isRecording.value) {
+        stopVoice();
+    } else {
+        voiceBaseText = inputText.value;
+        startVoice();
+    }
+}
+
+watch(voiceText, (t) => {
+    if (isRecording.value) inputText.value = voiceBaseText + t;
+});
+
 const phaseLabels: Record<string, string> = {
     planning: "正在规划项目...",
     generating: "正在生成代码...",
@@ -175,10 +192,39 @@ watch(() => genTask.phase, (p) => {
   margin: 0 auto;
   height: auto;
   z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.05);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.voice-btn:hover { border-color: rgba(255,255,255,0.4); }
+.voice-btn.recording {
+  background: rgba(255,80,80,0.3);
+  border-color: #ff5050;
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,80,80,0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(255,80,80,0); }
 }
 
 .chat-input {
-  width: 100%;
+  flex: 1;
   background: transparent;
   border: none;
   outline: none;
