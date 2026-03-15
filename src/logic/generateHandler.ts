@@ -50,7 +50,25 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         }
 
         setPhase("verifying", "正在校验文件完整性...");
-        const verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+        let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+
+        for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
+            const missingList = verifyResult.missing as string[];
+            genTask.logs.push(`⚠️ 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
+            await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
+
+            setPhase("generating");
+            for (const mp of missingList) {
+                genTask.logs.push(`🔄 补生成 ${mp}`);
+                const fileResult = await post("/api/generate/file", { taskId: genTask.taskId });
+                if (fileResult.done) break;
+                genTask.logs.push(`✅ ${fileResult.path}${fileResult.reworkCount > 0 ? ` (修正${fileResult.reworkCount}次)` : ""}`);
+            }
+
+            setPhase("verifying", "正在重新校验...");
+            verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+        }
+
         if (!verifyResult.verified) {
             throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
         }

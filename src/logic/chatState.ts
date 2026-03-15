@@ -33,7 +33,7 @@ export function addBlock(userInput: string): ChatBlock {
         streamText: "",
     };
     chatBlocks.push(block);
-    return block;
+    return chatBlocks[chatBlocks.length - 1];
 }
 
 export function resetChat() {
