@@ -80,6 +80,10 @@ const missingFields = ref<("coreType" | "version")[]>([]);
 const selectCore = ref("");
 const selectVer = ref("");
 
+function canStartGenerate() {
+    return ["idle", "done", "error"].includes(genTask.phase);
+}
+
 function onNeedSelect(block: ChatBlock, missing: ("coreType" | "version")[]) {
     selectingBlock.value = block;
     missingFields.value = missing;
@@ -103,9 +107,9 @@ async function send() {
     sending.value = true;
     await handleUserInput(text, centerText, onNeedSelect);
     const rebuildInfo = getRebuildInfo();
-    if (rebuildInfo && genTask.phase === "idle") {
+    if (rebuildInfo && canStartGenerate()) {
         clearRebuildInfo();
-        startGenerate(rebuildInfo.prompt, rebuildInfo.coreType, rebuildInfo.version);
+        await startGenerate(rebuildInfo.prompt, rebuildInfo.coreType, rebuildInfo.version);
     }
     sending.value = false;
     await nextTick();

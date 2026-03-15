@@ -1,9 +1,13 @@
-import { genTask } from "./generateState";
+import { genTask, resetGenTask } from "./generateState";
 import type { GenPhase } from "./generateState";
 
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
     if (log) genTask.logs.push(log);
+}
+
+function isGeneratingPhase(phase: GenPhase) {
+    return ["planning", "generating", "verifying", "uploading", "building", "polling"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -32,6 +36,12 @@ async function get(url: string) {
 }
 
 export async function startGenerate(userPrompt: string, coreType: string, version: string) {
+    if (isGeneratingPhase(genTask.phase)) {
+        throw new Error("当前已有构建任务正在进行");
+    }
+
+    resetGenTask();
+
     try {
         setPhase("planning", "正在分析需求，生成项目规划...");
 
