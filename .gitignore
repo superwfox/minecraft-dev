@@ -41,3 +41,9 @@ __screenshots__/
 
 .dev.vars
 public/maven.yml
+
+# Wrangler
+.wrangler/
+
+# Claude Code
+.claude/

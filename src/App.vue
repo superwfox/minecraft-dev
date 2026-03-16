@@ -38,6 +38,15 @@ provide("centerText", centerText);
   font-weight: normal;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+4E00-9FFF, U+3000-303F, U+FF00-FFEF;
+}
+
+@font-face {
+  font-family: "Monaco";
+  src: url("/Monaco.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
 }
 
 * {
@@ -48,6 +57,6 @@ provide("centerText", centerText);
 
 body {
   background: #000;
-  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "Monaco", "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 </style>
