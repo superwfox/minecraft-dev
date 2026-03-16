@@ -43,7 +43,7 @@ provide("centerText", centerText);
 
 @font-face {
   font-family: "Monaco";
-  src: url("/Monaco.ttf") format("truetype");
+  src: url("font/Monaco.ttf") format("truetype");
   font-weight: normal;
   font-style: normal;
   font-display: swap;
