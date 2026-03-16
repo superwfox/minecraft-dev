@@ -3,7 +3,7 @@
   <GlassCard>
     <div class="header" @click = goHome>
       <img class="header-icon" src="/icon.png" alt="icon" @click = goHome>
-      TAHAI
+      <span class="header-title">TAHAI</span>
     </div>
 
     <div class="center">
@@ -27,7 +27,7 @@ import {useRouter} from "vue-router";
 const router = useRouter();
 const goHome = () => router.push("/");
 
-const centerText = ref("建设中");
+const centerText = ref("");
 provide("centerText", centerText);
 </script>
 
@@ -58,5 +58,9 @@ provide("centerText", centerText);
 body {
   background: #000;
   font-family: "Monaco", "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.header-title {
+  font-family: "ZhuoKai", sans-serif;
 }
 </style>
