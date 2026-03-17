@@ -38,7 +38,7 @@ provide("centerText", centerText);
   font-weight: normal;
   font-style: normal;
   font-display: swap;
-  unicode-range: U+4E00-9FFF, U+3000-303F, U+FF00-FFEF;
+  unicode-range: U+0041, U+0048, U+0049, U+0054, U+4E00-9FFF, U+3000-303F, U+FF00-FFEF;
 }
 
 @font-face {
