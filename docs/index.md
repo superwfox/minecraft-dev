@@ -17,8 +17,8 @@ hero:
       link: https://minecraft-dev-platform.pages.dev/
 
 features:
-  - title: AI 三阶段工作流
-    details: Planner 规划 → FileGen 生成 → reChecker 审查，保证代码质量
+  - title: AI 多阶段工作流
+    details: Planner 依赖拓扑规划 → FileGen 生成 → reChecker 跨文件审查 → 结构化 API 摘要传递
     link: /features/ai-workflow
     linkText: 了解 AI 设计
 
@@ -79,11 +79,11 @@ AI 输出：
 
 ## 技术亮点
 
-- **AI 编排**：Planner 生成文件树，FileGen 逐文件生成，reChecker 自动审查修正
+- **AI 编排**：Planner 依赖拓扑规划，FileGen 逐文件生成，reChecker 跨文件审查，结构化 API 摘要传递
 - **云原生**：Cloudflare Pages Functions + KV 存储，无需自建服务器
 - **前端体验**：Vue 3 响应式状态 + Canvas 粒子动画 + 毛玻璃 UI
 - **安全设计**：密钥存环境变量，前端不接触敏感信息
-- **增量生成**：每次只传当前文件 + 已生成文件摘要，保证 import 一致性
+- **精准上下文**：AI 提取结构化 API 摘要（类名、方法签名、事件），杜绝跨文件虚空调用
 
 [深入了解架构 →](/technical/architecture)
 

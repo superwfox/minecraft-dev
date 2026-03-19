@@ -1,6 +1,7 @@
 import { defineConfig } from "vitepress"
+import { withMermaid } from "vitepress-plugin-mermaid"
 
-export default defineConfig({
+export default withMermaid(defineConfig({
     title: "踏海",
     description: "MC DevTool 项目文档",
 
@@ -65,4 +66,4 @@ export default defineConfig({
             provider: "local",
         },
     },
-})
+}))

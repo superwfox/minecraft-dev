@@ -172,23 +172,26 @@ sequenceDiagram
     participant GA as GitHub Actions
 
     F->>API: POST /api/generate/plan
-    API->>AI: 调用 Planner
+    API->>AI: 调用 Planner（含 depends 依赖声明）
     AI->>API: 返回文件树
+    API->>API: 拓扑排序（主类排最后）
     API->>KV: 保存任务状态
     API->>F: 返回 taskId
 
-    loop 每个文件
+    loop 每个文件（按拓扑序）
         F->>API: POST /api/generate/file
-        API->>KV: 读取状态
-        API->>AI: 调用 FileGen
+        API->>KV: 读取状态 + 已生成文件的结构化 API 摘要
+        API->>AI: 调用 FileGen（注入 API 摘要上下文）
         AI->>API: 返回代码
-        API->>AI: 调用 reChecker
+        API->>AI: 调用 reChecker（含跨文件一致性检查）
         AI->>API: 审查结果
         alt 不通过
-            API->>AI: 调用 rework
+            API->>AI: 调用 rework（注入 API 摘要上下文）
             AI->>API: 修正后代码
         end
-        API->>KV: 更新状态
+        API->>AI: 调用 summaryExtract 提取结构化 API 摘要
+        AI->>API: 返回 FileSummary JSON
+        API->>KV: 更新状态（含 apiSummary）
         API->>F: 返回文件内容
     end
 
@@ -316,9 +319,10 @@ GitHub PAT 权限最小化：
 
 ### 后端优化
 
-1. **增量上下文**
-   - FileGen 只传文件摘要，不传完整代码
-   - 节省 token，降低成本
+1. **结构化 API 摘要**
+   - FileGen 传入已生成文件的结构化摘要（类名、公开方法签名、事件、命令等），而非完整代码
+   - 由 AI 提取摘要，信息密度远高于简单截断
+   - 节省 token，同时精准传递跨文件依赖信息
 
 2. **并发控制**
    - 文件生成串行执行，避免 AI 调用冲突

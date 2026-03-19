@@ -99,16 +99,17 @@ data: [DONE]
   "packageName": "com.example.welcomeplugin",
   "javaVersion": "21",
   "plan": [
-    { "path": "pom.xml", "role": "Maven 构建配置", "order": 1 },
-    { "path": "src/main/resources/plugin.yml", "role": "插件描述文件", "order": 2 },
-    { "path": "src/main/java/com/example/welcomeplugin/WelcomePlugin.java", "role": "插件主类", "order": 3 }
+    { "path": "pom.xml", "role": "Maven 构建配置", "order": 1, "depends": [] },
+    { "path": "src/main/resources/plugin.yml", "role": "插件描述文件", "order": 2, "depends": [] },
+    { "path": "src/main/java/com/example/welcomeplugin/WelcomePlugin.java", "role": "插件主类", "order": 3, "depends": [] }
   ]
 }
 ```
 
 **说明**：
 - 返回的 `taskId` 用于后续所有请求
-- `plan` 数组按 `order` 排序，决定文件生成顺序
+- `plan` 数组经过依赖拓扑排序，`depends` 字段声明该文件依赖的其他文件名
+- 插件主类（继承 JavaPlugin）始终排在所有 Java 文件最后生成
 - 任务状态写入 KV，TTL 1 小时
 
 ### POST /api/generate/file
@@ -136,7 +137,9 @@ data: [DONE]
 
 **说明**：
 - 自动从 KV 读取 `currentFileIndex`，生成对应文件
-- 生成后经过 reChecker 审查，不通过则自动返工（最多 2 次）
+- 生成时注入已生成文件的结构化 API 摘要（类名、公开方法签名、事件等），防止虚空调用
+- 生成后经过 reChecker 审查（含跨文件调用一致性检查），不通过则自动返工（最多 2 次）
+- 审查通过后，由 summaryExtract 提取当前文件的结构化 API 摘要，供后续文件使用
 - `done: true` 表示所有文件已生成完毕
 - `reworkCount` 表示该文件经过了几次修正
 

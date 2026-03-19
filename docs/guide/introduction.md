@@ -53,19 +53,21 @@ Minecraft 插件开发是一个充满创意的领域，但对于新手和非专�
 
 ## 技术创新
 
-### AI 三阶段工作流
+### AI 多阶段工作流
 
 ```mermaid
 graph LR
     A[用户需求] --> B[Planner 规划]
     B --> C[FileGen 生成]
     C --> D[reChecker 审查]
-    D --> E[构建 JAR]
+    D --> E[summaryExtract 摘要]
+    E --> F[构建 JAR]
 ```
 
-**Planner**：分析需求，生成文件树和角色描述
-**FileGen**：逐文件生成代码，传入已生成文件摘要保证一致性
-**reChecker**：审查每个文件，发现问题自动返工
+**Planner**：分析需求，生成文件树、角色描述和依赖拓扑（depends），主类排最后
+**FileGen**：逐文件生成代码，注入已生成文件的结构化 API 摘要（类名、方法签名、事件等），约束只能调用已存在的 API
+**reChecker**：审查每个文件，含跨文件调用一致性检查，发现问题自动返工
+**summaryExtract**：由 AI 提取每个文件的结构化 API 摘要，供后续文件使用
 
 [详细了解 AI 设计 →](/features/ai-workflow)
 

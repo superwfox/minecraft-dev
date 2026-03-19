@@ -51,10 +51,14 @@
 
 ```
 1. Planner 规划
-   需求 → 项目名 + Java 版本 + 包名 + 文件树
+   需求 → 项目名 + Java 版本 + 包名 + 文件树（含依赖拓扑）
+   文件按 depends 字段拓扑排序，主类排最后
    ↓
 2. 逐文件生成（循环）
-   FileGen → reChecker 审查 → 通过/返工（最多2次）
+   FileGen（注入已生成文件的结构化 API 摘要）
+   → reChecker 审查（含跨文件调用一致性检查）
+   → 通过/返工（最多2次）
+   → summaryExtract 提取结构化摘要（类名、方法签名、事件等）
    ↓
 3. 文件校验
    对比 plan vs generatedFiles，缺失文件自动补齐
@@ -121,8 +125,8 @@ interface TaskState {
   packageName: string;
   coreType: string;
   version: string;
-  plan: { path: string; role: string; order: number }[];
-  generatedFiles: { path: string; content: string; summary: string }[];
+  plan: { path: string; role: string; order: number; depends?: string[] }[];
+  generatedFiles: { path: string; content: string; apiSummary: FileSummary }[];
   currentFileIndex: number;
   buildBranch?: string;
   runId?: number;
@@ -167,7 +171,7 @@ interface TaskState {
 
 ### 后端
 
-- **摘要上下文**：已生成文件只传前 3 行 120 字符，避免 token 爆炸
+- **结构化 API 摘要**：已生成文件由 AI 提取结构化摘要（类名、公开方法签名、事件、命令等），精准传递跨文件上下文，避免 token 爆炸
 - **并行上传**：使用 Git Tree API 批量创建 blob，一次 commit 提交所有文件
 - **重试机制**：网络请求失败自动重试 3 次，指数退避
 
