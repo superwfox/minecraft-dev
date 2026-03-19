@@ -47,36 +47,42 @@
   "projectName": "MaintenanceKicker",
   "packageName": "com.example.maintenancekicker",
   "javaVersion": "17",
-  "plan": [
+  "files": [
     {
       "path": "pom.xml",
       "role": "Maven 构建配置，定义依赖和编译参数",
-      "order": 1
+      "order": 1,
+      "depends": []
     },
     {
       "path": "src/main/resources/plugin.yml",
       "role": "插件描述文件，声明插件信息、命令和权限",
-      "order": 2
+      "order": 2,
+      "depends": []
     },
     {
       "path": "src/main/resources/config.yml",
       "role": "默认配置文件，存储踢出提示消息",
-      "order": 3
-    },
-    {
-      "path": "src/main/java/com/example/maintenancekicker/MaintenanceKicker.java",
-      "role": "插件主类，负责初始化和注册事件、命令",
-      "order": 4
+      "order": 3,
+      "depends": []
     },
     {
       "path": "src/main/java/com/example/maintenancekicker/listener/JoinListener.java",
       "role": "玩家加入事件监听器，踢出玩家并显示提示",
-      "order": 5
+      "order": 4,
+      "depends": []
     },
     {
       "path": "src/main/java/com/example/maintenancekicker/command/SetNoticeCommand.java",
       "role": "命令处理器，处理 /setNotice 命令并更新配置",
-      "order": 6
+      "order": 5,
+      "depends": []
+    },
+    {
+      "path": "src/main/java/com/example/maintenancekicker/MaintenanceKicker.java",
+      "role": "插件主类，负责初始化和注册事件、命令",
+      "order": 6,
+      "depends": ["JoinListener.java", "SetNoticeCommand.java"]
     }
   ]
 }
@@ -84,14 +90,15 @@
 
 **关键点**：
 - Planner 自动识别需要 6 个文件
-- 按依赖关系排序（配置文件 → 主类 → 监听器/命令）
-- 为每个文件分配明确的职责
+- 每个文件声明 `depends` 依赖，服务端按拓扑排序确定生成顺序
+- 主类 `MaintenanceKicker.java` 依赖 JoinListener 和 SetNoticeCommand，排在最后生成
+- 工具类/监听器/命令处理器先生成，主类最后整合调用
 
 <!-- 截图：Planner 生成的文件树展示 -->
 
 ## 第二阶段：FileGen 逐文件生成
 
-系统按 `order` 顺序逐个生成文件。
+系统按拓扑排序后的 `order` 顺序逐个生成文件。注意主类排在最后，因为它依赖 JoinListener 和 SetNoticeCommand。
 
 ### 文件 1：pom.xml
 
@@ -104,7 +111,7 @@
 - 核心：PAPER
 - 版本：1.20.6
 - Java 版本：17
-已生成文件：无
+已生成文件的可用 API：无
 ```
 
 **FileGen 输出**：
@@ -144,23 +151,23 @@
 </project>
 ```
 
-**reChecker 审查**：
+**reChecker 审查**：✅ 通过
+
+**summaryExtract 提取摘要**：
 ```json
 {
-  "is_ok": true,
-  "reason": "pom.xml 格式正确，依赖版本匹配"
+  "description": "Maven 构建配置，定义了 Paper 1.20.6 依赖和 Java 17 编译参数"
 }
 ```
 
-✅ 通过审查，无需修正
-
 ### 文件 2：plugin.yml
 
-**FileGen 输入**：
+**FileGen 输入**（已注入 pom.xml 的摘要）：
 ```
-角色：插件描述文件，声明插件信息、命令和权限
-已生成文件摘要：
-- pom.xml: Maven 构建配置，定义了项目基本信息和 Paper 1.20.6 依赖
+已生成文件的可用 API：
+
+【pom.xml】
+  职责：Maven 构建配置，定义了 Paper 1.20.6 依赖和 Java 17 编译参数
 ```
 
 **FileGen 输出**：
@@ -183,15 +190,16 @@ permissions:
     default: op
 ```
 
-**reChecker 审查**：
+**reChecker 审查**：✅ 通过
+
+**summaryExtract 提取摘要**：
 ```json
 {
-  "is_ok": true,
-  "reason": "plugin.yml 格式正确，main 类路径与包名一致"
+  "description": "插件描述文件，main 类为 com.example.maintenancekicker.MaintenanceKicker",
+  "commands": ["setnotice"],
+  "configKeys": ["maintenancekicker.setnotice"]
 }
 ```
-
-✅ 通过审查
 
 ### 文件 3：config.yml
 
@@ -201,126 +209,50 @@ permissions:
 notice: "服务器正在维护，请稍后再试"
 ```
 
-**reChecker 审查**：
+**reChecker 审查**：✅ 通过
+
+**summaryExtract 提取摘要**：
 ```json
 {
-  "is_ok": true,
-  "reason": "配置文件格式正确"
+  "description": "默认配置文件，存储踢出提示消息",
+  "configKeys": ["notice"]
 }
 ```
 
-✅ 通过审查
+### 文件 4：JoinListener.java（事件监听器）
 
-### 文件 4：MaintenanceKicker.java（主类）
+注意：在新的拓扑排序下，监听器和命令处理器先于主类生成。
 
-**FileGen 输出**：
-```java
-package com.example.maintenancekicker;
-
-import com.example.maintenancekicker.listener.JoinListener;
-import com.example.maintenancekicker.command.SetNoticeCommand;
-import org.bukkit.plugin.java.JavaPlugin;
-
-public class MaintenanceKicker extends JavaPlugin {
-
-    @Override
-    public void onEnable() {
-        // 保存默认配置
-        saveDefaultConfig();
-
-        // 注册事件监听器
-        getServer().getPluginManager().registerEvents(new JoinListener(this), this);
-
-        // 注册命令
-        getCommand("setnotice").setExecutor(new SetNoticeCommand(this));
-
-        getLogger().info("MaintenanceKicker 已启用");
-    }
-
-    @Override
-    public void onDisable() {
-        getLogger().info("MaintenanceKicker 已禁用");
-    }
-}
+**FileGen 输入**（已注入前 3 个文件的摘要）：
 ```
+已生成文件的可用 API：
 
-**reChecker 审查**：
-```json
-{
-  "is_ok": false,
-  "reason": "缺少 import 语句，JoinListener 和 SetNoticeCommand 类未导入"
-}
-```
+【pom.xml】
+  职责：Maven 构建配置，定义了 Paper 1.20.6 依赖和 Java 17 编译参数
 
-❌ 审查不通过，触发返工
+【plugin.yml】
+  职责：插件描述文件，main 类为 com.example.maintenancekicker.MaintenanceKicker
+  注册命令：setnotice
 
-**reworkPrompt 输入**：
-```
-原代码存在问题：缺少 import 语句，JoinListener 和 SetNoticeCommand 类未导入
-请修正代码，确保所有类都正确导入
-```
-
-**修正后的代码**：
-```java
-package com.example.maintenancekicker;
-
-import com.example.maintenancekicker.listener.JoinListener;
-import com.example.maintenancekicker.command.SetNoticeCommand;
-import org.bukkit.plugin.java.JavaPlugin;
-
-public class MaintenanceKicker extends JavaPlugin {
-
-    @Override
-    public void onEnable() {
-        saveDefaultConfig();
-        getServer().getPluginManager().registerEvents(new JoinListener(this), this);
-        getCommand("setnotice").setExecutor(new SetNoticeCommand(this));
-        getLogger().info("MaintenanceKicker 已启用");
-    }
-
-    @Override
-    public void onDisable() {
-        getLogger().info("MaintenanceKicker 已禁用");
-    }
-}
-```
-
-**reChecker 二次审查**：
-```json
-{
-  "is_ok": true,
-  "reason": "代码格式正确，import 语句完整"
-}
-```
-
-✅ 修正后通过审查（修正 1 次）
-
-<!-- 截图：生成日志显示"🔄 MaintenanceKicker.java 需修正 (1/2): 缺少 import 语句" -->
-
-### 文件 5：JoinListener.java（事件监听器）
-
-**FileGen 输入**：
-```
-角色：玩家加入事件监听器，踢出玩家并显示提示
-已生成文件摘要：
-- MaintenanceKicker.java: 主类，注册了 JoinListener 并传入 plugin 实例
-- config.yml: 配置文件，包含 notice 键存储提示消息
+【config.yml】
+  职责：默认配置文件，存储踢出提示消息
+  配置键：notice
 ```
 
 **FileGen 输出**：
 ```java
 package com.example.maintenancekicker.listener;
 
-import com.example.maintenancekicker.MaintenanceKicker;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.plugin.java.JavaPlugin;
 
 public class JoinListener implements Listener {
 
-    private final MaintenanceKicker plugin;
+    private final JavaPlugin plugin;
 
-    public JoinListener(MaintenanceKicker plugin) {
+    public JoinListener(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
@@ -332,32 +264,52 @@ public class JoinListener implements Listener {
 }
 ```
 
-**reChecker 审查**：
+**reChecker 审查**（含跨文件一致性检查）：✅ 通过
+
+**summaryExtract 提取摘要**：
 ```json
 {
-  "is_ok": true,
-  "reason": "事件监听器实现正确，import 完整，逻辑清晰"
+  "className": "JoinListener",
+  "implements": ["Listener"],
+  "publicMethods": [
+    { "name": "JoinListener", "params": "JavaPlugin plugin", "returns": "constructor" },
+    { "name": "onPlayerJoin", "params": "PlayerJoinEvent event", "returns": "void" }
+  ],
+  "events": ["PlayerJoinEvent"],
+  "description": "玩家加入事件监听器，踢出玩家并显示配置中的提示消息"
 }
 ```
 
-✅ 通过审查
+### 文件 5：SetNoticeCommand.java（命令处理器）
 
-### 文件 6：SetNoticeCommand.java（命令处理器）
+**FileGen 输入**（已注入前 4 个文件的结构化 API 摘要，包括 JoinListener 的类名和方法签名）：
+```
+已生成文件的可用 API：
+...（前 3 个文件摘要省略）
+
+【.../listener/JoinListener.java】
+  职责：玩家加入事件监听器，踢出玩家并显示配置中的提示消息
+  类名：JoinListener implements Listener
+  公开方法：
+    - constructor JoinListener(JavaPlugin plugin)
+    - void onPlayerJoin(PlayerJoinEvent event)
+  监听事件：PlayerJoinEvent
+```
 
 **FileGen 输出**：
 ```java
 package com.example.maintenancekicker.command;
 
-import com.example.maintenancekicker.MaintenanceKicker;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.plugin.java.JavaPlugin;
 
 public class SetNoticeCommand implements CommandExecutor {
 
-    private final MaintenanceKicker plugin;
+    private final JavaPlugin plugin;
 
-    public SetNoticeCommand(MaintenanceKicker plugin) {
+    public SetNoticeCommand(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
@@ -378,15 +330,84 @@ public class SetNoticeCommand implements CommandExecutor {
 }
 ```
 
-**reChecker 审查**：
+**reChecker 审查**（含跨文件一致性检查）：✅ 通过
+
+**summaryExtract 提取摘要**：
 ```json
 {
-  "is_ok": true,
-  "reason": "命令处理器实现正确，参数校验完整"
+  "className": "SetNoticeCommand",
+  "implements": ["CommandExecutor"],
+  "publicMethods": [
+    { "name": "SetNoticeCommand", "params": "JavaPlugin plugin", "returns": "constructor" },
+    { "name": "onCommand", "params": "CommandSender sender, Command command, String label, String[] args", "returns": "boolean" }
+  ],
+  "commands": ["setnotice"],
+  "description": "命令处理器，处理 /setnotice 命令并更新配置文件中的提示消息"
 }
 ```
 
-✅ 通过审查
+### 文件 6：MaintenanceKicker.java（主类 — 最后生成）
+
+主类排在最后生成，此时已拥有所有依赖文件的完整 API 摘要，能精确知道 JoinListener 和 SetNoticeCommand 的构造函数签名。
+
+**FileGen 输入**（注入全部 5 个已生成文件的结构化 API 摘要）：
+```
+已生成文件的可用 API：
+...（配置文件摘要省略）
+
+【.../listener/JoinListener.java】
+  职责：玩家加入事件监听器
+  类名：JoinListener implements Listener
+  公开方法：
+    - constructor JoinListener(JavaPlugin plugin)
+    - void onPlayerJoin(PlayerJoinEvent event)
+  监听事件：PlayerJoinEvent
+
+【.../command/SetNoticeCommand.java】
+  职责：命令处理器，处理 /setnotice 命令
+  类名：SetNoticeCommand implements CommandExecutor
+  公开方法：
+    - constructor SetNoticeCommand(JavaPlugin plugin)
+    - boolean onCommand(CommandSender sender, Command command, String label, String[] args)
+  注册命令：setnotice
+
+你只能调用上面列出的类和方法，不要假设任何未列出的方法或类存在。
+```
+
+**FileGen 输出**：
+```java
+package com.example.maintenancekicker;
+
+import com.example.maintenancekicker.listener.JoinListener;
+import com.example.maintenancekicker.command.SetNoticeCommand;
+import org.bukkit.plugin.java.JavaPlugin;
+
+public class MaintenanceKicker extends JavaPlugin {
+
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        getServer().getPluginManager().registerEvents(new JoinListener(this), this);
+        getCommand("setnotice").setExecutor(new SetNoticeCommand(this));
+        getLogger().info("MaintenanceKicker 已启用");
+    }
+
+    @Override
+    public void onDisable() {
+        getLogger().info("MaintenanceKicker 已禁用");
+    }
+}
+```
+
+**reChecker 审查**（含跨文件一致性检查）：
+```json
+{
+  "is_ok": true,
+  "reason": "import 正确，JoinListener(JavaPlugin) 和 SetNoticeCommand(JavaPlugin) 构造函数签名与已生成文件一致"
+}
+```
+
+✅ 一次通过，无需修正 — 因为主类最后生成，已拥有完整的依赖信息
 
 ## 第三阶段：校验与构建
 
@@ -500,29 +521,30 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 
 ## 技术亮点总结
 
-### 1. 多文件协同生成
+### 1. 依赖拓扑排序 + 主类最后生成
 
-- Planner 自动识别需要 6 个文件
-- FileGen 按依赖顺序生成，避免引用未定义的类
-- 每个文件生成时传入已生成文件摘要，保证 import 一致性
+- Planner 自动识别需要 6 个文件，并声明 `depends` 依赖关系
+- 服务端 Kahn 算法拓扑排序，被依赖的文件先生成
+- 主类排在最后，生成时已拥有所有依赖文件的完整 API 摘要
+- 本例中主类一次通过审查，无需修正 — 因为它精确知道 JoinListener 和 SetNoticeCommand 的构造函数签名
 
-### 2. reChecker 自动修正
+### 2. 结构化 API 摘要传递
 
-- MaintenanceKicker.java 第一次生成缺少 import
-- reChecker 发现问题，自动触发返工
-- 修正后再次审查通过，无需人工干预
+- 每个文件生成后由 summaryExtract 提取结构化摘要（类名、方法签名、事件、命令等）
+- 后续文件的 FileGen Prompt 注入完整的 API 签名块，而非简单的文本截断
+- 明确约束"只能调用已列出的 API"，杜绝虚空调用
 
-### 3. 云端构建验证
+### 3. reChecker 跨文件一致性检查
+
+- reChecker 接收已生成文件的结构化 API 摘要
+- 不仅检查语法错误，还验证跨文件调用是否真的存在
+- 双重防线：FileGen 约束 + reChecker 验证
+
+### 4. 云端构建验证
 
 - Maven 编译验证代码可运行
 - 如果有语法错误，构建会失败并返回错误日志
-- 双重保障（reChecker + Maven）确保代码质量
-
-### 4. 完整的项目结构
-
-- 符合 Maven 标准目录结构
-- 包名、类名遵循 Java 命名规范
-- plugin.yml 配置完整，包含命令和权限声明
+- 三重保障（FileGen 约束 + reChecker 审查 + Maven 构建）确保代码质量
 
 ## 下一步
 
