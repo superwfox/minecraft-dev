@@ -46,6 +46,53 @@ export function getTodoList(prompt: string) {
     return askDeepSeek(prompt, TODO_PRESET);
 }
 
+async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string) => void): Promise<string> {
+    const messages = [
+        { role: "system", content: preset },
+        { role: "user", content: prompt },
+    ];
+    const response = await fetch("/api/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-chat", messages, stream: true }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    if (!response.body) throw new Error("No stream body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let full = "";
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") return full;
+            try {
+                const json = JSON.parse(payload);
+                const chunk = json?.choices?.[0]?.delta?.content ?? "";
+                if (chunk) { full += chunk; onDelta(chunk); }
+            } catch { /* skip */ }
+        }
+    }
+    return full;
+}
+
+export function streamGetInfo(prompt: string, onDelta: (chunk: string) => void) {
+    return streamAsk(prompt, INFO_PRESET, onDelta);
+}
+
+export function streamGetTodoList(prompt: string, onDelta: (chunk: string) => void) {
+    return streamAsk(prompt, TODO_PRESET, onDelta);
+}
+
 export function consistChat(
     history: ChatMsg[],
     prompt: string,

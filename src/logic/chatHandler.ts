@@ -1,7 +1,7 @@
 import type { Ref } from "vue";
 import type { ChatBlock } from "./chatState";
 import { addBlock, chatBlocks, streamTick } from "./chatState";
-import { getInfo, getTodoList, consistChat } from "../api/deepseek";
+import { streamGetInfo, streamGetTodoList, consistChat } from "../api/deepseek";
 import type { ChatMsg } from "../api/deepseek";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
@@ -50,7 +50,11 @@ export async function handleUserInput(
 
     let info: any;
     try {
-        const raw = await getInfo(input);
+        block.rawMsg = "";
+        const raw = await streamGetInfo(input, (chunk) => {
+            block.rawMsg += chunk;
+            streamTick.value++;
+        });
         info = tryParseJson(raw);
     } catch (e: any) {
         block.phase = "error";
@@ -75,6 +79,7 @@ export async function handleUserInput(
     if (!block.version || block.version === "null") missing.push("version");
 
     if (missing.length > 0) {
+        block.rawMsg = "";
         onNeedSelect(block, missing);
         return;
     }
@@ -96,7 +101,11 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
 
     let steps: any;
     try {
-        const raw = await getTodoList(prompt);
+        block.rawMsg = "";
+        const raw = await streamGetTodoList(prompt, (chunk) => {
+            block.rawMsg += chunk;
+            streamTick.value++;
+        });
         steps = tryParseJson(raw);
     } catch (e: any) {
         block.phase = "error";
@@ -114,6 +123,7 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
 
     // 阶段3: 渲染
     centerText.value = "渲染完成";
+    block.rawMsg = "";
     block.phase = "rendering";
     block.steps = steps;
     hasRendered = true;

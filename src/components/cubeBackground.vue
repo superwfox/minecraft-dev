@@ -268,7 +268,75 @@ class Cube {
   }
 }
 
+class Meteor {
+  x = 0; y = 0;
+  vx = 0; vy = 0;
+  size = 0;
+  life = 0;
+  maxLife = 0;
+  trail: { x: number; y: number; a: number }[] = [];
+  rot = 0;
+  rotV = 0;
+
+  spawn() {
+    const edge = Math.random();
+    if (edge < 0.5) {
+      this.x = Math.random() * w;
+      this.y = -20;
+    } else {
+      this.x = w + 20;
+      this.y = Math.random() * h * 0.5;
+    }
+    const ang = Math.PI * 0.55 + (Math.random() - 0.5) * 0.4;
+    const speed = 2 + Math.random() * 3;
+    this.vx = Math.cos(ang) * speed;
+    this.vy = Math.sin(ang) * speed;
+    this.size = 2 + Math.random() * 4;
+    this.maxLife = 80 + Math.random() * 120;
+    this.life = this.maxLife;
+    this.trail = [];
+    this.rot = Math.random() * Math.PI * 2;
+    this.rotV = (Math.random() - 0.5) * 0.08;
+  }
+
+  step() {
+    if (this.life <= 0) return;
+    this.life--;
+    this.trail.unshift({ x: this.x, y: this.y, a: 1 });
+    if (this.trail.length > 12) this.trail.pop();
+    for (const t of this.trail) t.a *= 0.82;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.rot += this.rotV;
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    if (this.life <= 0) return;
+    const fade = Math.min(1, this.life / 20);
+
+    for (const t of this.trail) {
+      const a = t.a * fade * 0.3;
+      if (a < 0.01) continue;
+      ctx.fillStyle = `rgba(255,255,255,${a})`;
+      ctx.fillRect(t.x - 1, t.y - 1, 2, 2);
+    }
+
+    const s = this.size * fade;
+    const c = Math.cos(this.rot), sn = Math.sin(this.rot);
+    ctx.fillStyle = `rgba(255,255,255,${0.7 * fade})`;
+    ctx.beginPath();
+    ctx.moveTo(this.x - s * c, this.y - s * sn);
+    ctx.lineTo(this.x - s * sn * 0.5, this.y + s * c * 0.5);
+    ctx.lineTo(this.x + s * c, this.y + s * sn);
+    ctx.lineTo(this.x + s * sn * 0.5, this.y - s * c * 0.5);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
 let cubes: Cube[] = [];
+let meteors: Meteor[] = [];
+let lastMeteorSpawn = 0;
 
 function resize() {
   if (!cv.value) return;
@@ -318,7 +386,6 @@ function onPointerDown(e: PointerEvent) {
 function loop(t: number) {
   if (!ctx) return;
 
-  // 背景纯黑
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
 
@@ -337,6 +404,15 @@ function loop(t: number) {
   for (const c of cubes) c.draw(ctx, t);
   for (const c of cubes) c.step(t, visible);
   for (const c of cubes) c.draw(ctx, t);
+
+  if (now - lastMeteorSpawn > 2000 + Math.random() * 3000) {
+    lastMeteorSpawn = now;
+    const m = new Meteor();
+    m.spawn();
+    meteors.push(m);
+  }
+  for (const m of meteors) { m.step(); m.draw(ctx); }
+  meteors = meteors.filter(m => m.life > 0);
 
   raf = requestAnimationFrame(loop);
 }

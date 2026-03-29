@@ -1,9 +1,12 @@
 <template>
-  <div class="chat-page" :data-tick="streamTick">
+  <div class="chat-page" :data-tick="streamTick" :data-rawTick="rawMsgTick">
     <div v-for="block in chatBlocks" :key="block.id" class="glass2 chat-block">
       <div class="chat-user-input">{{ block.userInput }}</div>
 
-      <div v-if="block.phase === 'analyzing'" class="chat-status">分析中...</div>
+      <div v-if="block.phase === 'analyzing'" class="streaming-status">
+        <span class="streaming-label">分析需求中...</span>
+        <div v-if="block.rawMsg" class="streaming-msg" :key="'a-' + block.id">{{ block.rawMsg }}</div>
+      </div>
 
       <!-- 选择缺失参数 -->
       <div v-if="selectingBlock?.id === block.id" class="select-panel">
@@ -25,7 +28,10 @@
         </button>
       </div>
 
-      <div v-if="block.phase === 'fetching'" class="chat-status">生成步骤中...</div>
+      <div v-if="block.phase === 'fetching'" class="streaming-status">
+        <span class="streaming-label">生成步骤中...</span>
+        <div v-if="block.rawMsg" class="streaming-msg" :key="'f-' + block.id">{{ block.rawMsg }}</div>
+      </div>
 
       <!-- 渲染结构化步骤 -->
       <StepRender v-if="block.steps && block.steps.length" :block="block"/>
@@ -58,7 +64,7 @@
 </template>
 
 <script setup lang="ts">
-import {ref, inject, nextTick, watch} from "vue";
+import {ref, computed, inject, nextTick, watch} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, streamTick} from "../logic/chatState";
@@ -73,6 +79,7 @@ const centerText = inject<Ref<string>>("centerText")!;
 
 const inputText = ref("");
 const sending = ref(false);
+const rawMsgTick = computed(() => chatBlocks.reduce((s, b) => s + b.rawMsg.length, 0));
 let voiceBaseText = "";
 
 const selectingBlock = ref<ChatBlock | null>(null);
@@ -190,6 +197,30 @@ watch(() => genTask.phase, (p) => {
 .chat-error {
   color: #999;
   font-size: 14px;
+}
+
+.streaming-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  transition: max-height 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.streaming-label {
+  color: rgba(255,255,255,0.45);
+  font-size: 13px;
+}
+.streaming-msg {
+  color: rgba(255,255,255,0.9);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  font-family: monospace;
+  animation: fadeSlideIn 0.35s ease-out;
+}
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 .chat-input-wrap {

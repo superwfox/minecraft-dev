@@ -17,6 +17,7 @@ export type ChatBlock = {
     title?: string;
     steps?: TodoStep[];
     streamText: string;
+    rawMsg: string;
     error?: string;
 };
 
@@ -31,6 +32,7 @@ export function addBlock(userInput: string): ChatBlock {
         userInput,
         phase: "analyzing",
         streamText: "",
+        rawMsg: "",
     };
     chatBlocks.push(block);
     return chatBlocks[chatBlocks.length - 1];
