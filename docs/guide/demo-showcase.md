@@ -151,7 +151,7 @@
 </project>
 ```
 
-**reChecker 审查**：✅ 通过
+**reChecker 审查**：● 通过
 
 **summaryExtract 提取摘要**：
 ```json
@@ -190,7 +190,7 @@ permissions:
     default: op
 ```
 
-**reChecker 审查**：✅ 通过
+**reChecker 审查**：● 通过
 
 **summaryExtract 提取摘要**：
 ```json
@@ -209,7 +209,7 @@ permissions:
 notice: "服务器正在维护，请稍后再试"
 ```
 
-**reChecker 审查**：✅ 通过
+**reChecker 审查**：● 通过
 
 **summaryExtract 提取摘要**：
 ```json
@@ -264,7 +264,7 @@ public class JoinListener implements Listener {
 }
 ```
 
-**reChecker 审查**（含跨文件一致性检查）：✅ 通过
+**reChecker 审查**（含跨文件一致性检查）：● 通过
 
 **summaryExtract 提取摘要**：
 ```json
@@ -330,7 +330,7 @@ public class SetNoticeCommand implements CommandExecutor {
 }
 ```
 
-**reChecker 审查**（含跨文件一致性检查）：✅ 通过
+**reChecker 审查**（含跨文件一致性检查）：● 通过
 
 **summaryExtract 提取摘要**：
 ```json
@@ -407,7 +407,7 @@ public class MaintenanceKicker extends JavaPlugin {
 }
 ```
 
-✅ 一次通过，无需修正 — 因为主类最后生成，已拥有完整的依赖信息
+● 一次通过，无需修正 — 因为主类最后生成，已拥有完整的依赖信息
 
 ## 第三阶段：校验与构建
 
@@ -422,7 +422,7 @@ public class MaintenanceKicker extends JavaPlugin {
 }
 ```
 
-✅ 所有文件已生成
+● 所有文件已生成
 
 ### 上传到 GitHub
 
@@ -473,7 +473,7 @@ GitHub Actions 执行：
 [INFO] BUILD SUCCESS
 ```
 
-✅ 构建成功
+● 构建成功
 
 <!-- 截图：GitHub Actions 构建成功的界面 -->
 
@@ -515,7 +515,7 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 → 被踢出，显示："服务器升级中，预计 30 分钟后开放"
 ```
 
-✅ 所有功能正常
+● 所有功能正常
 
 <!-- 截图：MC 客户端显示被踢出界面，提示消息为自定义内容 -->
 

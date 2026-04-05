@@ -240,45 +240,75 @@ interface Step {
 
 <!-- 截图：步骤渲染效果 -->
 
-### 7. 实时进度反馈
+### 7. SSE 流式 AI 输出展示
 
-生成过程中，`GenerateProgress.vue` 实时显示日志和进度。
+生成过程中，`GenerateProgress.vue` 实时显示 AI 的流式输出。用户可以看到代码逐字符生成，并在审查、修正、摘要提取等阶段之间平滑切换。
 
-**状态监听**：
-```typescript
-import { genTask } from "../logic/generateState";
-import { watch, nextTick } from "vue";
+**流式输出卡片**：
 
-const logContainer = ref<HTMLElement>();
-
-// 监听日志更新，自动滚动到底部
-watch(() => genTask.logs.length, async () => {
-  await nextTick();
-  if (logContainer.value) {
-    logContainer.value.scrollTop = logContainer.value.scrollHeight;
-  }
-});
+```vue
+<div class="glass2 gen-card" v-if="genTask.streamingPhase">
+  <div class="gen-card-title">{{ streamPhaseLabel }} {{ genTask.streamingFile }}</div>
+  <div class="gen-stream-wrap" ref="streamRef">
+    <pre class="gen-stream-text" :key="streamKey">{{ genTask.streamingContent }}</pre>
+  </div>
+</div>
 ```
 
-**日志格式化**：
+**模糊淡入动画**：每次阶段切换时，通过 `:key` 触发重新挂载，执行 blur fade-in 动画：
+
+```css
+@keyframes blurFadeIn {
+  from { opacity: 0; filter: blur(4px); }
+  to   { opacity: 1; filter: blur(0); }
+}
+.gen-stream-text {
+  font-family: "Monaco", monospace;
+  font-size: 11px;
+  animation: blurFadeIn 0.4s ease-out;
+}
+```
+
+**阶段标签**：使用白色单色平面符号代替 emoji，保持视觉一致性：
+
 ```typescript
-// 识别 emoji 和状态
-const formatLog = (log: string) => {
-  if (log.startsWith("✅")) return { type: "success", text: log };
-  if (log.startsWith("🔄")) return { type: "warning", text: log };
-  if (log.startsWith("❌")) return { type: "error", text: log };
-  return { type: "info", text: log };
+const streamPhaseLabels = {
+  generating: "▸ 生成中",
+  reviewing:  "▸ 审查中",
+  reworking:  "▸ 修正中",
+  summarizing: "▸ 提取摘要",
+  fixing:     "▸ 修复编译错误",
 };
 ```
 
-**效果**：
-- 日志实时追加
-- 自动滚动到最新
-- 彩色标识不同状态
+**自动滚动**：监听 `streamingContent` 变化，自动滚动到底部：
+
+```typescript
+watch(() => genTask.streamingContent, async () => {
+  await nextTick();
+  if (streamRef.value) streamRef.value.scrollTop = streamRef.value.scrollHeight;
+});
+```
+
+### 8. 实时进度反馈
+
+`GenerateProgress.vue` 使用单色符号标识不同日志状态：
+
+| 符号 | 含义 |
+|------|------|
+| `●` | 完成/成功 |
+| `○` | 待处理 |
+| `◌` | 进行中 |
+| `▸` | 动作/阶段 |
+| `↻` | 重试/修正 |
+| `!` | 警告 |
+| `×` | 错误 |
+
+日志实时追加、自动滚动到最新，monospace 字体确保对齐。
 
 <!-- 截图：生成进度面板 -->
 
-### 8. 语音输入集成
+### 9. 语音输入集成
 
 `voiceInput.ts` 封装讯飞 WebSocket STT，提供简洁的 API。
 
@@ -308,7 +338,7 @@ export function stopVoice() {
 **组件使用**：
 ```vue
 <button @click="toggleVoice" :class="{recording: isRecording}">
-  🎤
+  ◉
 </button>
 
 <script setup>

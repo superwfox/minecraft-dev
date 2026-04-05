@@ -46,10 +46,10 @@ getDefaultBranchSha() → createBranch("build-{taskId}")
 GitHub 的 artifact 下载 API 返回 302 重定向到 Azure Blob Storage 的预签名 URL。这里有一个坑：
 
 ```typescript
-// ❌ 错误：redirect:follow 会把 Authorization 头带到 Azure，导致 401
+// × 错误：redirect:follow 会把 Authorization 头带到 Azure，导致 401
 const resp = await fetch(url, { redirect: "follow", headers: { Authorization: ... } });
 
-// ✅ 正确：手动跟随重定向，第二次请求不带 auth
+// ● 正确：手动跟随重定向，第二次请求不带 auth
 const resp = await fetch(url, { redirect: "manual", headers: { Authorization: ... } });
 const location = resp.headers.get("Location");
 const dl = await fetch(location);  // 无 Authorization

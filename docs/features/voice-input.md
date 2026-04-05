@@ -13,7 +13,7 @@ sequenceDiagram
     participant CF as Cloudflare Function
     participant XF as 讯飞 WebSocket
 
-    U->>F: 点击 🎤
+    U->>F: 点击 ◉
     F->>CF: GET /api/voice-auth
     CF->>CF: 计算 HMAC-SHA256 签名
     CF->>F: 返回签名 URL + appId
@@ -22,7 +22,7 @@ sequenceDiagram
     F->>XF: 发送音频帧（PCM）
     XF->>F: 返回识别结果（流式）
     F->>F: 实时更新输入框
-    U->>F: 再次点击 🎤 停止
+    U->>F: 再次点击 ◉ 停止
     F->>XF: 发送结束帧
     XF->>F: 返回最终结果
     F->>F: 关闭连接
@@ -292,7 +292,7 @@ watch(voiceText, (t) => {
 
 | 场景 | 触发方式 | 行为 |
 |------|----------|------|
-| 用户手动停止 | 再次点击 🎤 | 发送 status:2 帧，停止录音 |
+| 用户手动停止 | 再次点击 ◉ | 发送 status:2 帧，停止录音 |
 | 引擎识别结束 | 返回 data.status === 2 | 自动清理，回调最终文本 |
 | 超时 | 60s 无数据或 10s 静默 | 服务端主动断开 |
 | 网络错误 | WebSocket error | onerror 触发清理 |

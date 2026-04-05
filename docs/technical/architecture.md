@@ -89,9 +89,10 @@ functions/
 │   ├── voice-auth.ts          # 语音鉴权
 │   └── generate/
 │       ├── plan.ts            # Planner 规划
-│       ├── file.ts            # FileGen 生成
+│       ├── file.ts            # FileGen 流式生成 (SSE)
 │       ├── verify.ts          # 文件校验
 │       ├── build.ts           # 触发构建
+│       ├── fix.ts             # 编译失败自动修复 (SSE)
 │       ├── status.ts          # 构建状态
 │       └── download.ts        # 下载 JAR
 └── _lib/
@@ -181,36 +182,58 @@ sequenceDiagram
     loop 每个文件（按拓扑序）
         F->>API: POST /api/generate/file
         API->>KV: 读取状态 + 已生成文件的结构化 API 摘要
-        API->>AI: 调用 FileGen（注入 API 摘要上下文）
-        AI->>API: 返回代码
+        API-->>F: SSE: phase=generating
+        API->>AI: 调用 FileGen（stream: true）
+        AI-->>API: 流式返回代码
+        API-->>F: SSE: delta chunks
         API->>AI: 调用 reChecker（含跨文件一致性检查）
         AI->>API: 审查结果
-        alt 不通过
-            API->>AI: 调用 rework（注入 API 摘要上下文）
-            AI->>API: 修正后代码
+        alt 缺失类
+            API-->>F: SSE: log（发现缺失类）
+            API->>AI: 动态生成缺失类（流式）
+            AI-->>API: 流式返回代码
+            API-->>F: SSE: new_file
+            API->>AI: 重新审查原文件
+        end
+        alt 其他错误
+            API->>AI: 调用 rework（stream: true）
+            AI-->>API: 流式返回修正代码
+            API-->>F: SSE: delta chunks
         end
         API->>AI: 调用 summaryExtract 提取结构化 API 摘要
-        AI->>API: 返回 FileSummary JSON
         API->>KV: 更新状态（含 apiSummary）
-        API->>F: 返回文件内容
+        API-->>F: SSE: result
     end
 
     F->>API: POST /api/generate/verify
     API->>KV: 校验完整性
     API->>F: 返回校验结果
 
-    F->>API: POST /api/generate/build
-    API->>GH: 创建临时分支
-    API->>GH: 上传文件
-    API->>GH: 触发 workflow
-    GH->>GA: 启动构建
-    API->>F: 返回 runId
+    loop 构建 + 修复重试（最多 2 次）
+        F->>API: POST /api/generate/build
+        API->>GH: 创建临时分支 + 上传文件
+        API->>GH: 触发 workflow
+        GH->>GA: 启动构建
+        API->>F: 返回 runId
 
-    loop 轮询状态
-        F->>API: GET /api/generate/status
-        API->>GH: 查询 run 状态
-        GH->>API: 返回状态
-        API->>F: 返回状态
+        loop 轮询状态
+            F->>API: GET /api/generate/status
+            API->>GH: 查询 run 状态
+            API->>F: 返回状态
+        end
+
+        alt 构建失败
+            F->>API: POST /api/generate/fix
+            API->>GH: 获取失败 Job 日志
+            API->>API: 解析 Maven [ERROR] 行
+            loop 每个出错文件
+                API->>AI: 传入编译错误 + 文件内容（流式）
+                AI-->>API: 流式返回修正代码
+                API-->>F: SSE: delta chunks
+            end
+            API->>KV: 更新修正后的文件
+            API-->>F: SSE: result（fixed count）
+        end
     end
 
     GA->>GH: 上传 artifact

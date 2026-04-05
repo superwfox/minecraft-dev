@@ -7,9 +7,10 @@ functions/api/chat.ts         → POST /api/chat
 functions/api/stream.ts       → POST /api/stream
 functions/api/voice-auth.ts   → GET  /api/voice-auth
 functions/api/generate/plan.ts     → POST /api/generate/plan
-functions/api/generate/file.ts     → POST /api/generate/file
+functions/api/generate/file.ts     → POST /api/generate/file  (SSE)
 functions/api/generate/verify.ts   → POST /api/generate/verify
 functions/api/generate/build.ts    → POST /api/generate/build
+functions/api/generate/fix.ts      → POST /api/generate/fix   (SSE)
 functions/api/generate/status.ts   → GET  /api/generate/status
 functions/api/generate/download.ts → GET  /api/generate/download
 ```
@@ -114,7 +115,7 @@ data: [DONE]
 
 ### POST /api/generate/file
 
-生成下一个待生成的文件。
+流式生成下一个待生成的文件。返回 SSE（Server-Sent Events）流。
 
 **请求**：
 ```json
@@ -123,24 +124,43 @@ data: [DONE]
 }
 ```
 
-**响应**：
-```json
-{
-  "done": false,
-  "fileIndex": 0,
-  "path": "pom.xml",
-  "content": "<project>...</project>",
-  "remaining": 2,
-  "reworkCount": 0
-}
+**响应**：`Content-Type: text/event-stream`
+
+如果所有文件已生成完毕，返回 JSON：`{"done": true, "fileIndex": N}`
+
+否则返回 SSE 流，事件格式：
+
 ```
+data: {"type":"phase","phase":"generating","file":"src/.../Main.java"}
+
+data: {"type":"delta","content":"package com.example"}
+
+data: {"type":"log","msg":"▸ 审查 Main.java..."}
+
+data: {"type":"new_file","path":"src/.../WelcomeCommand.java","role":"...","content":"..."}
+
+data: {"type":"result","done":false,"fileIndex":0,"path":"...","content":"...","remaining":2,"reworkCount":0}
+
+data: [DONE]
+```
+
+**SSE 事件类型**：
+
+| 类型 | 说明 |
+|------|------|
+| `phase` | 阶段切换：`generating` / `reviewing` / `reworking` / `summarizing` |
+| `delta` | AI 输出的流式文本片段 |
+| `log` | 日志消息（审查结果、修正信息等） |
+| `new_file` | 动态生成的缺失类（含 path、role、content） |
+| `result` | 文件生成完成，含最终内容和元数据 |
 
 **说明**：
 - 自动从 KV 读取 `currentFileIndex`，生成对应文件
-- 生成时注入已生成文件的结构化 API 摘要（类名、公开方法签名、事件等），防止虚空调用
-- 生成后经过 reChecker 审查（含跨文件调用一致性检查），不通过则自动返工（最多 2 次）
-- 审查通过后，由 summaryExtract 提取当前文件的结构化 API 摘要，供后续文件使用
-- `done: true` 表示所有文件已生成完毕
+- 调用 DeepSeek API 时使用 `stream: true`，逐 chunk 转发给前端
+- 生成后经过 reChecker 审查（含跨文件调用一致性检查和插件主类引用检查）
+- reChecker 返回 `missing_classes` 时，自动动态生成缺失类并通过 `new_file` 事件通知前端
+- 审查不通过且无缺失类时自动返工（最多 2 次）
+- 审查通过后，由 summaryExtract 提取结构化 API 摘要
 - `reworkCount` 表示该文件经过了几次修正
 
 ### POST /api/generate/verify
@@ -220,8 +240,43 @@ GET /api/generate/status?taskId=1710556800000-abc123
 
 **说明**：
 - 如果 `runId` 不存在，尝试通过 `buildBranch` 查找
-- 构建结束后（无论成功失败）立即删除临时分支
-- 成功时获取 artifact ID 并写入 KV
+- 成功时删除临时分支并获取 artifact ID 写入 KV
+- 失败时保留分支和 runId，供 `/api/generate/fix` 端点使用
+
+### POST /api/generate/fix
+
+编译失败后的自动修复端点。拉取 GitHub Actions 构建日志，解析编译错误，AI 修复出错文件。返回 SSE 流。
+
+**请求**：
+```json
+{
+  "taskId": "1710556800000-abc123"
+}
+```
+
+**响应**：`Content-Type: text/event-stream`
+
+```
+data: {"type":"log","msg":"▸ 正在获取构建错误日志..."}
+
+data: {"type":"phase","phase":"fixing","file":"src/.../Main.java"}
+
+data: {"type":"delta","content":"package com.example"}
+
+data: {"type":"log","msg":"● Main.java 修复完成"}
+
+data: {"type":"result","fixed":2}
+
+data: [DONE]
+```
+
+**说明**：
+- 通过 GitHub API 获取失败 Job 的日志（`/actions/jobs/{id}/logs`）
+- 解析 Maven `[ERROR]` 行，提取出错文件路径和错误信息
+- 对每个出错文件，调用 AI 传入编译错误上下文进行修复（流式输出）
+- 修复完成后更新 `state.generatedFiles`，清除 error 状态
+- 前端收到结果后重新调用 `/api/generate/build` 触发重建
+- `result.fixed` 为 0 表示未能修复任何文件
 
 ### GET /api/generate/download
 

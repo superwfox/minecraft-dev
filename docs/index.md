@@ -66,13 +66,13 @@ features:
 并且支持用 /setNotice 命令设置踢出时的提示"
 
 AI 输出：
-✅ 生成 pom.xml（Maven 配置）
-✅ 生成 plugin.yml（插件描述）
-✅ 生成 MaintenancePlugin.java（主类 + 事件监听）
-✅ 生成 SetNoticeCommand.java（命令处理）
-✅ 生成 config.yml（配置文件）
-✅ 触发 GitHub Actions 构建
-✅ 下载 MaintenancePlugin.jar
+● 生成 pom.xml（Maven 配置）
+● 生成 plugin.yml（插件描述）
+● 生成 MaintenancePlugin.java（主类 + 事件监听）
+● 生成 SetNoticeCommand.java（命令处理）
+● 生成 config.yml（配置文件）
+● 触发 GitHub Actions 构建
+● 下载 MaintenancePlugin.jar
 ```
 
 [查看完整演示 →](/guide/demo-showcase)
