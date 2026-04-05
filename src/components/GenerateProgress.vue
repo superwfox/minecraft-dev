@@ -2,7 +2,7 @@
   <div class="gen-wrap" ref="wrapRef">
     <!-- 规划卡片 -->
     <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
-      <div class="gen-card-title">📋 项目规划</div>
+      <div class="gen-card-title">▪ 项目规划</div>
       <div class="gen-phases">
         <span v-for="p in phases" :key="p.key" class="gen-phase"
               :class="{active: p.key === genTask.phase, done: phaseOrder(p.key) < phaseOrder(genTask.phase)}">
@@ -18,12 +18,12 @@
 
     <!-- 文件生成卡片 -->
     <div class="glass2 gen-card" v-if="genTask.files.length">
-      <div class="gen-card-title">📝 代码生成</div>
+      <div class="gen-card-title">▪ 代码生成</div>
       <div class="gen-files">
         <div v-for="(f, i) in genTask.files" :key="f.path" class="gen-file"
              :class="f.status" @click="toggleExpand(i)">
           <span class="gen-file-icon">
-            {{ f.status === "done" ? "✅" : f.status === "generating" ? "🔄" : "⏳" }}
+            {{ f.status === "done" ? "●" : f.status === "generating" ? "◌" : "○" }}
           </span>
           <span class="gen-file-path">{{ f.path }}</span>
           <span class="gen-file-role">{{ f.role }}</span>
@@ -34,22 +34,30 @@
       </div>
     </div>
 
+    <!-- AI 流式输出卡片 -->
+    <div class="glass2 gen-card" v-if="genTask.streamingPhase">
+      <div class="gen-card-title">{{ streamPhaseLabel }} {{ genTask.streamingFile }}</div>
+      <div class="gen-stream-wrap" ref="streamRef">
+        <pre class="gen-stream-text" :key="streamKey">{{ genTask.streamingContent }}</pre>
+      </div>
+    </div>
+
     <!-- 构建卡片 -->
     <div class="glass2 gen-card" v-if="showBuild">
-      <div class="gen-card-title">🔨 构建</div>
+      <div class="gen-card-title">▪ 构建</div>
       <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
         <div class="gen-spinner"></div>
         <span>{{ genTask.phase === "uploading" ? "上传中..." : "构建中，请稍候..." }}</span>
       </div>
       <div v-if="genTask.phase === 'done'" class="gen-done">
-        <a :href="downloadUrl" class="gen-download-btn">📦 下载 JAR</a>
+        <a :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
       </div>
       <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
     </div>
 
     <!-- 日志卡片 -->
     <div class="glass2 gen-card" v-if="genTask.logs.length">
-      <div class="gen-card-title">📜 日志</div>
+      <div class="gen-card-title">▪ 日志</div>
       <div class="gen-logs" ref="logRef">
         <div v-for="(log, i) in genTask.logs" :key="i" class="gen-log">{{ log }}</div>
       </div>
@@ -66,6 +74,16 @@ const expandedIndex = ref(-1);
 const downloadUrl = computed(() => getDownloadUrl());
 const wrapRef = ref<HTMLElement | null>(null);
 const logRef = ref<HTMLElement | null>(null);
+const streamRef = ref<HTMLElement | null>(null);
+
+const streamPhaseLabels: Record<string, string> = {
+    generating: "▸ 生成中",
+    reviewing: "▸ 审查中",
+    reworking: "▸ 修正中",
+    summarizing: "▸ 提取摘要",
+};
+const streamPhaseLabel = computed(() => streamPhaseLabels[genTask.streamingPhase] || genTask.streamingPhase);
+const streamKey = computed(() => genTask.streamingPhase + ":" + genTask.streamingFile);
 
 const showBuild = computed(() =>
     ["uploading", "building", "polling", "done", "error"].includes(genTask.phase)
@@ -92,6 +110,11 @@ watch(() => genTask.logs.length, async () => {
 watch(() => genTask.phase, async () => {
     await nextTick();
     wrapRef.value?.lastElementChild?.scrollIntoView({behavior: "smooth", block: "end"});
+});
+
+watch(() => genTask.streamingContent, async () => {
+    await nextTick();
+    if (streamRef.value) streamRef.value.scrollTop = streamRef.value.scrollHeight;
 });
 </script>
 
@@ -237,5 +260,26 @@ watch(() => genTask.phase, async () => {
   font-size: 12px;
   color: rgba(255,255,255,0.35);
   font-family: monospace;
+}
+
+.gen-stream-wrap {
+  max-height: 250px;
+  overflow-y: auto;
+  background: rgba(0,0,0,0.3);
+  border-radius: 10px;
+  padding: 12px;
+}
+.gen-stream-text {
+  color: rgba(255,255,255,0.8);
+  font-family: "Monaco", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  margin: 0;
+  animation: blurFadeIn 0.4s ease-out;
+}
+@keyframes blurFadeIn {
+  from { opacity: 0; filter: blur(4px); }
+  to   { opacity: 1; filter: blur(0); }
 }
 </style>

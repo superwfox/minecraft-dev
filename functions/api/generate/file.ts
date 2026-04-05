@@ -9,6 +9,7 @@ interface Env {
     TASKS: KVNamespace;
 }
 
+/** Non-streaming call for JSON mode (reChecker, summaryExtract) */
 async function callAI(key: string, system: string, user: string, jsonMode = false) {
     const body: any = {
         model: "deepseek-chat",
@@ -26,19 +27,74 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
     return data.choices?.[0]?.message?.content ?? "";
 }
 
+/** Streaming call — writes delta events to the SSE writer and returns full text */
+async function callAIStream(
+    key: string,
+    system: string,
+    user: string,
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+) {
+    const body = {
+        model: "deepseek-chat",
+        stream: true,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    };
+
+    const resp = await fetch(DEEPSEEK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+
+    const reader = resp.body!.getReader();
+    const decoder = new TextDecoder();
+    let full = "";
+    let buffer = "";
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop()!;
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") continue;
+
+            try {
+                const chunk = JSON.parse(payload);
+                const delta = chunk.choices?.[0]?.delta?.content;
+                if (delta) {
+                    full += delta;
+                    await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
+                }
+            } catch { /* skip malformed chunks */ }
+        }
+    }
+
+    return full;
+}
+
 function stripFences(raw: string): string {
     return raw.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "");
 }
 
-/** 从 state.generatedFiles 中提取结构化摘要列表 */
 function extractSummaries(generatedFiles: any[]): FileSummary[] {
     return generatedFiles.map((f: any) => {
         const s: FileSummary = { path: f.path };
-        if (f.apiSummary) {
-            Object.assign(s, f.apiSummary);
-        }
+        if (f.apiSummary) Object.assign(s, f.apiSummary);
         return s;
     });
+}
+
+function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
+    return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -65,58 +121,97 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         javaVersion: state.javaVersion,
     };
 
-    state.status = "generating";
-    state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
+    const { readable, writable } = new TransformStream<Uint8Array>();
+    const encoder = new TextEncoder();
+    const writer = writable.getWriter();
 
-    // 生成文件内容
-    const gen = fileGenPrompt(target.path, target.role, ctx, summaries);
-    let content = stripFences(await callAI(key, gen.system, gen.user));
-    let reworkCount = 0;
+    const process = (async () => {
+        try {
+            // Phase: generating
+            await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: target.path }));
+            await writer.write(sseEvent(encoder, { type: "log", msg: `正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})` }));
+            state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
 
-    // reChecker 审查循环（传入跨文件上下文）
-    for (let i = 0; i < MAX_REWORK; i++) {
-        state.logs.push(`🔍 审查 ${target.path}...`);
-        const check = reCheckerPrompt(target.path, content, summaries);
-        const reviewRaw = await callAI(key, check.system, check.user, true);
+            const gen = fileGenPrompt(target.path, target.role, ctx, summaries);
+            let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
+            let reworkCount = 0;
 
-        let review: any;
-        try { review = JSON.parse(reviewRaw); } catch { break; }
+            // reChecker loop
+            for (let i = 0; i < MAX_REWORK; i++) {
+                await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: target.path }));
+                await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${target.path}...` }));
+                state.logs.push(`▸ 审查 ${target.path}...`);
 
-        if (review.is_ok) {
-            state.logs.push(`✅ ${target.path} 审查通过`);
-            break;
+                const check = reCheckerPrompt(target.path, content, summaries, ctx.projectName);
+                const reviewRaw = await callAI(key, check.system, check.user, true);
+
+                let review: any;
+                try { review = JSON.parse(reviewRaw); } catch { break; }
+
+                if (review.is_ok) {
+                    await writer.write(sseEvent(encoder, { type: "log", msg: `● ${target.path} 审查通过` }));
+                    state.logs.push(`● ${target.path} 审查通过`);
+                    break;
+                }
+
+                reworkCount++;
+                const reworkMsg = `↻ ${target.path} 需修正 (${reworkCount}/${MAX_REWORK}): ${review.reason}`;
+                await writer.write(sseEvent(encoder, { type: "log", msg: reworkMsg }));
+                state.logs.push(reworkMsg);
+
+                await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
+
+                const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
+                content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
+            }
+
+            // Phase: summarizing
+            await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: target.path }));
+            let apiSummary: any = null;
+            try {
+                await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${target.path} 的 API 摘要...` }));
+                state.logs.push(`▸ 提取 ${target.path} 的 API 摘要...`);
+                const ext = summaryExtractPrompt(target.path, content);
+                const summaryRaw = await callAI(key, ext.system, ext.user, true);
+                apiSummary = JSON.parse(summaryRaw);
+            } catch {
+                apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
+            }
+
+            state.generatedFiles.push({ path: target.path, content, apiSummary });
+            state.currentFileIndex++;
+            const doneMsg = `● ${target.path} 已完成${reworkCount > 0 ? ` (修正${reworkCount}次)` : ""}`;
+            state.logs.push(doneMsg);
+            await writer.write(sseEvent(encoder, { type: "log", msg: doneMsg }));
+
+            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+
+            await writer.write(sseEvent(encoder, {
+                type: "result",
+                done: false,
+                fileIndex: state.currentFileIndex - 1,
+                path: target.path,
+                content,
+                remaining: state.plan.length - state.currentFileIndex,
+                reworkCount,
+            }));
+
+            await writer.write(encoder.encode("data: [DONE]\n\n"));
+        } catch (e: any) {
+            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${e.message}` }));
+            await writer.write(encoder.encode("data: [DONE]\n\n"));
+        } finally {
+            await writer.close();
         }
+    })();
 
-        reworkCount++;
-        state.logs.push(`🔄 ${target.path} 需修正 (${reworkCount}/${MAX_REWORK}): ${review.reason}`);
-        const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
-        content = stripFences(await callAI(key, rw.system, rw.user));
-    }
+    context.waitUntil(process);
 
-    // 提取结构化 API 摘要（替代原来的前3行截断）
-    let apiSummary: any = null;
-    try {
-        state.logs.push(`📋 提取 ${target.path} 的 API 摘要...`);
-        const ext = summaryExtractPrompt(target.path, content);
-        const summaryRaw = await callAI(key, ext.system, ext.user, true);
-        apiSummary = JSON.parse(summaryRaw);
-    } catch {
-        // 摘要提取失败时降级为简单描述
-        apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
-    }
-
-    state.generatedFiles.push({ path: target.path, content, apiSummary });
-    state.currentFileIndex++;
-    state.logs.push(`✅ ${target.path} 已完成${reworkCount > 0 ? ` (修正${reworkCount}次)` : ""}`);
-
-    await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
-
-    return new Response(JSON.stringify({
-        done: false,
-        fileIndex: state.currentFileIndex - 1,
-        path: target.path,
-        content,
-        remaining: state.plan.length - state.currentFileIndex,
-        reworkCount,
-    }), { headers: { "Content-Type": "application/json" } });
+    return new Response(readable, {
+        headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    });
 };

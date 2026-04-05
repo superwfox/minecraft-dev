@@ -19,6 +19,9 @@ export type GenTask = {
     currentIndex: number;
     logs: string[];
     error: string;
+    streamingContent: string;
+    streamingPhase: string;
+    streamingFile: string;
 };
 
 export const genTask = reactive<GenTask>({
@@ -31,6 +34,9 @@ export const genTask = reactive<GenTask>({
     currentIndex: 0,
     logs: [],
     error: "",
+    streamingContent: "",
+    streamingPhase: "",
+    streamingFile: "",
 });
 
 export function resetGenTask() {
@@ -43,4 +49,7 @@ export function resetGenTask() {
     genTask.currentIndex = 0;
     genTask.logs = [];
     genTask.error = "";
+    genTask.streamingContent = "";
+    genTask.streamingPhase = "";
+    genTask.streamingFile = "";
 }

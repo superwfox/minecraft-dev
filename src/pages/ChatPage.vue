@@ -55,7 +55,7 @@
     <!-- 输入框 -->
     <div class="glass2 chat-input-wrap">
       <button class="voice-btn" :class="{recording: isRecording}" @click="toggleVoice" :disabled="sending">
-        🎤
+        ◉
       </button>
       <input class="chat-input" v-model="inputText" placeholder="描述你的开发需求..."
              @keydown.enter="send" :disabled="sending"/>
@@ -212,10 +212,10 @@ watch(() => genTask.phase, (p) => {
 }
 .streaming-msg {
   color: rgba(255,255,255,0.9);
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
-  font-family: monospace;
+  font-family: "Monaco", monospace;
   animation: fadeSlideIn 0.35s ease-out;
 }
 @keyframes fadeSlideIn {

@@ -103,6 +103,8 @@ ${apiBlock}
 - 确保 import 与已生成文件一致
 - 你只能调用上面「已生成文件的可用 API」中列出的类和方法，不要假设任何未列出的方法或类存在
 - 如果需要的功能在已生成文件中不存在，请在当前文件中自行实现，不要凭空调用不存在的方法
+- 禁止直接引用或转换插件主类类型。获取插件实例必须使用 Bukkit.getPluginManager().getPlugin("${projectContext.projectName}")，返回类型使用 org.bukkit.plugin.Plugin 接口，不要强转为具体主类
+- 不要使用 XxxPlugin.getPlugin()、XxxPlugin.getInstance() 或 (XxxPlugin) 强转等模式
 - 代码简洁实用，注释极少`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
@@ -114,6 +116,7 @@ export function reCheckerPrompt(
     filePath: string,
     fileContent: string,
     generatedSummaries?: FileSummary[],
+    projectName?: string,
 ): { system: string; user: string } {
     const crossFileBlock = generatedSummaries?.length
         ? "\n\n项目中已生成文件的可用 API：" + formatSummaries(generatedSummaries) +
@@ -122,6 +125,7 @@ export function reCheckerPrompt(
 
     return {
         system: `你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
+检查是否存在对插件主类的直接类型引用或强制转换（如 (MainClass) getPlugin(...)、MainClass.getInstance()）。代码应通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 获取插件实例，类型为 Plugin 接口。发现此类模式视为错误。
 只输出 JSON：{"is_ok":true,"reason":""} 或 {"is_ok":false,"reason":"具体错误描述"}
 不要输出其他内容。`,
         user: `文件：${filePath}\n\n${fileContent}`,
@@ -145,7 +149,8 @@ export function reworkPrompt(
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
-你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。`,
+你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
+禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。`,
         user: `文件 ${filePath}（职责：${fileRole}）存在错误：${reason}\n\n原始内容：\n${originalContent}`,
     };
 }
