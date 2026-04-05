@@ -3,13 +3,13 @@ import type { FileSummary } from "../../_lib/prompts";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const MAX_REWORK = 2;
+const MAX_DYNAMIC_GEN = 3;
 
 interface Env {
     DEEPSEEK_API_KEY: string;
     TASKS: KVNamespace;
 }
 
-/** Non-streaming call for JSON mode (reChecker, summaryExtract) */
 async function callAI(key: string, system: string, user: string, jsonMode = false) {
     const body: any = {
         model: "deepseek-chat",
@@ -27,13 +27,9 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
     return data.choices?.[0]?.message?.content ?? "";
 }
 
-/** Streaming call — writes delta events to the SSE writer and returns full text */
 async function callAIStream(
-    key: string,
-    system: string,
-    user: string,
-    writer: WritableStreamDefaultWriter<Uint8Array>,
-    encoder: TextEncoder,
+    key: string, system: string, user: string,
+    writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ) {
     const body = {
         model: "deepseek-chat",
@@ -57,7 +53,6 @@ async function callAIStream(
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
 
@@ -66,7 +61,6 @@ async function callAIStream(
             if (!trimmed.startsWith("data:")) continue;
             const payload = trimmed.slice(5).trim();
             if (payload === "[DONE]") continue;
-
             try {
                 const chunk = JSON.parse(payload);
                 const delta = chunk.choices?.[0]?.delta?.content;
@@ -74,10 +68,9 @@ async function callAIStream(
                     full += delta;
                     await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
                 }
-            } catch { /* skip malformed chunks */ }
+            } catch { /* skip */ }
         }
     }
-
     return full;
 }
 
@@ -95,6 +88,65 @@ function extractSummaries(generatedFiles: any[]): FileSummary[] {
 
 function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+/** Generate a single file with optional reChecker + rework, return content and summary */
+async function generateSingleFile(
+    key: string, filePath: string, fileRole: string,
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+    summaries: FileSummary[],
+    writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
+    state: any,
+    maxRework: number,
+): Promise<{ content: string; apiSummary: any; reworkCount: number }> {
+    await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: filePath }));
+    await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 正在生成 ${filePath}` }));
+    state.logs.push(`▸ 正在生成 ${filePath}`);
+
+    const gen = fileGenPrompt(filePath, fileRole, ctx, summaries);
+    let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
+    let reworkCount = 0;
+
+    for (let i = 0; i < maxRework; i++) {
+        await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: filePath }));
+        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${filePath}...` }));
+        state.logs.push(`▸ 审查 ${filePath}...`);
+
+        const check = reCheckerPrompt(filePath, content, summaries, ctx.projectName);
+        const reviewRaw = await callAI(key, check.system, check.user, true);
+        let review: any;
+        try { review = JSON.parse(reviewRaw); } catch { break; }
+
+        if (review.is_ok) {
+            await writer.write(sseEvent(encoder, { type: "log", msg: `● ${filePath} 审查通过` }));
+            state.logs.push(`● ${filePath} 审查通过`);
+            break;
+        }
+
+        reworkCount++;
+        const msg = `↻ ${filePath} 需修正 (${reworkCount}/${maxRework}): ${review.reason}`;
+        await writer.write(sseEvent(encoder, { type: "log", msg }));
+        state.logs.push(msg);
+
+        await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
+        const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries);
+        content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
+    }
+
+    // Extract summary
+    await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: filePath }));
+    let apiSummary: any = null;
+    try {
+        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
+        state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
+        const ext = summaryExtractPrompt(filePath, content);
+        const summaryRaw = await callAI(key, ext.system, ext.user, true);
+        apiSummary = JSON.parse(summaryRaw);
+    } catch {
+        apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
+    }
+
+    return { content, apiSummary, reworkCount };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -127,7 +179,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const process = (async () => {
         try {
-            // Phase: generating
+            // Phase: generating main file
             await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: target.path }));
             await writer.write(sseEvent(encoder, { type: "log", msg: `正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})` }));
             state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
@@ -135,16 +187,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const gen = fileGenPrompt(target.path, target.role, ctx, summaries);
             let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
             let reworkCount = 0;
+            let dynamicGenDone = false;
 
-            // reChecker loop
-            for (let i = 0; i < MAX_REWORK; i++) {
+            // reChecker loop with dynamic file generation support
+            while (reworkCount < MAX_REWORK) {
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: target.path }));
                 await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${target.path}...` }));
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
                 const check = reCheckerPrompt(target.path, content, summaries, ctx.projectName);
                 const reviewRaw = await callAI(key, check.system, check.user, true);
-
                 let review: any;
                 try { review = JSON.parse(reviewRaw); } catch { break; }
 
@@ -154,18 +206,56 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     break;
                 }
 
+                // Dynamic file generation for missing classes (try once)
+                const missingClasses: string[] = review.missing_classes ?? [];
+                if (missingClasses.length > 0 && !dynamicGenDone) {
+                    dynamicGenDone = true;
+                    const alreadyGenerated = new Set(summaries.map(s => s.className).filter(Boolean));
+                    const toGenerate = missingClasses
+                        .filter(c => !alreadyGenerated.has(c))
+                        .slice(0, MAX_DYNAMIC_GEN);
+
+                    if (toGenerate.length > 0) {
+                        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}` }));
+                        state.logs.push(`▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}`);
+
+                        for (const className of toGenerate) {
+                            const newPath = `src/main/java/${ctx.packageName.replace(/\./g, "/")}/${className}.java`;
+                            const newRole = `${className} — 被 ${target.path.split("/").pop()} 引用`;
+
+                            const result = await generateSingleFile(
+                                key, newPath, newRole, ctx, summaries,
+                                writer, encoder, state, 1,
+                            );
+
+                            state.generatedFiles.push({ path: newPath, content: result.content, apiSummary: result.apiSummary });
+                            summaries.push({ path: newPath, ...result.apiSummary });
+
+                            await writer.write(sseEvent(encoder, {
+                                type: "new_file", path: newPath, role: newRole, content: result.content,
+                            }));
+                            const msg = `● ${className} 动态生成完成`;
+                            await writer.write(sseEvent(encoder, { type: "log", msg }));
+                            state.logs.push(msg);
+                        }
+
+                        // Re-check the original file with updated summaries (don't count as rework)
+                        continue;
+                    }
+                }
+
+                // Normal rework
                 reworkCount++;
                 const reworkMsg = `↻ ${target.path} 需修正 (${reworkCount}/${MAX_REWORK}): ${review.reason}`;
                 await writer.write(sseEvent(encoder, { type: "log", msg: reworkMsg }));
                 state.logs.push(reworkMsg);
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
-
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
                 content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
             }
 
-            // Phase: summarizing
+            // Summary extraction for the original file
             await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: target.path }));
             let apiSummary: any = null;
             try {
@@ -187,11 +277,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
             await writer.write(sseEvent(encoder, {
-                type: "result",
-                done: false,
+                type: "result", done: false,
                 fileIndex: state.currentFileIndex - 1,
-                path: target.path,
-                content,
+                path: target.path, content,
                 remaining: state.plan.length - state.currentFileIndex,
                 reworkCount,
             }));

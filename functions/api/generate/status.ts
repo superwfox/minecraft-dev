@@ -43,7 +43,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         if (artifact) {
             state.artifactId = artifact.id;
             state.status = "done";
-            state.logs.push("✅ 构建成功，JAR 已就绪");
+            state.logs.push("● 构建成功，JAR 已就绪");
         } else {
             state.status = "error";
             state.error = "构建成功但未找到 artifact";
@@ -51,11 +51,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     } else {
         state.status = "error";
         state.error = `构建失败: ${conclusion}`;
-        state.logs.push(`❌ 构建结果: ${conclusion}`);
+        state.logs.push(`× 构建结果: ${conclusion}`);
     }
 
-    // 构建结束后始终删除临时分支
-    if (state.buildBranch) {
+    // 成功时删除临时分支；失败时保留以供 fix 端点读取日志
+    if (state.buildBranch && state.status === "done") {
         deleteBranch(token, state.buildBranch).catch(() => { });
     }
 

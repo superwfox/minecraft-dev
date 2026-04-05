@@ -1,13 +1,15 @@
 import { genTask, resetGenTask } from "./generateState";
 import type { GenPhase } from "./generateState";
 
+const MAX_FIX_ATTEMPTS = 2;
+
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
     if (log) genTask.logs.push(log);
 }
 
 function isGeneratingPhase(phase: GenPhase) {
-    return ["planning", "generating", "verifying", "uploading", "building", "polling"].includes(phase);
+    return ["planning", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -35,23 +37,8 @@ async function get(url: string) {
     return resp.json() as any;
 }
 
-/** SSE streaming file generation — reads events and updates genTask reactively */
-async function streamFileGeneration(taskId: string): Promise<any> {
-    const resp = await fetch("/api/generate/file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId }),
-    });
-
-    if (!resp.ok) throw new Error(await resp.text());
-
-    // If response is JSON (e.g. done:true), handle directly
-    const contentType = resp.headers.get("Content-Type") || "";
-    if (contentType.includes("application/json")) {
-        return await resp.json();
-    }
-
-    // SSE stream
+/** Read an SSE stream, dispatch events to genTask, return the result event */
+async function readSSE(resp: Response): Promise<any> {
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -61,7 +48,6 @@ async function streamFileGeneration(taskId: string): Promise<any> {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
 
@@ -73,7 +59,6 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 
             try {
                 const evt = JSON.parse(payload);
-
                 switch (evt.type) {
                     case "phase":
                         genTask.streamingPhase = evt.phase;
@@ -86,20 +71,58 @@ async function streamFileGeneration(taskId: string): Promise<any> {
                     case "log":
                         genTask.logs.push(evt.msg);
                         break;
+                    case "new_file":
+                        genTask.files.push({
+                            path: evt.path, role: evt.role,
+                            content: evt.content, status: "done",
+                        });
+                        break;
                     case "result":
                         result = evt;
                         break;
                 }
-            } catch { /* skip malformed */ }
+            } catch { /* skip */ }
         }
     }
 
-    // Clear streaming state after stream ends
     genTask.streamingPhase = "";
     genTask.streamingFile = "";
     genTask.streamingContent = "";
-
     return result;
+}
+
+/** SSE streaming file generation */
+async function streamFileGeneration(taskId: string): Promise<any> {
+    const resp = await fetch("/api/generate/file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+
+    const contentType = resp.headers.get("Content-Type") || "";
+    if (contentType.includes("application/json")) {
+        return await resp.json();
+    }
+
+    return readSSE(resp);
+}
+
+/** SSE streaming build fix */
+async function streamBuildFix(taskId: string): Promise<any> {
+    const resp = await fetch("/api/generate/fix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+
+    const contentType = resp.headers.get("Content-Type") || "";
+    if (contentType.includes("application/json")) {
+        return await resp.json();
+    }
+
+    return readSSE(resp);
 }
 
 export async function startGenerate(userPrompt: string, coreType: string, version: string) {
@@ -158,12 +181,8 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         }
         genTask.logs.push(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
 
-        setPhase("uploading", "正在上传到 GitHub 并触发构建...");
-        const buildResult = await post("/api/generate/build", { taskId: genTask.taskId });
-        genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
-
-        setPhase("building", "正在等待 GitHub Actions 构建...");
-        await pollBuildStatus();
+        // Build with fix-retry loop
+        await buildWithRetry();
     } catch (e: any) {
         genTask.phase = "error";
         genTask.error = e.message || String(e);
@@ -171,7 +190,35 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     }
 }
 
-async function pollBuildStatus() {
+async function buildWithRetry() {
+    for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+        setPhase("uploading", "正在上传到 GitHub 并触发构建...");
+        const buildResult = await post("/api/generate/build", { taskId: genTask.taskId });
+        genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
+
+        setPhase("building", "正在等待 GitHub Actions 构建...");
+        const buildOk = await pollBuildStatus();
+
+        if (buildOk) return; // success
+
+        // Build failed — attempt fix
+        if (attempt < MAX_FIX_ATTEMPTS) {
+            genTask.logs.push(`! 构建失败，尝试自动修复 (第${attempt + 1}次)...`);
+            setPhase("fixing", "正在分析编译错误并修复...");
+
+            const fixResult = await streamBuildFix(genTask.taskId);
+            if (!fixResult || fixResult.fixed === 0) {
+                throw new Error("自动修复未能修正任何文件，构建失败");
+            }
+            genTask.logs.push(`● 已修复 ${fixResult.fixed} 个文件，重新构建...`);
+        } else {
+            throw new Error("构建失败，已用尽自动修复次数");
+        }
+    }
+}
+
+/** Poll build status. Returns true on success, false on failure. */
+async function pollBuildStatus(): Promise<boolean> {
     const maxAttempts = 60;
     for (let i = 0; i < maxAttempts; i++) {
         await new Promise(r => setTimeout(r, 5000));
@@ -180,10 +227,10 @@ async function pollBuildStatus() {
 
         if (result.status === "done") {
             setPhase("done", "● 构建成功，JAR 已就绪！");
-            return;
+            return true;
         }
         if (result.status === "error") {
-            throw new Error(result.error || "构建失败");
+            return false;
         }
         if (i % 3 === 0) {
             genTask.logs.push(`构建中... (${result.runStatus || "queued"})`);

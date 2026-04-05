@@ -146,6 +146,20 @@ export async function createCommitAndUpdateRef(
     return commit.sha;
 }
 
+export async function getRunJobs(token: string, runId: number): Promise<{ id: number; name: string; conclusion: string | null }[]> {
+    const data = await (await ghFetch(token, `/actions/runs/${runId}/jobs`)).json() as any;
+    return (data.jobs ?? []).map((j: any) => ({ id: j.id, name: j.name, conclusion: j.conclusion }));
+}
+
+export async function getJobLogs(token: string, jobId: number): Promise<string> {
+    const resp = await fetch(`${BASE}/actions/jobs/${jobId}/logs`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mc-devtool" },
+        redirect: "follow",
+    });
+    if (!resp.ok) throw new Error(`Failed to fetch job logs: ${resp.status}`);
+    return await resp.text();
+}
+
 export async function deleteBranch(token: string, name: string) {
     try {
         await ghFetch(token, `/git/refs/heads/${name}`, { method: "DELETE" });

@@ -126,7 +126,10 @@ export function reCheckerPrompt(
     return {
         system: `你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
 检查是否存在对插件主类的直接类型引用或强制转换（如 (MainClass) getPlugin(...)、MainClass.getInstance()）。代码应通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 获取插件实例，类型为 Plugin 接口。发现此类模式视为错误。
-只输出 JSON：{"is_ok":true,"reason":""} 或 {"is_ok":false,"reason":"具体错误描述"}
+只输出 JSON，格式如下：
+- 通过：{"is_ok":true,"reason":"","missing_classes":[]}
+- 不通过：{"is_ok":false,"reason":"具体错误描述","missing_classes":["ClassName"]}
+missing_classes 列出当前文件引用了但未在已生成 API 列表中存在的项目内 Java 类名（不含包名，仅类名如 "WelcomeCommand"）。只列出确实被当前文件 import 或直接使用、但不在已知 API 中的类。如果错误与缺失类无关则为空数组。
 不要输出其他内容。`,
         user: `文件：${filePath}\n\n${fileContent}`,
     };
@@ -182,5 +185,28 @@ export function summaryExtractPrompt(filePath: string, fileContent: string): { s
 - 如果某个字段不适用，使用 null 或空数组
 - 只输出 JSON，不要解释`,
         user: `文件：${filePath}\n\n${fileContent}`,
+    };
+}
+
+// ─── Build Fix ─────────────────────────────────────────────
+
+export function buildFixPrompt(
+    filePath: string,
+    fileContent: string,
+    buildErrors: string,
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+    generatedSummaries?: FileSummary[],
+): { system: string; user: string } {
+    const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
+
+    return {
+        system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件代码修正器。
+项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
+${apiBlock}
+Maven 编译失败。根据下方的编译错误日志修正文件，使其能通过编译。
+只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
+你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
+禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。`,
+        user: `文件 ${filePath} 编译失败。\n\n编译错误日志：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
     };
 }

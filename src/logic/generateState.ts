@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 
-export type GenPhase = "idle" | "planning" | "generating" | "verifying" | "uploading" | "building" | "polling" | "done" | "error";
+export type GenPhase = "idle" | "planning" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
 
 export type GenFile = {
     path: string;

@@ -81,12 +81,13 @@ const streamPhaseLabels: Record<string, string> = {
     reviewing: "▸ 审查中",
     reworking: "▸ 修正中",
     summarizing: "▸ 提取摘要",
+    fixing: "▸ 修复编译错误",
 };
 const streamPhaseLabel = computed(() => streamPhaseLabels[genTask.streamingPhase] || genTask.streamingPhase);
 const streamKey = computed(() => genTask.streamingPhase + ":" + genTask.streamingFile);
 
 const showBuild = computed(() =>
-    ["uploading", "building", "polling", "done", "error"].includes(genTask.phase)
+    ["uploading", "building", "polling", "fixing", "done", "error"].includes(genTask.phase)
 );
 
 const phases = [
@@ -97,7 +98,7 @@ const phases = [
     {key: "done", label: "完成"},
 ];
 
-const ORDER: Record<string, number> = {idle: 0, planning: 1, generating: 2, verifying: 3, uploading: 4, building: 4, polling: 4, done: 5, error: -1};
+const ORDER: Record<string, number> = {idle: 0, planning: 1, generating: 2, verifying: 3, uploading: 4, building: 4, polling: 4, fixing: 4, done: 5, error: -1};
 function phaseOrder(key: string) { return ORDER[key] ?? 0; }
 function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value === i ? -1 : i; }
 

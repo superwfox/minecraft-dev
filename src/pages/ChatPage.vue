@@ -148,6 +148,7 @@ const phaseLabels: Record<string, string> = {
     uploading: "正在上传构建...",
     building: "正在编译打包...",
     polling: "正在编译打包...",
+    fixing: "正在修复编译错误...",
     done: "JAR 已就绪",
     error: "生成失败",
 };

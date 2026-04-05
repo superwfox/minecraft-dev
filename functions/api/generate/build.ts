@@ -58,7 +58,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     } catch (e: any) {
         state.status = "error";
         state.error = e.message;
-        state.logs.push("❌ 构建启动失败: " + e.message);
+        state.logs.push("× 构建启动失败: " + e.message);
         await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
         return new Response(JSON.stringify({ error: e.message }), { status: 500 });
     }
