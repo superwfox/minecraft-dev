@@ -1,6 +1,6 @@
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
-import { getRunJobs, getJobLogs } from "../../_lib/github";
+import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 
@@ -207,6 +207,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const msg = `● ${filePath.split("/").pop()} 修复完成`;
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
                 state.logs.push(msg);
+            }
+
+            // Delete the failed build branch on GitHub so rebuild can create a fresh one
+            if (state.buildBranch) {
+                try {
+                    await deleteBranch(token, state.buildBranch);
+                } catch (e: any) {
+                    await writer.write(sseEvent(encoder, { type: "log", msg: `! 删除旧分支失败: ${e.message}` }));
+                }
             }
 
             // Clear error state so rebuild can proceed
