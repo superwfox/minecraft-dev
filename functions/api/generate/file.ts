@@ -2,7 +2,7 @@ import { fileGenPrompt, reCheckerPrompt, reworkPrompt, summaryExtractPrompt } fr
 import type { FileSummary } from "../../_lib/prompts";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
-const MAX_REWORK = 2;
+const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
 
 interface Env {
@@ -98,7 +98,7 @@ async function generateSingleFile(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
     maxRework: number,
-): Promise<{ content: string; apiSummary: any; reworkCount: number }> {
+): Promise<{ content: string; apiSummary: any; reworkCount: number; failed: boolean }> {
     await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: filePath }));
     await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 正在生成 ${filePath}` }));
     state.logs.push(`▸ 正在生成 ${filePath}`);
@@ -106,6 +106,7 @@ async function generateSingleFile(
     const gen = fileGenPrompt(filePath, fileRole, ctx, summaries);
     let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
     let reworkCount = 0;
+    let passed = false;
 
     for (let i = 0; i < maxRework; i++) {
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: filePath }));
@@ -115,11 +116,12 @@ async function generateSingleFile(
         const check = reCheckerPrompt(filePath, content, summaries, ctx.projectName);
         const reviewRaw = await callAI(key, check.system, check.user, true);
         let review: any;
-        try { review = JSON.parse(reviewRaw); } catch { break; }
+        try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
 
         if (review.is_ok) {
             await writer.write(sseEvent(encoder, { type: "log", msg: `● ${filePath} 审查通过` }));
             state.logs.push(`● ${filePath} 审查通过`);
+            passed = true;
             break;
         }
 
@@ -146,7 +148,7 @@ async function generateSingleFile(
         apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
     }
 
-    return { content, apiSummary, reworkCount };
+    return { content, apiSummary, reworkCount, failed: !passed };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -188,6 +190,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
             let reworkCount = 0;
             let dynamicGenDone = false;
+            let passed = false;
 
             // reChecker loop with dynamic file generation support
             while (reworkCount < MAX_REWORK) {
@@ -198,11 +201,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const check = reCheckerPrompt(target.path, content, summaries, ctx.projectName);
                 const reviewRaw = await callAI(key, check.system, check.user, true);
                 let review: any;
-                try { review = JSON.parse(reviewRaw); } catch { break; }
+                try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
 
                 if (review.is_ok) {
                     await writer.write(sseEvent(encoder, { type: "log", msg: `● ${target.path} 审查通过` }));
                     state.logs.push(`● ${target.path} 审查通过`);
+                    passed = true;
                     break;
                 }
 
@@ -253,6 +257,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
                 content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
+            }
+
+            // If rework exhausted without passing, signal replan needed
+            if (!passed && reworkCount >= MAX_REWORK) {
+                const failMsg = `× ${target.path} 经过 ${MAX_REWORK} 次修正仍未通过审查，需要重新规划`;
+                await writer.write(sseEvent(encoder, { type: "log", msg: failMsg }));
+                state.logs.push(failMsg);
+                state.status = "error";
+                state.error = failMsg;
+                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+
+                await writer.write(sseEvent(encoder, {
+                    type: "result", done: false, replan: true,
+                    path: target.path, reason: failMsg,
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                await writer.close();
+                return;
             }
 
             // Summary extraction for the original file

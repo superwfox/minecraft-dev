@@ -74,7 +74,15 @@ export function plannerPrompt(userPrompt: string, coreType: string, version: str
 - path 使用 Maven 标准目录结构
 - 包名使用全小写
 - 必须包含 plugin.yml（放 src/main/resources/）
-- 只输出 JSON，不要解释`,
+- 只输出 JSON，不要解释
+
+极简原则（严格遵守）：
+- 只规划用户需求中明确提到或逻辑上必需的文件，不要自行扩展功能范围
+- 每个文件的 role 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
+- 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
+- 能在一个文件中实现的逻辑不要拆分成多个文件
+- 不要规划与用户需求无关的辅助类、工具类、基类、接口
+- 功能类只实现 role 中描述的功能，不要预留扩展方法`,
         user: userPrompt,
     };
 }
@@ -105,7 +113,13 @@ ${apiBlock}
 - 如果需要的功能在已生成文件中不存在，请在当前文件中自行实现，不要凭空调用不存在的方法
 - 禁止直接引用或转换插件主类类型。获取插件实例必须使用 Bukkit.getPluginManager().getPlugin("${projectContext.projectName}")，返回类型使用 org.bukkit.plugin.Plugin 接口，不要强转为具体主类
 - 不要使用 XxxPlugin.getPlugin()、XxxPlugin.getInstance() 或 (XxxPlugin) 强转等模式
-- 代码简洁实用，注释极少`,
+- 代码简洁实用，注释极少
+
+极简原则（严格遵守）：
+- 只实现文件职责描述中明确要求的功能，不要自行添加任何额外的方法、命令、事件监听器
+- 例如：职责是"处理/addtask命令"，就只实现 addtask 命令，不要额外添加 deletetask、listtask 等
+- 不要生成"预留"或"可能有用"的方法，只写必需的代码
+- 不要为类添加 getInstance()、getManager() 等单例模式，除非职责中明确要求`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
 }

@@ -2,6 +2,7 @@ import { genTask, resetGenTask } from "./generateState";
 import type { GenPhase } from "./generateState";
 
 const MAX_FIX_ATTEMPTS = 2;
+const MAX_REPLAN_ATTEMPTS = 2;
 
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
@@ -132,61 +133,98 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
 
     resetGenTask();
 
-    try {
-        setPhase("planning", "正在分析需求，生成项目规划...");
-
-        const planResult = await post("/api/generate/plan", { userPrompt, coreType, version });
-        genTask.taskId = planResult.taskId;
-        genTask.projectName = planResult.projectName;
-        genTask.packageName = planResult.packageName;
-        genTask.javaVersion = planResult.javaVersion;
-        genTask.files = planResult.plan.map((f: any) => ({ path: f.path, role: f.role, status: "pending" }));
-        genTask.logs.push(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
-
-        setPhase("generating");
-        let remaining = genTask.files.length;
-        for (let i = 0; i < genTask.files.length && remaining > 0; i++) {
-            genTask.files[i].status = "generating";
-            genTask.currentIndex = i;
-
-            const fileResult = await streamFileGeneration(genTask.taskId);
-            if (!fileResult || fileResult.done) break;
-
-            genTask.files[i].content = fileResult.content;
-            genTask.files[i].status = "done";
-            remaining = fileResult.remaining ?? (genTask.files.length - i - 1);
-        }
-
-        setPhase("verifying", "正在校验文件完整性...");
-        let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-
-        for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
-            const missingList = verifyResult.missing as string[];
-            genTask.logs.push(`! 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
-            await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
-
-            setPhase("generating");
-            for (const mp of missingList) {
-                genTask.logs.push(`↻ 补生成 ${mp}`);
-                const fileResult = await streamFileGeneration(genTask.taskId);
-                if (!fileResult || fileResult.done) break;
+    for (let replanAttempt = 0; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
+        try {
+            if (replanAttempt > 0) {
+                genTask.logs.push(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
+                genTask.files = [];
+                genTask.currentIndex = 0;
+                genTask.error = "";
             }
 
-            setPhase("verifying", "正在重新校验...");
-            verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-        }
+            setPhase("planning", replanAttempt === 0
+                ? "正在分析需求，生成项目规划..."
+                : `正在重新规划 (第${replanAttempt}次)...`);
 
-        if (!verifyResult.verified) {
-            throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
-        }
-        genTask.logs.push(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
+            const planResult = await post("/api/generate/plan", { userPrompt, coreType, version });
+            genTask.taskId = planResult.taskId;
+            genTask.projectName = planResult.projectName;
+            genTask.packageName = planResult.packageName;
+            genTask.javaVersion = planResult.javaVersion;
+            genTask.files = planResult.plan.map((f: any) => ({ path: f.path, role: f.role, status: "pending" }));
+            genTask.logs.push(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
 
-        // Build with fix-retry loop
-        await buildWithRetry();
-    } catch (e: any) {
-        genTask.phase = "error";
-        genTask.error = e.message || String(e);
-        genTask.logs.push("× " + genTask.error);
+            setPhase("generating");
+            let remaining = genTask.files.length;
+            let needReplan = false;
+
+            for (let i = 0; i < genTask.files.length && remaining > 0; i++) {
+                genTask.files[i].status = "generating";
+                genTask.currentIndex = i;
+
+                const fileResult = await streamFileGeneration(genTask.taskId);
+                if (!fileResult || fileResult.done) break;
+
+                // reChecker exhausted — need to replan from scratch
+                if (fileResult.replan) {
+                    needReplan = true;
+                    break;
+                }
+
+                genTask.files[i].content = fileResult.content;
+                genTask.files[i].status = "done";
+                remaining = fileResult.remaining ?? (genTask.files.length - i - 1);
+            }
+
+            if (needReplan) {
+                if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
+                    throw new Error("多次重新规划后仍无法通过审查，生成失败");
+                }
+                continue; // restart from planning
+            }
+
+            setPhase("verifying", "正在校验文件完整性...");
+            let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+
+            for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
+                const missingList = verifyResult.missing as string[];
+                genTask.logs.push(`! 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
+                await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
+
+                setPhase("generating");
+                for (const mp of missingList) {
+                    genTask.logs.push(`↻ 补生成 ${mp}`);
+                    const fileResult = await streamFileGeneration(genTask.taskId);
+                    if (!fileResult || fileResult.done) break;
+                }
+
+                setPhase("verifying", "正在重新校验...");
+                verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+            }
+
+            if (!verifyResult.verified) {
+                throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
+            }
+            genTask.logs.push(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
+
+            // Build with fix-retry loop
+            await buildWithRetry();
+            return; // success — exit replan loop
+        } catch (e: any) {
+            if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
+                genTask.phase = "error";
+                genTask.error = e.message || String(e);
+                genTask.logs.push("× " + genTask.error);
+                return;
+            }
+            // If error is not from replan, don't retry
+            if (!e.message?.includes("重新规划")) {
+                genTask.phase = "error";
+                genTask.error = e.message || String(e);
+                genTask.logs.push("× " + genTask.error);
+                return;
+            }
+        }
     }
 }
 
