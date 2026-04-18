@@ -49,8 +49,20 @@
       <div v-if="block.phase === 'error'" class="chat-error">{{ block.error }}</div>
     </div>
 
+    <!-- Reasoner 思考流（折叠） -->
+    <div v-if="genTask.reasoningContent" class="glass2 reasoning-wrap">
+      <div class="reasoning-head" @click="genTask.reasoningVisible = !genTask.reasoningVisible">
+        <span class="reasoning-title">AI 思考中</span>
+        <span class="reasoning-toggle">{{ genTask.reasoningVisible ? "收起" : "展开" }}</span>
+      </div>
+      <div v-if="genTask.reasoningVisible" class="reasoning-body">{{ genTask.reasoningContent }}</div>
+    </div>
+
+    <!-- 澄清面板 -->
+    <ClarifyPanel v-if="genTask.phase === 'clarifying' && genTask.clarifyTodos.length"/>
+
     <!-- 生成进度 -->
-    <GenerateProgress v-if="genTask.phase !== 'idle'"/>
+    <GenerateProgress v-if="genTask.phase !== 'idle' && genTask.phase !== 'clarifying'"/>
 
     <!-- 输入框 -->
     <div class="glass2 chat-input-wrap">
@@ -71,6 +83,7 @@ import {chatBlocks, streamTick} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo} from "../logic/chatHandler";
 import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
+import ClarifyPanel from "../components/ClarifyPanel.vue";
 import {genTask} from "../logic/generateState";
 import {startGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
@@ -143,6 +156,7 @@ watch(voiceText, (t) => {
 
 const phaseLabels: Record<string, string> = {
     planning: "正在规划项目...",
+    clarifying: "请确认澄清问题...",
     generating: "正在生成代码...",
     verifying: "正在校验文件...",
     uploading: "正在上传构建...",
@@ -325,5 +339,39 @@ watch(() => genTask.phase, (p) => {
 .floor-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.reasoning-wrap {
+  flex-direction: column;
+  padding: 12px 16px;
+  gap: 8px;
+  height: auto;
+}
+.reasoning-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+.reasoning-title {
+  color: rgba(255,255,255,0.55);
+  font-size: 13px;
+}
+.reasoning-toggle {
+  color: wheat;
+  font-size: 12px;
+}
+.reasoning-body {
+  color: rgba(255,255,255,0.75);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  font-family: "Monaco", monospace;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
 }
 </style>

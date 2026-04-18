@@ -12,6 +12,22 @@ export interface FileSummary {
     description?: string;
 }
 
+/** TodoList 单项（澄清阶段） */
+export interface TodoItem {
+    id: string;
+    question: string;
+    options: string[];
+    allowCustom: boolean;
+    multiSelect: boolean;
+    chart?: "linear" | "power2" | "power0.5" | "log" | "exp" | null;
+}
+
+/** 一轮澄清快照：一组 todos + 用户答案 */
+export interface ClarifyRound {
+    todos: TodoItem[];
+    answers: Record<string, string | string[]>;
+}
+
 /** 将结构化摘要格式化为可读的 API 签名块 */
 function formatSummaries(summaries: FileSummary[]): string {
     if (summaries.length === 0) return "";
@@ -48,9 +64,86 @@ function formatSummaries(summaries: FileSummary[]): string {
     return lines.join("\n");
 }
 
+// ─── Planner Clarify ────────────────────────────────────────
+
+export function plannerClarifyPrompt(
+    userPrompt: string,
+    coreType: string,
+    version: string,
+    priorRounds: ClarifyRound[],
+): { system: string; user: string } {
+    const history = priorRounds.length
+        ? "\n\n已完成的澄清轮次：\n" + priorRounds.map((r, i) =>
+            `第 ${i + 1} 轮：\n${r.todos.map(t => `  Q[${t.id}] ${t.question} → 用户选择：${JSON.stringify(r.answers[t.id])}`).join("\n")}`
+        ).join("\n")
+        : "";
+
+    return {
+        system: `你是一个 Minecraft ${coreType} ${version} 插件项目规划器的澄清阶段。你的任务不是直接产出文件列表，而是先列出所有不明晰、需用户确认的决策点，组织成 TodoList。
+
+只输出 JSON，格式如下：
+{
+  "done": false,
+  "todos": [
+    {
+      "id": "persistence",
+      "question": "数据持久化采用哪种方式？",
+      "options": ["文本存储", "二进制存储"],
+      "allowCustom": true,
+      "multiSelect": false,
+      "chart": null
+    }
+  ]
+}
+
+强制规则（必须在某一轮产出，已在历史中出现过的不要重复）：
+- 必须包含 id="ui-interaction"：玩家如何触发与获得反馈？
+  options 固定为：["聊天命令 + SendMessage 文本反馈", "聊天命令 + Inventory GUI 反馈"]
+  （其他方案难以保证最终质量，只能通过 allowCustom 让用户输入）
+- 必须包含 id="persistence"：options 固定为 ["文本存储", "二进制存储"]
+- 如果上一轮 persistence 答案为"文本存储"，本轮必须追问 id="text-format"，
+  options 固定为 ["CSV", "TXT", "YAML"]
+
+按需包含（根据用户需求语义判断是否需要）：
+- id="growth-curve" — 当需求涉及价格/经验/等级/冷却/数值成长时必须包含
+  options 必须从下列集合中选取 3-5 个：["linear", "power2", "power0.5", "log", "exp"]
+  chart 字段必须为 "multi"（特殊值，前端会对每个选项分别绘制曲线）；
+  或 chart 为 null 但 options 值对应函数类型字符串（推荐前者）
+  实际格式：chart 设为 "multi"，options 就是函数类型名
+- id="permission-prefix" — 涉及操作权限时
+- id="world-scope" — 涉及方块/区域时
+- id="external-plugin" — 涉及经济/占位符时（Vault/PlaceholderAPI/WorldGuard/无）
+- id="command-alias" — 声明了新命令时
+- id="message-config" — 声明玩家反馈文本时
+- id="reload-strategy" — 有可变运行时状态时
+
+每个 todo：
+- options 数量 3~5 项
+- allowCustom 一律为 true（允许用户输入其他想法）
+- multiSelect 除非明确需要多选（如 external-plugin）否则为 false
+- 不要产出空 todos；若确认所有必要项已覆盖，返回 {"done": true, "todos": []}
+
+最多 5 轮澄清，其后即使还有模糊点也必须 done:true。
+
+核心类型：${coreType}，MC 版本：${version}`,
+        user: `用户原始需求：${userPrompt}${history}\n\n请产出本轮的 TodoList（若已充分覆盖则返回 done:true）。`,
+    };
+}
+
 // ─── Planner ────────────────────────────────────────────────
 
-export function plannerPrompt(userPrompt: string, coreType: string, version: string): { system: string; user: string } {
+export function plannerPrompt(
+    userPrompt: string,
+    coreType: string,
+    version: string,
+    clarifyRounds?: ClarifyRound[],
+): { system: string; user: string } {
+    const clarifyBlock = clarifyRounds?.length
+        ? "\n\n用户已确认的决策（必须严格遵守）：\n" + clarifyRounds.flatMap(r =>
+            r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
+        ).join("\n")
+        : "";
+
     return {
         system: `你是一个 Minecraft ${coreType} 插件项目规划器。根据用户需求输出一个 JSON 对象（不要输出其他内容），格式如下：
 {
@@ -83,7 +176,7 @@ export function plannerPrompt(userPrompt: string, coreType: string, version: str
 - 能在一个文件中实现的逻辑不要拆分成多个文件
 - 不要规划与用户需求无关的辅助类、工具类、基类、接口
 - 功能类只实现 role 中描述的功能，不要预留扩展方法`,
-        user: userPrompt,
+        user: `${userPrompt}${clarifyBlock}`,
     };
 }
 

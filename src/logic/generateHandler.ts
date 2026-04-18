@@ -1,4 +1,4 @@
-import { genTask, resetGenTask } from "./generateState";
+import { genTask, resetGenTask, waitForClarifyAnswers } from "./generateState";
 import type { GenPhase } from "./generateState";
 
 const MAX_FIX_ATTEMPTS = 2;
@@ -10,7 +10,7 @@ function setPhase(phase: GenPhase, log?: string) {
 }
 
 function isGeneratingPhase(phase: GenPhase) {
-    return ["planning", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
+    return ["planning", "clarifying", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -65,6 +65,10 @@ async function readSSE(resp: Response): Promise<any> {
                         genTask.streamingPhase = evt.phase;
                         genTask.streamingFile = evt.file || "";
                         genTask.streamingContent = "";
+                        if (evt.round) genTask.clarifyRound = evt.round;
+                        break;
+                    case "reasoning":
+                        genTask.reasoningContent += evt.content;
                         break;
                     case "delta":
                         genTask.streamingContent += evt.content;
@@ -109,6 +113,17 @@ async function streamFileGeneration(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
+/** SSE streaming clarify round */
+async function streamClarify(taskId: string, answers?: Record<string, string | string[]>): Promise<any> {
+    const resp = await fetch("/api/generate/clarify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId, answers }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    return readSSE(resp);
+}
+
 /** SSE streaming build fix */
 async function streamBuildFix(taskId: string): Promise<any> {
     const resp = await fetch("/api/generate/fix", {
@@ -133,6 +148,50 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
 
     resetGenTask();
 
+    // ── Phase 1: create taskId (no plan yet) ──
+    try {
+        setPhase("planning", "正在创建任务...");
+        const initResult = await post("/api/generate/plan", { userPrompt, coreType, version });
+        genTask.taskId = initResult.taskId;
+    } catch (e: any) {
+        genTask.phase = "error";
+        genTask.error = e.message || String(e);
+        genTask.logs.push("× " + genTask.error);
+        return;
+    }
+
+    // ── Phase 2: multi-round clarify loop ──
+    try {
+        setPhase("clarifying", "进入澄清阶段，请回答问题...");
+        let answers: Record<string, string | string[]> | undefined = undefined;
+
+        while (true) {
+            genTask.reasoningContent = "";
+            const clarifyResult = await streamClarify(genTask.taskId, answers);
+            if (!clarifyResult) throw new Error("澄清阶段无响应");
+
+            if (clarifyResult.done) {
+                genTask.logs.push("● 澄清阶段完成");
+                genTask.clarifyTodos = [];
+                break;
+            }
+
+            // 推入历史（todos，answers 稍后填）
+            genTask.clarifyTodos = clarifyResult.todos;
+            const userAnswers = await waitForClarifyAnswers();
+
+            genTask.clarifyHistory.push({ todos: clarifyResult.todos, answers: userAnswers });
+            genTask.clarifyTodos = [];
+            answers = userAnswers;
+        }
+    } catch (e: any) {
+        genTask.phase = "error";
+        genTask.error = e.message || String(e);
+        genTask.logs.push("× " + genTask.error);
+        return;
+    }
+
+    // ── Phase 3: planning + generating + build (with replan loop) ──
     for (let replanAttempt = 0; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
         try {
             if (replanAttempt > 0) {
@@ -143,11 +202,10 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
             }
 
             setPhase("planning", replanAttempt === 0
-                ? "正在分析需求，生成项目规划..."
+                ? "正在根据澄清结果生成项目规划..."
                 : `正在重新规划 (第${replanAttempt}次)...`);
 
-            const planResult = await post("/api/generate/plan", { userPrompt, coreType, version });
-            genTask.taskId = planResult.taskId;
+            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId });
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;

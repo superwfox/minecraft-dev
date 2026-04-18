@@ -20,16 +20,14 @@ interface PlanFile {
  * 如果 AI 返回的 depends 有误（引用不存在的文件），忽略该依赖，退回 order 排序。
  */
 function topoSort(files: PlanFile[]): PlanFile[] {
-    // 建立文件名 → 完整 path 的映射
     const nameToPath = new Map<string, string>();
     for (const f of files) {
         const fileName = f.path.split("/").pop() ?? f.path;
         nameToPath.set(fileName, f.path);
     }
 
-    // 建立 path → 入度 和 邻接表
     const inDegree = new Map<string, number>();
-    const adj = new Map<string, string[]>(); // dep path → [dependent paths]
+    const adj = new Map<string, string[]>();
     for (const f of files) {
         inDegree.set(f.path, 0);
         adj.set(f.path, []);
@@ -45,7 +43,6 @@ function topoSort(files: PlanFile[]): PlanFile[] {
         }
     }
 
-    // Kahn 算法，同层内按 order 排序
     const pathToFile = new Map(files.map(f => [f.path, f]));
     const queue = files
         .filter(f => inDegree.get(f.path) === 0)
@@ -65,38 +62,77 @@ function topoSort(files: PlanFile[]): PlanFile[] {
         }
     }
 
-    // 如果有环或遗漏，把剩余文件按 order 追加
     if (sorted.length < files.length) {
         const sortedPaths = new Set(sorted.map(f => f.path));
         const remaining = files.filter(f => !sortedPaths.has(f.path)).sort((a, b) => a.order - b.order);
         sorted.push(...remaining);
     }
 
-    // 重新编号 order
     sorted.forEach((f, i) => { f.order = i + 1; });
     return sorted;
 }
 
+function stripFences(raw: string): string {
+    return raw.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "").trim();
+}
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { userPrompt, coreType, version } = await context.request.json() as any;
+    const body = await context.request.json() as any;
     const key = context.env.DEEPSEEK_API_KEY;
     if (!key) return new Response("API key not configured", { status: 500 });
 
-    const { system, user } = plannerPrompt(userPrompt, coreType, version);
+    // ─── Mode 1: initialize task, no plan yet ───
+    if (!body.taskId) {
+        const { userPrompt, coreType, version } = body;
+        const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const state = {
+            taskId,
+            status: "clarifying",
+            userPrompt,
+            coreType,
+            version,
+            clarifyRounds: [],
+            clarifyDone: false,
+            projectName: "",
+            javaVersion: "",
+            packageName: "",
+            plan: [],
+            generatedFiles: [],
+            currentFileIndex: 0,
+            logs: ["任务已创建，进入澄清阶段"],
+        };
+        await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        return new Response(JSON.stringify({ taskId }), {
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    // ─── Mode 2: finalize plan using reasoner + clarify answers ───
+    const taskId = body.taskId as string;
+    const raw = await context.env.TASKS.get(taskId);
+    if (!raw) return new Response("Task not found", { status: 404 });
+    const state = JSON.parse(raw);
+
+    if (!state.clarifyDone) {
+        return new Response(JSON.stringify({ error: "澄清阶段尚未完成" }), {
+            status: 400, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds);
 
     const resp = await fetch(DEEPSEEK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-            model: "deepseek-chat",
+            model: "deepseek-reasoner",
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
-            response_format: { type: "json_object" },
         }),
     });
     if (!resp.ok) return new Response(await resp.text(), { status: resp.status });
 
-    const raw = await resp.json() as any;
-    const content = raw.choices?.[0]?.message?.content ?? "";
+    const data = await resp.json() as any;
+    const content = stripFences(data.choices?.[0]?.message?.content ?? "");
 
     let plan: any;
     try {
@@ -105,27 +141,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return new Response(JSON.stringify({ error: "Planner 返回非 JSON", raw: content }), { status: 422 });
     }
 
-    // 拓扑排序：确保被依赖的文件先生成，主类最后
     const sortedFiles = topoSort(plan.files as PlanFile[]);
 
-    const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const state = {
-        taskId,
-        status: "planning",
-        projectName: plan.projectName,
-        javaVersion: plan.javaVersion,
-        packageName: plan.packageName,
-        coreType,
-        version,
-        plan: sortedFiles,
-        generatedFiles: [],
-        currentFileIndex: 0,
-        logs: ["Planner 完成，文件树已生成（已按依赖拓扑排序）"],
-    };
+    state.status = "planning";
+    state.projectName = plan.projectName;
+    state.javaVersion = plan.javaVersion;
+    state.packageName = plan.packageName;
+    state.plan = sortedFiles;
+    state.logs.push("Planner 完成，文件树已生成（已按依赖拓扑排序）");
 
     await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
-    return new Response(JSON.stringify({ taskId, plan: state.plan, projectName: plan.projectName, packageName: plan.packageName, javaVersion: plan.javaVersion }), {
+    return new Response(JSON.stringify({
+        taskId,
+        plan: state.plan,
+        projectName: plan.projectName,
+        packageName: plan.packageName,
+        javaVersion: plan.javaVersion,
+    }), {
         headers: { "Content-Type": "application/json" },
     });
 };
