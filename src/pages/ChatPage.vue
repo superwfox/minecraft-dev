@@ -61,8 +61,21 @@
     <!-- 澄清面板 -->
     <ClarifyPanel v-if="genTask.phase === 'clarifying' && genTask.clarifyTodos.length"/>
 
+    <!-- 需求不明，请求补充描述 -->
+    <div v-if="genTask.phase === 'awaiting_input'" class="glass2 more-input-wrap">
+      <div class="more-input-hint">{{ genTask.moreInputHint }}</div>
+      <div class="more-input-row">
+        <input v-model="extraInput" class="more-input-field"
+               placeholder="补充你的需求描述..."
+               @keydown.enter="sendExtra"/>
+        <button class="floor-btn" :disabled="!extraInput.trim()" @click="sendExtra">
+          提交补充
+        </button>
+      </div>
+    </div>
+
     <!-- 生成进度 -->
-    <GenerateProgress v-if="genTask.phase !== 'idle' && genTask.phase !== 'clarifying'"/>
+    <GenerateProgress v-if="genTask.phase !== 'idle' && genTask.phase !== 'clarifying' && genTask.phase !== 'awaiting_input'"/>
 
     <!-- 输入框 -->
     <div class="glass2 chat-input-wrap">
@@ -84,14 +97,22 @@ import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildIn
 import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyPanel from "../components/ClarifyPanel.vue";
-import {genTask} from "../logic/generateState";
+import {genTask, submitExtraPrompt} from "../logic/generateState";
 import {startGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
 const centerText = inject<Ref<string>>("centerText")!;
 
 const inputText = ref("");
+const extraInput = ref("");
 const sending = ref(false);
+
+function sendExtra() {
+    const t = extraInput.value.trim();
+    if (!t) return;
+    extraInput.value = "";
+    submitExtraPrompt(t);
+}
 const rawMsgTick = computed(() => chatBlocks.reduce((s, b) => s + b.rawMsg.length, 0));
 let voiceBaseText = "";
 
@@ -157,6 +178,7 @@ watch(voiceText, (t) => {
 const phaseLabels: Record<string, string> = {
     planning: "正在规划项目...",
     clarifying: "请确认澄清问题...",
+    awaiting_input: "请补充需求描述...",
     generating: "正在生成代码...",
     verifying: "正在校验文件...",
     uploading: "正在上传构建...",
@@ -373,5 +395,36 @@ watch(() => genTask.phase, (p) => {
   padding: 8px;
   background: rgba(255,255,255,0.03);
   border-radius: 6px;
+}
+
+.more-input-wrap {
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  height: auto;
+}
+.more-input-hint {
+  color: rgba(255,255,255,0.8);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.more-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.more-input-field {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+.more-input-field:focus {
+  border-color: wheat;
 }
 </style>

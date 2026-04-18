@@ -1,4 +1,4 @@
-import { genTask, resetGenTask, waitForClarifyAnswers } from "./generateState";
+import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt } from "./generateState";
 import type { GenPhase } from "./generateState";
 
 const MAX_FIX_ATTEMPTS = 2;
@@ -10,7 +10,7 @@ function setPhase(phase: GenPhase, log?: string) {
 }
 
 function isGeneratingPhase(phase: GenPhase) {
-    return ["planning", "clarifying", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
+    return ["planning", "clarifying", "awaiting_input", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -38,12 +38,48 @@ async function get(url: string) {
     return resp.json() as any;
 }
 
+/** 从流式 JSON 文本中提取 "todos":[...] 数组里已完整闭合的对象 */
+function extractCompletedTodos(text: string): any[] {
+    const key = "\"todos\"";
+    const keyIdx = text.indexOf(key);
+    if (keyIdx < 0) return [];
+    let i = text.indexOf("[", keyIdx);
+    if (i < 0) return [];
+    i++;
+    const out: any[] = [];
+    while (i < text.length) {
+        while (i < text.length && /\s|,/.test(text[i])) i++;
+        if (i >= text.length || text[i] === "]") break;
+        if (text[i] !== "{") { i++; continue; }
+        const start = i;
+        let depth = 0, inStr = false, esc = false;
+        for (; i < text.length; i++) {
+            const c = text[i];
+            if (esc) { esc = false; continue; }
+            if (c === "\\") { esc = true; continue; }
+            if (c === "\"") { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (c === "{") depth++;
+            else if (c === "}") {
+                depth--;
+                if (depth === 0) { i++; break; }
+            }
+        }
+        if (depth !== 0) break; // 未闭合，等下次
+        try {
+            out.push(JSON.parse(text.slice(start, i)));
+        } catch { /* 忽略解析失败 */ }
+    }
+    return out;
+}
+
 /** Read an SSE stream, dispatch events to genTask, return the result event */
 async function readSSE(resp: Response): Promise<any> {
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result: any = null;
+    let streamedTodoCount = 0;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -65,6 +101,8 @@ async function readSSE(resp: Response): Promise<any> {
                         genTask.streamingPhase = evt.phase;
                         genTask.streamingFile = evt.file || "";
                         genTask.streamingContent = "";
+                        streamedTodoCount = 0;
+                        if (evt.phase === "clarifying") genTask.clarifyTodos = [];
                         if (evt.round) genTask.clarifyRound = evt.round;
                         break;
                     case "reasoning":
@@ -72,6 +110,15 @@ async function readSSE(resp: Response): Promise<any> {
                         break;
                     case "delta":
                         genTask.streamingContent += evt.content;
+                        if (genTask.streamingPhase === "clarifying") {
+                            const todos = extractCompletedTodos(genTask.streamingContent);
+                            if (todos.length > streamedTodoCount) {
+                                for (let k = streamedTodoCount; k < todos.length; k++) {
+                                    genTask.clarifyTodos.push(todos[k]);
+                                }
+                                streamedTodoCount = todos.length;
+                            }
+                        }
                         break;
                     case "log":
                         genTask.logs.push(evt.msg);
@@ -114,11 +161,15 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 }
 
 /** SSE streaming clarify round */
-async function streamClarify(taskId: string, answers?: Record<string, string | string[]>): Promise<any> {
+async function streamClarify(
+    taskId: string,
+    answers?: Record<string, string | string[]>,
+    extraPrompt?: string,
+): Promise<any> {
     const resp = await fetch("/api/generate/clarify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId, answers }),
+        body: JSON.stringify({ taskId, answers, extraPrompt }),
     });
     if (!resp.ok) throw new Error(await resp.text());
     return readSSE(resp);
@@ -164,11 +215,23 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     try {
         setPhase("clarifying", "进入澄清阶段，请回答问题...");
         let answers: Record<string, string | string[]> | undefined = undefined;
+        let extraPrompt: string | undefined = undefined;
 
         while (true) {
             genTask.reasoningContent = "";
-            const clarifyResult = await streamClarify(genTask.taskId, answers);
+            const clarifyResult = await streamClarify(genTask.taskId, answers, extraPrompt);
+            extraPrompt = undefined;
             if (!clarifyResult) throw new Error("澄清阶段无响应");
+
+            if (clarifyResult.needMoreInput) {
+                genTask.moreInputHint = clarifyResult.hint || "请补充更多需求描述";
+                setPhase("awaiting_input", "! 需求过于模糊，请补充描述");
+                const extra = await waitForExtraPrompt();
+                genTask.moreInputHint = "";
+                extraPrompt = extra;
+                setPhase("clarifying", "已收到补充，继续分析...");
+                continue;
+            }
 
             if (clarifyResult.done) {
                 genTask.logs.push("● 澄清阶段完成");

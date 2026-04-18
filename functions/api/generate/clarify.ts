@@ -76,6 +76,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const taskId = body.taskId as string;
     const answers = body.answers as Record<string, string | string[]> | undefined;
+    const extraPrompt = body.extraPrompt as string | undefined;
 
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
@@ -84,6 +85,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // 将上一轮的 answers 回填到最后一轮的 todos
     if (answers && state.clarifyRounds.length > 0) {
         state.clarifyRounds[state.clarifyRounds.length - 1].answers = answers;
+    }
+
+    // 用户补充描述后，追加到原始需求
+    if (extraPrompt && extraPrompt.trim()) {
+        state.userPrompt = `${state.userPrompt}\n\n补充说明：${extraPrompt.trim()}`;
     }
 
     const { readable, writable } = new TransformStream<Uint8Array>();
@@ -112,7 +118,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             );
             const content = await callReasonerStream(key, system, user, writer, encoder);
 
-            let parsed: { done: boolean; todos: any[] };
+            let parsed: { done?: boolean; todos?: any[]; needMoreInput?: boolean; hint?: string };
             try {
                 parsed = JSON.parse(stripFences(content));
             } catch {
@@ -124,6 +130,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "result", done: true, todos: [] }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 await writer.close();
+                return;
+            }
+
+            if (parsed.needMoreInput) {
+                state.logs.push(`! 需求过于模糊，请求用户补充`);
+                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await writer.write(sseEvent(encoder, {
+                    type: "result", needMoreInput: true, hint: parsed.hint || "请补充更具体的功能描述",
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
 

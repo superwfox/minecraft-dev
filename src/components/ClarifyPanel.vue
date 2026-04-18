@@ -1,56 +1,86 @@
 <template>
   <div class="clarify-wrap glass2">
     <div class="clarify-header">
+      <span class="clarify-progress">
+        {{ safeIndex + 1 }} / {{ genTask.clarifyTodos.length }}
+      </span>
       <span class="clarify-round">澄清第 {{ genTask.clarifyRound }} 轮</span>
-      <span class="clarify-sub">{{ genTask.clarifyTodos.length }} 项待确认</span>
+      <div class="clarify-nav">
+        <span class="nav-arrow" :class="{ disabled: safeIndex === 0 }" @click="prev">‹</span>
+        <span class="nav-arrow"
+              :class="{ disabled: safeIndex >= genTask.clarifyTodos.length - 1 }"
+              @click="next">›</span>
+      </div>
     </div>
 
-    <div v-for="todo in genTask.clarifyTodos" :key="todo.id" class="clarify-card">
-      <div class="clarify-q">{{ todo.question }}</div>
+    <div v-if="current" class="clarify-card">
+      <div class="clarify-q">{{ current.question }}</div>
 
       <div class="clarify-options">
-        <div v-for="opt in todo.options" :key="opt" class="clarify-opt-wrap">
-          <span class="select-chip"
-                :class="{ active: isSelected(todo, opt) }"
-                @click="toggle(todo, opt)">
+        <div v-for="opt in current.options" :key="opt" class="clarify-opt-wrap">
+          <span class="option-pill"
+                :class="{ active: isSelected(current, opt) }"
+                @click="toggle(current, opt)">
             {{ opt }}
           </span>
-          <CurveChart v-if="todo.chart === 'multi'"
+          <CurveChart v-if="current.chart === 'multi'"
                       :type="(opt as any)"
                       class="clarify-chart"/>
         </div>
 
-        <span v-if="todo.allowCustom"
-              class="select-chip"
-              :class="{ active: isCustomActive(todo) }"
-              @click="activateCustom(todo)">
+        <span v-if="current.allowCustom"
+              class="option-pill"
+              :class="{ active: isCustomActive(current) }"
+              @click="activateCustom(current)">
           其他…
         </span>
       </div>
 
-      <input v-if="customActive[todo.id] !== undefined"
-             v-model="customActive[todo.id]"
+      <input v-if="customActive[current.id] !== undefined"
+             v-model="customActive[current.id]"
              class="clarify-custom"
              placeholder="在此输入你的其他想法"
-             @input="onCustomInput(todo)"/>
+             @input="onCustomInput(current)"/>
     </div>
 
-    <button class="floor-btn" :disabled="!allAnswered" @click="confirm">
-      确认并进入下一步
-    </button>
+    <div class="clarify-footer">
+      <span class="answered-count">
+        已完成 {{ answeredCount }} / {{ genTask.clarifyTodos.length }}
+      </span>
+      <button class="floor-btn" :disabled="!allAnswered" @click="confirm">
+        确认并进入下一步
+      </button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, computed } from "vue";
+import { reactive, computed, ref, watch } from "vue";
 import { genTask, submitClarifyAnswers } from "../logic/generateState";
 import type { TodoItem } from "../logic/generateState";
 import CurveChart from "./CurveChart.vue";
 
-// 每个 todo.id → 选中值（单选为 string，多选为 string[]）
 const selections = reactive<Record<string, string | string[]>>({});
-// 每个 todo.id → 自定义文本（存在即视为"其他"被激活）
 const customActive = reactive<Record<string, string>>({});
+const currentIndex = ref(0);
+
+const safeIndex = computed(() => {
+    const len = genTask.clarifyTodos.length;
+    if (len === 0) return 0;
+    return Math.min(currentIndex.value, len - 1);
+});
+const current = computed(() => genTask.clarifyTodos[safeIndex.value] || null);
+
+watch(() => genTask.clarifyTodos.length, (n, old) => {
+    if (old === 0 && n > 0) currentIndex.value = 0;
+});
+
+function prev() {
+    if (currentIndex.value > 0) currentIndex.value--;
+}
+function next() {
+    if (currentIndex.value < genTask.clarifyTodos.length - 1) currentIndex.value++;
+}
 
 function isSelected(todo: TodoItem, opt: string): boolean {
     const v = selections[todo.id];
@@ -63,7 +93,6 @@ function isCustomActive(todo: TodoItem): boolean {
 }
 
 function toggle(todo: TodoItem, opt: string) {
-    // 点选预设项时清除自定义态
     delete customActive[todo.id];
     if (todo.multiSelect) {
         const arr = Array.isArray(selections[todo.id]) ? [...(selections[todo.id] as string[])] : [];
@@ -72,6 +101,9 @@ function toggle(todo: TodoItem, opt: string) {
         selections[todo.id] = arr;
     } else {
         selections[todo.id] = opt;
+        if (currentIndex.value < genTask.clarifyTodos.length - 1) {
+            currentIndex.value++;
+        }
     }
 }
 
@@ -82,7 +114,6 @@ function activateCustom(todo: TodoItem) {
         return;
     }
     customActive[todo.id] = "";
-    // 激活自定义时清空预设选择
     if (todo.multiSelect) selections[todo.id] = [];
     else delete selections[todo.id];
 }
@@ -93,21 +124,27 @@ function onCustomInput(todo: TodoItem) {
     else selections[todo.id] = v;
 }
 
-const allAnswered = computed(() => {
-    return genTask.clarifyTodos.every(t => {
-        const v = selections[t.id];
-        if (t.multiSelect) return Array.isArray(v) && v.length > 0;
-        return typeof v === "string" && v.length > 0;
-    });
-});
+function isAnswered(t: TodoItem): boolean {
+    const v = selections[t.id];
+    if (t.multiSelect) return Array.isArray(v) && v.length > 0;
+    return typeof v === "string" && v.length > 0;
+}
+
+const answeredCount = computed(() =>
+    genTask.clarifyTodos.filter(t => isAnswered(t)).length,
+);
+
+const allAnswered = computed(() =>
+    genTask.clarifyTodos.length > 0 && genTask.clarifyTodos.every(isAnswered),
+);
 
 function confirm() {
     if (!allAnswered.value) return;
     const snapshot: Record<string, string | string[]> = {};
     for (const t of genTask.clarifyTodos) snapshot[t.id] = selections[t.id];
-    // 清理本地态以便下一轮复用
     for (const k of Object.keys(selections)) delete selections[k];
     for (const k of Object.keys(customActive)) delete customActive[k];
+    currentIndex.value = 0;
     submitClarifyAnswers(snapshot);
 }
 </script>
@@ -117,35 +154,76 @@ function confirm() {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 16px;
+    padding: 18px;
 }
 .clarify-header {
     display: flex;
-    justify-content: space-between;
-    color: rgba(255, 255, 255, 0.5);
+    align-items: center;
+    gap: 12px;
+    color: rgba(255, 255, 255, 0.55);
     font-size: 12px;
 }
-.clarify-round {
+.clarify-progress {
+    padding: 4px 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.08);
     color: wheat;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+}
+.clarify-round {
+    flex: 1;
+}
+.clarify-nav {
+    display: flex;
+    gap: 8px;
+}
+.nav-arrow {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+}
+.nav-arrow:hover:not(.disabled) {
+    border-color: wheat;
+    color: wheat;
+}
+.nav-arrow.disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
 }
 .clarify-card {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 12px;
+    gap: 14px;
+    padding: 16px;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.02);
+    animation: fadeSlide 0.25s ease-out;
+}
+@keyframes fadeSlide {
+    from { opacity: 0; transform: translateX(8px); }
+    to   { opacity: 1; transform: translateX(0); }
 }
 .clarify-q {
-    color: rgba(255, 255, 255, 0.85);
-    font-size: 14px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 15px;
+    line-height: 1.5;
 }
 .clarify-options {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
 }
 .clarify-opt-wrap {
     display: flex;
@@ -156,37 +234,51 @@ function confirm() {
 .clarify-chart {
     margin-top: 2px;
 }
-.select-chip {
-    padding: 4px 14px;
-    border-radius: 10px;
+.option-pill {
+    min-width: 120px;
+    padding: 10px 18px;
+    border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.7);
+    color: rgba(255, 255, 255, 0.78);
     font-size: 13px;
     cursor: pointer;
     transition: all 0.15s;
+    line-height: 1.3;
+    text-align: left;
 }
-.select-chip.active {
+.option-pill.active {
     background: wheat;
     color: #000;
     border-color: wheat;
 }
-.select-chip:hover {
+.option-pill:hover {
     border-color: rgba(255, 255, 255, 0.4);
 }
 .clarify-custom {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     color: #fff;
     font-size: 13px;
     outline: none;
+    width: 100%;
+    max-width: 360px;
 }
 .clarify-custom:focus {
     border-color: wheat;
 }
-.floor-btn {
+.clarify-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     margin-top: 4px;
+}
+.answered-count {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 12px;
+}
+.floor-btn {
     padding: 8px 24px;
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 10px;
@@ -194,7 +286,6 @@ function confirm() {
     color: wheat;
     font-size: 14px;
     cursor: pointer;
-    align-self: flex-start;
 }
 .floor-btn:disabled {
     opacity: 0.3;

@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 
-export type GenPhase = "idle" | "planning" | "clarifying" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
+export type GenPhase = "idle" | "planning" | "clarifying" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
 
 export type GenFile = {
     path: string;
@@ -41,6 +41,7 @@ export type GenTask = {
     clarifyHistory: ClarifyRound[];
     reasoningContent: string;
     reasoningVisible: boolean;
+    moreInputHint: string;
 };
 
 export const genTask = reactive<GenTask>({
@@ -61,6 +62,7 @@ export const genTask = reactive<GenTask>({
     clarifyHistory: [],
     reasoningContent: "",
     reasoningVisible: true,
+    moreInputHint: "",
 });
 
 export function resetGenTask() {
@@ -81,6 +83,7 @@ export function resetGenTask() {
     genTask.clarifyHistory = [];
     genTask.reasoningContent = "";
     genTask.reasoningVisible = true;
+    genTask.moreInputHint = "";
 }
 
 // 等待用户确认的 Promise 解析器（ClarifyPanel 点击确认时调用）
@@ -97,5 +100,22 @@ export function submitClarifyAnswers(answers: Record<string, string | string[]>)
         const r = clarifyResolver;
         clarifyResolver = null;
         r(answers);
+    }
+}
+
+// 等待用户补充需求描述（awaiting_input 阶段）
+let extraPromptResolver: ((extra: string) => void) | null = null;
+
+export function waitForExtraPrompt(): Promise<string> {
+    return new Promise((resolve) => {
+        extraPromptResolver = resolve;
+    });
+}
+
+export function submitExtraPrompt(extra: string) {
+    if (extraPromptResolver) {
+        const r = extraPromptResolver;
+        extraPromptResolver = null;
+        r(extra);
     }
 }
