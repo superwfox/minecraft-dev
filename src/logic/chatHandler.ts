@@ -1,7 +1,7 @@
 import type { Ref } from "vue";
 import type { ChatBlock } from "./chatState";
 import { addBlock, chatBlocks, streamTick } from "./chatState";
-import { streamGetInfo, streamGetTodoList, consistChat } from "../api/deepseek";
+import { streamGetInfo, streamGetTodoList, consistChat, precheckPrompt } from "../api/deepseek";
 import type { ChatMsg } from "../api/deepseek";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
@@ -23,6 +23,7 @@ export async function handleUserInput(
     input: string,
     centerText: Ref<string>,
     onNeedSelect: (block: ChatBlock, missing: ("coreType" | "version")[]) => void,
+    onIncomplete?: (original: string, hint: string) => void,
 ) {
     const block = addBlock(input);
 
@@ -42,6 +43,24 @@ export async function handleUserInput(
         centerText.value = "对话中";
         fallbackStream(block, input, centerText);
         return;
+    }
+
+    // 阶段0: 需求完整性预检查
+    if (onIncomplete) {
+        centerText.value = "正在检查需求完整性...";
+        block.phase = "analyzing";
+        try {
+            const pre = await precheckPrompt(input);
+            if (!pre.complete) {
+                block.phase = "error";
+                block.error = pre.hint || "需求描述不完整，请补充";
+                centerText.value = "请补充需求";
+                onIncomplete(input, pre.hint || "请补充核心功能、玩家交互、触发方式");
+                return;
+            }
+        } catch {
+            // 预检查失败不阻塞，继续
+        }
     }
 
     // 阶段1: 需求分析

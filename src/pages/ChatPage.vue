@@ -141,12 +141,24 @@ async function confirmSelect() {
     sending.value = false;
 }
 
+function onIncomplete(original: string, hint: string) {
+    inputText.value = `${original}\n\n补充方向：${hint}`;
+    nextTick(() => {
+        const el = document.querySelector(".chat-input") as HTMLInputElement | null;
+        if (el) {
+            el.focus();
+            const len = el.value.length;
+            el.setSelectionRange(len, len);
+        }
+    });
+}
+
 async function send() {
     const text = inputText.value.trim();
     if (!text || sending.value) return;
     inputText.value = "";
     sending.value = true;
-    await handleUserInput(text, centerText, onNeedSelect);
+    await handleUserInput(text, centerText, onNeedSelect, onIncomplete);
     const rebuildInfo = getRebuildInfo();
     if (rebuildInfo && canStartGenerate()) {
         clearRebuildInfo();

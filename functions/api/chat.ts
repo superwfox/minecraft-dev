@@ -13,13 +13,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!key) return new Response("API key not configured", {status: 500});
 
+    const model = body.model || "deepseek-v4-flash";
+    const payload: any = {model, messages: body.messages};
+    if (model.includes("pro")) {
+        payload.reasoning_effort = "high";
+        payload.thinking = {type: "enabled"};
+    }
+    if (body.response_format) payload.response_format = body.response_format;
+
     const resp = await fetch(DEEPSEEK_URL, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + key,
         },
-        body: JSON.stringify({model: body.model || "deepseek-chat", messages: body.messages}),
+        body: JSON.stringify(payload),
     });
 
     if (!resp.ok) return new Response(await resp.text(), {status: resp.status});

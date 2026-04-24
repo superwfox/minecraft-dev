@@ -10,11 +10,15 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-async function callAI(key: string, system: string, user: string, jsonMode = false) {
+async function callAI(key: string, system: string, user: string, jsonMode = false, usePro = false) {
     const body: any = {
-        model: "deepseek-chat",
+        model: usePro ? "deepseek-v4-pro" : "deepseek-v4-flash",
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
+    if (usePro) {
+        body.reasoning_effort = "high";
+        body.thinking = { type: "enabled" };
+    }
     if (jsonMode) body.response_format = { type: "json_object" };
 
     const resp = await fetch(DEEPSEEK_URL, {
@@ -30,12 +34,17 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
 async function callAIStream(
     key: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
+    usePro = false,
 ) {
-    const body = {
-        model: "deepseek-chat",
+    const body: any = {
+        model: usePro ? "deepseek-v4-pro" : "deepseek-v4-flash",
         stream: true,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
+    if (usePro) {
+        body.reasoning_effort = "high";
+        body.thinking = { type: "enabled" };
+    }
 
     const resp = await fetch(DEEPSEEK_URL, {
         method: "POST",
@@ -114,7 +123,7 @@ async function generateSingleFile(
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         const check = reCheckerPrompt(filePath, content, summaries, ctx.projectName);
-        const reviewRaw = await callAI(key, check.system, check.user, true);
+        const reviewRaw = await callAI(key, check.system, check.user, true, true);
         let review: any;
         try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
 
@@ -132,7 +141,7 @@ async function generateSingleFile(
 
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
         const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries);
-        content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
+        content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder, true));
     }
 
     // Extract summary
@@ -199,7 +208,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
                 const check = reCheckerPrompt(target.path, content, summaries, ctx.projectName);
-                const reviewRaw = await callAI(key, check.system, check.user, true);
+                const reviewRaw = await callAI(key, check.system, check.user, true, true);
                 let review: any;
                 try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
 
@@ -256,7 +265,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
-                content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder));
+                content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder, true));
             }
 
             // If rework exhausted without passing, signal replan needed

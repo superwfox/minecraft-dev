@@ -125,7 +125,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-            model: "deepseek-reasoner",
+            model: "deepseek-v4-pro",
+            reasoning_effort: "high",
+            thinking: { type: "enabled" },
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
         }),
     });

@@ -31,7 +31,7 @@ async function askDeepSeek(prompt: string, preset: string): Promise<string> {
     const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "deepseek-chat", messages }),
+        body: JSON.stringify({ model: "deepseek-v4-flash", messages }),
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json() as any;
@@ -54,7 +54,7 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
     const response = await fetch("/api/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "deepseek-chat", messages, stream: true }),
+        body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
     });
     if (!response.ok) throw new Error(await response.text());
     if (!response.body) throw new Error("No stream body");
@@ -93,6 +93,38 @@ export function streamGetTodoList(prompt: string, onDelta: (chunk: string) => vo
     return streamAsk(prompt, TODO_PRESET, onDelta);
 }
 
+const PRECHECK_PRESET =
+    "你是一个 Minecraft 插件需求完整性检查器，判断用户的描述是否逻辑闭环、可以进入规划阶段。" +
+    "需求必须至少有明确的核心功能或玩法目标，能识别\"玩家做什么\"或\"系统实现什么\"。" +
+    "不要求细节（后续澄清会细化），只要逻辑闭环即可。" +
+    "只输出 JSON，不要任何其他内容：" +
+    "完整 → {\"complete\": true}；" +
+    "不完整 → {\"complete\": false, \"hint\": \"请补充：1) xxx；2) xxx；3) xxx\"}，" +
+    "hint 列出 2-4 条简短、具体的补充方向。";
+
+export async function precheckPrompt(prompt: string): Promise<{ complete: boolean; hint?: string }> {
+    const messages = [
+        { role: "system", content: PRECHECK_PRESET },
+        { role: "user", content: prompt },
+    ];
+    const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-pro", messages }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json() as any;
+    const raw = (data.content ?? data.choices?.[0]?.message?.content ?? "").trim();
+    const cleaned = raw.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "").trim();
+    try {
+        const parsed = JSON.parse(cleaned);
+        return { complete: parsed.complete === true, hint: parsed.hint };
+    } catch {
+        // 解析失败时视为通过，避免卡住流程
+        return { complete: true };
+    }
+}
+
 export function consistChat(
     history: ChatMsg[],
     prompt: string,
@@ -106,7 +138,7 @@ export function consistChat(
         const response = await fetch("/api/stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: "deepseek-chat", messages, stream: true }),
+            body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
             signal: controller.signal,
         });
 

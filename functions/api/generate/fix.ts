@@ -15,8 +15,10 @@ async function callAIStream(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ) {
     const body = {
-        model: "deepseek-chat",
+        model: "deepseek-v4-pro",
         stream: true,
+        reasoning_effort: "high",
+        thinking: { type: "enabled" },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
 
