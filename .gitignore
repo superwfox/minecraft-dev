@@ -47,3 +47,6 @@ public/maven.yml
 
 # Claude Code
 .claude/
+
+font
+scripts
