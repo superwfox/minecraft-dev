@@ -3,34 +3,46 @@
 所有 API 端点由 Cloudflare Pages Functions 提供，路径映射关系：
 
 ```
-functions/api/chat.ts         → POST /api/chat
-functions/api/stream.ts       → POST /api/stream
-functions/api/voice-auth.ts   → GET  /api/voice-auth
-functions/api/generate/plan.ts     → POST /api/generate/plan
-functions/api/generate/file.ts     → POST /api/generate/file  (SSE)
+functions/api/chat.ts              → POST /api/chat
+functions/api/stream.ts            → POST /api/stream
+functions/api/voice-auth.ts        → GET  /api/voice-auth
+functions/api/generate/plan.ts     → POST /api/generate/plan      (双模式：建任务 / 出文件树)
+functions/api/generate/clarify.ts  → POST /api/generate/clarify   (SSE，多轮澄清)
+functions/api/generate/file.ts     → POST /api/generate/file      (SSE)
 functions/api/generate/verify.ts   → POST /api/generate/verify
 functions/api/generate/build.ts    → POST /api/generate/build
-functions/api/generate/fix.ts      → POST /api/generate/fix   (SSE)
+functions/api/generate/fix.ts      → POST /api/generate/fix       (SSE)
 functions/api/generate/status.ts   → GET  /api/generate/status
 functions/api/generate/download.ts → GET  /api/generate/download
 ```
+
+## 模型与 Thinking 参数
+
+| 模型 | 用途 | 自动注入 |
+|------|------|----------|
+| `deepseek-v4-flash` | FileGen / summaryExtract / 对话兜底 | — |
+| `deepseek-v4-pro` | precheck / clarify / planner / reChecker / rework / fix | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+
+`/api/chat` 和 `/api/stream` 在 `model` 包含 `pro` 时自动注入上述两个字段；调用方只需传模型名即可。
 
 ## 对话 API
 
 ### POST /api/chat
 
-非流式对话请求，用于需求分析和步骤生成。
+非流式对话请求，用于需求分析、需求完整性预检和步骤生成。
 
 **请求**：
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "messages": [
     { "role": "system", "content": "..." },
     { "role": "user", "content": "..." }
   ]
 }
 ```
+
+`model` 缺省为 `deepseek-v4-flash`；传入 `deepseek-v4-pro` 时服务端自动追加 `reasoning_effort: "high"` 和 `thinking: { type: "enabled" }`。
 
 **响应**：
 ```json
@@ -46,7 +58,7 @@ functions/api/generate/download.ts → GET  /api/generate/download
 **请求**：
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "messages": [...],
   "stream": true
 }
@@ -81,7 +93,11 @@ data: [DONE]
 
 ### POST /api/generate/plan
 
-调用 Planner 生成项目规划。
+双模式端点。
+
+**模式 1：创建任务**（不传 `taskId`）
+
+仅创建 KV 任务、写入 `userPrompt`/`coreType`/`version`，进入 `clarifying` 状态。**不调用 Planner**。
 
 **请求**：
 ```json
@@ -94,6 +110,20 @@ data: [DONE]
 
 **响应**：
 ```json
+{ "taskId": "1710556800000-abc123" }
+```
+
+**模式 2：出文件树**（传 `taskId`）
+
+要求 `state.clarifyDone === true`。调用 `deepseek-v4-pro`（启用 thinking），把 `clarifyRounds` 拼成"已确认决策"喂给 `plannerPrompt`，输出文件树并写回 KV。
+
+**请求**：
+```json
+{ "taskId": "1710556800000-abc123" }
+```
+
+**响应**：
+```json
 {
   "taskId": "1710556800000-abc123",
   "projectName": "WelcomePlugin",
@@ -102,16 +132,63 @@ data: [DONE]
   "plan": [
     { "path": "pom.xml", "role": "Maven 构建配置", "order": 1, "depends": [] },
     { "path": "src/main/resources/plugin.yml", "role": "插件描述文件", "order": 2, "depends": [] },
-    { "path": "src/main/java/com/example/welcomeplugin/WelcomePlugin.java", "role": "插件主类", "order": 3, "depends": [] }
+    { "path": "src/main/java/.../WelcomePlugin.java", "role": "插件主类", "order": 3, "depends": [] }
   ]
 }
 ```
 
 **说明**：
-- 返回的 `taskId` 用于后续所有请求
-- `plan` 数组经过依赖拓扑排序，`depends` 字段声明该文件依赖的其他文件名
-- 插件主类（继承 JavaPlugin）始终排在所有 Java 文件最后生成
+- 模式 1 结束后必须先走 `/api/generate/clarify` 完成澄清，再调用模式 2
+- 模式 2 若 `clarifyDone === false` 返回 400
+- `plan` 数组经过依赖拓扑排序，插件主类（继承 JavaPlugin）始终排最后
 - 任务状态写入 KV，TTL 1 小时
+
+### POST /api/generate/clarify
+
+多轮 TodoList 澄清端点，返回 SSE 流。每轮调用一次，直到 `result.done === true` 或达到 `MAX_CLARIFY_ROUNDS = 5`。
+
+**请求**：
+```json
+{
+  "taskId": "1710556800000-abc123",
+  "answers": { "ui-interaction": "聊天命令+SendMessage", "persistence": "文本存储" },
+  "extraPrompt": "用户在 needMoreInput 后补充的描述（可选）"
+}
+```
+
+- 首轮无 `answers`
+- `answers` 是上一轮 todos 的答案，会回填到 `state.clarifyRounds[last].answers`
+- `extraPrompt` 仅在上一轮返回 `needMoreInput: true` 时由前端补充，会追加到 `state.userPrompt`
+
+**响应**：`Content-Type: text/event-stream`
+
+```
+data: {"type":"phase","phase":"clarifying","round":1}
+
+data: {"type":"reasoning","content":"AI 思考过程片段..."}
+
+data: {"type":"delta","content":"{\"done\":false,\"todos\":[{\"id\":\"ui-interaction\""}
+
+data: {"type":"result","done":false,"todos":[{"id":"ui-interaction","question":"...","options":[...],"allowCustom":true,"multiSelect":false}]}
+
+data: [DONE]
+```
+
+**SSE 事件类型**：
+
+| 类型 | 说明 |
+|------|------|
+| `phase` | 阶段切换，含 `round` 当前轮次 |
+| `reasoning` | `deepseek-v4-pro` 的思考流（前端写入可折叠区） |
+| `delta` | 最终 JSON 的流式片段（前端可增量解析提前渲染卡片） |
+| `result` | 解析完成，含 `done`、`todos`，或 `needMoreInput`、`hint` |
+| `log` | 日志消息（解析失败、超过最大轮次等） |
+
+**特殊情况**：
+
+- `result.needMoreInput === true`：AI 判断需求过于模糊，前端进入 `awaiting_input` 阶段让用户补充
+- `state.clarifyRounds.length >= 5`：强制 `done: true`，避免无限轮次
+- AI 返回非 JSON：记日志后强制 `done: true`，进入 Planner
 
 ### POST /api/generate/file
 

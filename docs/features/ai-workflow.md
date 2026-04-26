@@ -6,7 +6,15 @@
 
 ```mermaid
 graph TB
-    A[用户需求] --> B[Planner 规划]
+    A[用户需求] --> A1[precheck 完整性预检查]
+    A1 --> A2{需求是否闭环?}
+    A2 -->|否| A3[弹回输入框 + 补充提示]
+    A3 --> A
+    A2 -->|是| A4[多轮 Clarify 澄清]
+    A4 --> A5[ClarifyPanel 单卡片确认]
+    A5 --> A6{澄清完成?}
+    A6 -->|未完成| A4
+    A6 -->|完成| B[Planner 规划]
     B --> C[生成文件树 + 依赖拓扑排序]
     C --> D[FileGen 流式生成文件]
     D --> E[reChecker 审查 + 跨文件一致性检查]
@@ -27,6 +35,82 @@ graph TB
     P -->|否| Q[拉取编译日志 → AI 修复 → 重新构建]
     Q --> M
 ```
+
+## 模型分工
+
+| 模型 | 用途 | 备注 |
+|------|------|------|
+| `deepseek-v4-flash` | FileGen 主生成、summaryExtract、对话兜底 | 速度快，承担批量生成与摘要任务 |
+| `deepseek-v4-pro` | precheck、Clarify、Planner、reChecker 复审、rework、fix | 启用 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理需要深度推理的环节 |
+
+`functions/api/chat.ts` 与 `functions/api/stream.ts` 默认使用 flash；当请求体中显式指定带有 `pro` 的模型名时，自动注入 `reasoning_effort` 和 `thinking` 字段，无需调用方关心。
+
+## 第零阶段：需求确认与澄清
+
+在进入 Planner 之前，系统先做两件事：**完整性预检** 和 **多轮 TodoList 澄清**。这套机制把"模糊一句话"转化为"逻辑闭环 + 多项关键决策已确认"的精准上下文，显著降低 Planner 自行扩展的冗余文件。
+
+### 步骤 1：precheck 预检查
+
+用户在对话框输入需求后，前端先调用 `/api/chat`（model=`deepseek-v4-pro`，注入 thinking）做完整性判定：
+
+```typescript
+// src/api/deepseek.ts
+const PRECHECK_PRESET =
+    "你是一个 Minecraft 插件需求完整性检查器，判断用户的描述是否逻辑闭环..." +
+    "完整 → {\"complete\": true}；" +
+    "不完整 → {\"complete\": false, \"hint\": \"请补充：1) xxx；2) xxx\"}";
+```
+
+- 若返回 `complete: true`，进入下一步
+- 若返回 `complete: false`，前端在输入框内**预填**：原始内容 + 换行 + `补充方向：${hint}`，等待用户补充后再次提交
+- 解析失败时按"通过"处理，不阻塞流程
+
+### 步骤 2：多轮 Clarify 澄清
+
+确认版本与核心后，前端调用 `/api/generate/plan`（仅传 `userPrompt`/`coreType`/`version`）创建 taskId 并进入 `clarifying` 状态。随后进入 `while (!done)` 循环：
+
+```mermaid
+sequenceDiagram
+    participant F as 前端
+    participant C as /api/generate/clarify
+    participant AI as deepseek-v4-pro
+
+    loop 直到 done=true 或达到 5 轮
+        F->>C: POST { taskId, answers? }
+        C->>AI: plannerClarifyPrompt(userPrompt, ..., priorRounds)
+        AI-->>C: 流式 reasoning_content + content
+        C-->>F: SSE: type=reasoning (思考流)
+        C-->>F: SSE: type=delta (JSON 增量)
+        C-->>F: SSE: type=result { done, todos }
+        F->>F: 增量解析 todos[]，逐张卡片渲染
+        F->>F: ClarifyPanel 等待用户答完
+    end
+```
+
+**关键设计**：
+
+- **Reasoner 流式协议**：`deepseek-v4-pro` chunk 同时含 `delta.reasoning_content`（思考）和 `delta.content`（最终输出）。前端把 reasoning 写入可折叠的"AI 思考中"区域，content 增量喂给 JSON 解析器
+- **增量卡片渲染**：在 delta 阶段就用深度计数解析器（`extractCompletedTodos`）抽出已完整的 todo 对象推进 ClarifyPanel，消除"AI 思考完→等结果→突然出现"的空档
+- **强制澄清项**（在 `plannerClarifyPrompt` 系统消息中硬编码）：
+  - **UI 交互方式**（必）：聊天命令+SendMessage / 聊天命令+Inventory GUI / 其他（备注"其他方案无法保证最终质量"）
+  - **持久化方式**（必）：文本 / 二进制；选文本后下一轮追问 `text-format`（CSV / TXT / YAML）
+  - **数值增长曲线**（条件）：出现价格/经验/冷却等关键词时必含，options 带 `chart` 字段（linear / power2 / power0.5 / log / exp）渲染 SVG 曲线
+  - **可选项**：权限节点前缀、多世界支持、外部插件（Vault / PlaceholderAPI / WorldGuard）、命令别名、消息可配置、reload 行为
+- **needMoreInput 二次回退**：若 Pro 模型在澄清中仍判断需求过于模糊，可返回 `{ needMoreInput: true, hint }`，前端再次进入 `awaiting_input` 阶段让用户补充
+- **轮次硬上限**：`MAX_CLARIFY_ROUNDS = 5`，达到上限自动 `done: true`，避免无意义反复追问
+
+### 步骤 3：ClarifyPanel 单卡片 UX
+
+- 顶部进度 chip `1/N` + 上下一题箭头
+- 每题纵向选项列表（高度优先，宽度收窄）
+- `multiSelect: false` → 单选，选中即自动跳到下一题；`multiSelect: true` → 多选 chip
+- `allowCustom: true` → "其他…" chip 展开输入框
+- `option.chart != null` → 选项 chip 内嵌 `<CurveChart>` 纯 SVG 曲线 + tooltip
+- 底部"确认进入下一步"按钮，所有题答完才启用
+
+### 步骤 4：澄清答案回灌 Planner
+
+`clarifyDone === true` 后，前端调用 `/api/generate/plan` 第二次（带 taskId），后端把 `state.clarifyRounds` 拼接进 `plannerPrompt` 的 user 消息作为"已确认决策"。Planner 在掌握全部决策的前提下产出文件树，避免自行猜测产生冗余。
 
 ## 第一阶段：Planner 规划
 
@@ -52,18 +136,28 @@ const plannerPrompt = `你是 Minecraft 插件项目规划器。
 核心类型：${coreType}
 MC 版本：${version}
 
+已确认决策（来自 Clarify 阶段）：
+${formatClarifyRounds(clarifyRounds)}
+
+Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
+- 任何命令必须同时含 CommandExecutor + TabCompleter（同一个类两个接口）
+- Listener 类必须在 Main.onEnable 中通过 PluginManager.registerEvents 注册
+- 自定义 Inventory GUI 必须实现 InventoryHolder + InventoryClickListener 配对
+- 数据持久化必须有 File + YamlConfiguration 包装类
+- Scheduler 任务必须用 BukkitRunnable + plugin.getServer().getScheduler()
+- plugin.yml 必须含 name/version/main/api-version + commands/permissions
+
 请生成项目规划，包含：
 1. projectName：项目名（驼峰命名）
 2. packageName：包名（小写，com.example.xxx）
 3. javaVersion：Java 版本（8/11/17/21）
 4. files：文件列表，每个文件包含：
-   - path：文件路径
-   - role：文件职责描述
-   - order：生成顺序（数字）
-   - depends：依赖的其他文件名数组
+   - path / role / order / depends
 
 输出 JSON 格式。`;
 ```
+
+`plannerPrompt` 由 `deepseek-v4-pro` 调用（启用 thinking）。Reasoner 在内部完成"已确认决策映射到必备文件"的推理后，再产出 JSON。
 
 ### 输出
 
@@ -187,14 +281,23 @@ const fileGenPrompt = `你是 Minecraft 插件代码生成器。
 
 ${formatSummaries(generatedSummaries)}
 
-要求：
+Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
+- 命令实现：CommandExecutor.onCommand + TabCompleter.onTabComplete 必须同时实现
+- 命令注册：getCommand("xxx").setExecutor(new XxxCommand()); .setTabCompleter(...)
+- Listener 注册：getServer().getPluginManager().registerEvents(new XxxListener(), this)
+- Inventory GUI：使用 InventoryHolder + Bukkit.createInventory(this, size, title) + 监听 InventoryClickEvent
+- YAML 持久化：File + YamlConfiguration.loadConfiguration / save 二者成对
+- plugin.yml 完整性：name/version/main/api-version + commands/permissions 一项不能漏
+
+通用要求：
 1. 只输出文件正文内容，不要包裹 markdown 代码块
 2. 确保 import 与已生成文件一致
 3. 你只能调用上面列出的类和方法，不要假设任何未列出的方法或类存在
-4. 如果需要的功能在已生成文件中不存在，请在当前文件中自行实现
-5. 禁止直接引用或转换插件主类类型，使用 Bukkit.getPluginManager().getPlugin("name") 获取实例
-6. 代码简洁实用，注释极少`;
+4. 禁止直接引用或转换插件主类类型，使用 Bukkit.getPluginManager().getPlugin("name") 获取实例
+5. 代码简洁实用，注释极少`;
 ```
+
+FileGen 主调用走 `deepseek-v4-flash`；reChecker / rework / 缺失类补全切换为 `deepseek-v4-pro` 以保证审查与修正质量。
 
 ### 插件主类引用规则
 

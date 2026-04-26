@@ -181,7 +181,17 @@ export function plannerPrompt(
 - 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
 - 能在一个文件中实现的逻辑不要拆分成多个文件
 - 不要规划与用户需求无关的辅助类、工具类、基类、接口
-- 功能类只实现 role 中描述的功能，不要预留扩展方法`,
+- 功能类只实现 role 中描述的功能，不要预留扩展方法
+
+Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
+- **命令类**：每个命令必须同时具备 onCommand 与 onTabComplete（可让一个类同时实现 CommandExecutor 与 TabCompleter，或拆成两个文件）。无论需求是否明说，规划阶段都必须为命令准备完整的 Executor + TabCompleter 实现，并保证 plugin.yml 的 commands 节点声明该命令；role 必须显式写出"实现 onCommand + onTabComplete"
+- **事件监听类**：每个 Listener 都必须由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
+- **Inventory GUI**：若涉及自定义 GUI，规划必须同时包含 (a) 打开/构造 GUI 的类 (b) InventoryClickEvent 监听类（用于 setCancelled(true) 防止取走物品并分发点击逻辑）；两者可为同一文件
+- **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml，并由 Main.onEnable 调用 saveDefaultConfig
+- **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的存储文件（自行管理 File + YamlConfiguration.loadConfiguration / save），并在 Main.onDisable 中落盘
+- **调度任务**：若涉及定时/重复任务，规划须明确由哪个文件负责通过 BukkitRunnable.runTaskTimer(plugin, delay, period) 注册
+- **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
+- **Main.java**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务；onDisable 负责数据落盘`,
         user: `${userPrompt}${clarifyBlock}`,
     };
 }
@@ -218,7 +228,20 @@ ${apiBlock}
 - 只实现文件职责描述中明确要求的功能，不要自行添加任何额外的方法、命令、事件监听器
 - 例如：职责是"处理/addtask命令"，就只实现 addtask 命令，不要额外添加 deletetask、listtask 等
 - 不要生成"预留"或"可能有用"的方法，只写必需的代码
-- 不要为类添加 getInstance()、getManager() 等单例模式，除非职责中明确要求`,
+- 不要为类添加 getInstance()、getManager() 等单例模式，除非职责中明确要求
+
+Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
+- **命令实现**：实现命令类时必须同时实现 CommandExecutor.onCommand 与 TabCompleter.onTabComplete。onTabComplete 至少根据 args.length 返回当前层级的合理候选（无候选则返回空 List），不要返回 null。一个类可同时 implements CommandExecutor, TabCompleter
+- **命令注册**：在 Main.onEnable 中：PluginCommand cmd = getCommand("xxx"); cmd.setExecutor(new XxxCommand()); cmd.setTabCompleter(new XxxCommand()); 同一个类做两件事时只 new 一个实例
+- **Listener 注册**：在 Main.onEnable 中调用 getServer().getPluginManager().registerEvents(new XxxListener(), this)。Listener 类必须 implements Listener，事件方法必须加 @EventHandler 注解
+- **Inventory GUI**：自定义 GUI 必须用 InventoryHolder 标识（推荐让 GUI 类 implements InventoryHolder 并由 Bukkit.createInventory(this, size, title) 创建）。监听 InventoryClickEvent 时先判断 event.getInventory().getHolder() instanceof YourGUI，再 event.setCancelled(true) 阻止取出物品，然后用 event.getRawSlot() 派发点击逻辑
+- **配置读取**：通过 getConfig().getXxx("path", default) 读取。Main.onEnable 必须先调用 saveDefaultConfig() 才能读到 resources/config.yml 的默认值
+- **YAML 数据持久化**：用 File dataFile = new File(getDataFolder(), "data.yml"); YamlConfiguration cfg = YamlConfiguration.loadConfiguration(dataFile); 读写后 cfg.save(dataFile) 落盘。getDataFolder() 不存在时先 mkdirs()。Main.onDisable 必须保存所有可变数据
+- **调度任务**：用 new BukkitRunnable() { @Override public void run() { ... } }.runTaskTimer(plugin, delay, period) 启动周期任务；一次性延迟用 runTaskLater；同步任务避免阻塞主线程，耗时操作用 runTaskAsynchronously
+- **plugin.yml 完整性**：必须含 name、version、main（全限定主类名）、api-version。命令必须在 commands 节点声明（每条至少 description；可选 usage/aliases/permission）。声明的权限节点必须列在 permissions 节点（含 description、default）
+- **权限检查**：通过 sender.hasPermission("plugin.cmd.xxx") 判断，未通过时 sender.sendMessage 提示并 return true
+- **消息着色**：使用 ChatColor 枚举或 § 字符常量（如 ChatColor.GOLD + "..."），不要在字符串字面量中写 §
+- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
 }

@@ -35,12 +35,16 @@
 ```
 用户输入需求
     ↓
-需求分析（getInfo）
+precheck 完整性预检（deepseek-v4-pro + thinking）
+    ├─ complete=false → 输入框预填补充提示，回到上一步
+    └─ complete=true → 继续
+    ↓
+需求分析（getInfo, deepseek-v4-flash）
     ├─ 提取 coreType + version
     ├─ 缺失参数 → 弹出选择面板
     └─ 参数完整 → 继续
     ↓
-步骤生成（getTodoList）
+步骤生成（getTodoList, deepseek-v4-flash）
     ├─ 返回 JSON 数组 → 结构化渲染
     └─ 返回文本 → SSE 流式输出（fallback）
     ↓
@@ -50,28 +54,44 @@
 ### 生成流程
 
 ```
-1. Planner 规划
-   需求 → 项目名 + Java 版本 + 包名 + 文件树（含依赖拓扑）
-   文件按 depends 字段拓扑排序，主类排最后
+1. 创建任务（POST /plan，无 taskId）
+   写入 userPrompt/coreType/version → status=clarifying
    ↓
-2. 逐文件生成（循环）
-   FileGen（注入已生成文件的结构化 API 摘要）
-   → reChecker 审查（含跨文件调用一致性检查）
-   → 通过/返工（最多2次）
-   → summaryExtract 提取结构化摘要（类名、方法签名、事件等）
+2. 多轮 Clarify 澄清（POST /clarify, deepseek-v4-pro + thinking, SSE）
+   reasoning 流入折叠区 → todos 增量渲染卡片
+   ClarifyPanel 单卡片确认（UI 方式 / 持久化 / 增长曲线 / ...）
+   needMoreInput=true → 回到输入框补充
+   循环到 done=true 或 5 轮
    ↓
-3. 文件校验
+3. Planner 规划（POST /plan，带 taskId, deepseek-v4-pro + thinking）
+   注入 clarifyRounds 作为已确认决策 + Paper 配套结构知识
+   产出文件树（含依赖拓扑）→ 主类排最后
+   ↓
+4. 逐文件生成循环（POST /file, SSE）
+   FileGen（deepseek-v4-flash，注入已生成文件的 API 摘要 + Paper 配套实现规范）
+   → reChecker 审查（deepseek-v4-pro + thinking，跨文件调用一致性）
+   → 缺失类 → 动态生成 / 不通过 → rework（最多 2 次）
+   → summaryExtract 提取结构化摘要
+   ↓
+5. 文件校验
    对比 plan vs generatedFiles，缺失文件自动补齐
    ↓
-4. 上传 + 触发构建
+6. 上传 + 触发构建
    创建临时分支 → 批量上传 → workflow_dispatch
    ↓
-5. 轮询构建状态
-   每 5s 查询 Actions run，完成后获取 artifact
+7. 轮询构建状态
+   每 5s 查询 Actions run，失败 → /fix 自动修复 → 重新构建（最多 2 次）
    ↓
-6. 下载 JAR
+8. 下载 JAR
    代理 GitHub artifact 下载，清理 KV 和临时分支
 ```
+
+### 模型分工
+
+| 模型 | 调用位置 |
+|------|---------|
+| `deepseek-v4-flash` | FileGen 主生成、summaryExtract、对话兜底（chat / stream 默认） |
+| `deepseek-v4-pro` | precheck、clarify、planner、reChecker、rework、动态缺失类、fix；自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 ## 技术栈
 
@@ -114,17 +134,46 @@ interface ChatBlock {
 }
 ```
 
-### 生成任务状态（KV）
+### 生成任务状态（前端 + KV）
+
+前端 `GenTask` 在 KV 状态基础上扩展了澄清阶段所需字段：
 
 ```typescript
+interface GenTask {
+  taskId: string;
+  phase: "idle" | "awaiting_input" | "clarifying" | "planning"
+       | "generating" | "verifying" | "uploading" | "building" | "fixing" | "done" | "error";
+
+  // Clarify 阶段
+  clarifyTodos: TodoItem[];
+  clarifyAnswers: Record<string, string | string[]>;
+  clarifyHistory: { todos: TodoItem[]; answers: Record<string, any> }[];
+  reasoningContent: string;     // deepseek-v4-pro 思考流（折叠显示）
+  reasoningVisible: boolean;
+  moreInputHint: string;        // needMoreInput 时给用户的补充提示
+
+  // 生成阶段
+  plan: PlanFile[];
+  generatedFiles: GeneratedFile[];
+  streamingContent: string;
+  ...
+}
+
+// KV 端
 interface TaskState {
   taskId: string;
-  status: "planning" | "generating" | "verifying" | "uploading" | "building" | "done" | "error";
+  status: "clarifying" | "planning" | "generating" | "verifying"
+        | "uploading" | "building" | "done" | "error";
+  userPrompt: string;
+  coreType: string;
+  version: string;
+
+  clarifyRounds: { todos: TodoItem[]; answers: Record<string, any> }[];
+  clarifyDone: boolean;
+
   projectName: string;
   javaVersion: string;
   packageName: string;
-  coreType: string;
-  version: string;
   plan: { path: string; role: string; order: number; depends?: string[] }[];
   generatedFiles: { path: string; content: string; apiSummary: FileSummary }[];
   currentFileIndex: number;

@@ -1,12 +1,29 @@
 # 步骤生成：AI 如何解读需求
 
-## 两阶段请求设计
+## 三阶段请求设计
 
-步骤生成分两次 AI 调用，而非一次性完成。这是有意为之的架构选择。
+对话框输入到步骤渲染，会触发三次 AI 调用。前两次承担"判断 + 提取"的轻量工作（`deepseek-v4-pro` / `deepseek-v4-flash`），第三次输出结构化步骤。
+
+### 第零阶段：precheck — 完整性预检
+
+用户提交需求后，先调用一次 `deepseek-v4-pro`（自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`）做闭环判断：
+
+```
+Prompt 核心指令：
+你是 Minecraft 插件需求完整性检查器，判断用户的描述是否逻辑闭环：
+- 完整 → {"complete": true}
+- 不完整 → {"complete": false, "hint": "请补充：1) xxx；2) xxx"}
+```
+
+**设计要点**：
+- 只输出 JSON，前端 `precheckPrompt()` 用 `JSON.parse` 拿结果
+- `complete: false` 时不进入后续阶段，前端在输入框内**预填**：原始内容 + 换行 + `补充方向：${hint}`，等待用户补足后重新提交
+- 解析失败按"通过"处理，避免阻塞流程
+- 用 reasoner 的好处是它会在 `reasoning_content` 里先评估"功能闭环 / 玩家行为 / 触发方式"，再下结论，对模糊一句话的判断比 flash 更稳
 
 ### 第一阶段：getInfo — 需求分析
 
-用户输入自然语言后，先发一个轻量请求提取关键参数：
+用户输入自然语言后，再发一个轻量请求（`deepseek-v4-flash`）提取关键参数：
 
 ```
 Prompt 核心指令：

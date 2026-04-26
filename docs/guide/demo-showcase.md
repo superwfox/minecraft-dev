@@ -26,17 +26,124 @@
 - 配置文件（plugin.yml、config.yml）
 - Maven 构建配置（pom.xml）
 
+## 第零阶段：需求确认
+
+### 步骤 1：precheck 完整性预检（deepseek-v4-pro + thinking）
+
+用户提交后，前端先调用 `/api/chat` 走 `deepseek-v4-pro` 判断需求是否闭环。
+
+**输入**：
+```json
+{
+  "model": "deepseek-v4-pro",
+  "messages": [
+    { "role": "system", "content": "你是 Minecraft 插件需求完整性检查器..." },
+    { "role": "user", "content": "请帮我完成一个玩家进服后被踢出..." }
+  ]
+}
+```
+
+**输出**：
+```json
+{ "complete": true }
+```
+
+● 需求闭环（含核心功能 + 玩家行为 + 命令触发），直接进入下一步。若返回 `complete: false`，输入框会预填"原始内容 + 补充方向：xxx"，等用户补完再提交。
+
+### 步骤 2：getInfo 提取核心 + 版本 → 用户确认
+
+`deepseek-v4-flash` 提取出 `coreType: "PAPER"`、`version: "1.20.6"`，因为已写在需求中无需再问。
+
+### 步骤 3：多轮 Clarify 澄清（deepseek-v4-pro + thinking）
+
+确认版本后调用 `POST /api/generate/plan`（无 taskId）创建任务，再循环调用 `POST /api/generate/clarify` 进入澄清。
+
+**第 1 轮 Clarify 输出**（前端通过 SSE 增量收到 `reasoning` 写入折叠区，`todos` 增量解析逐张推到 ClarifyPanel）：
+
+```json
+{
+  "done": false,
+  "todos": [
+    {
+      "id": "ui-interaction",
+      "question": "玩家与维护提示的交互方式？",
+      "options": ["聊天命令 + sendMessage", "聊天命令 + Inventory GUI", "其他（无法保证最终质量）"],
+      "allowCustom": true,
+      "multiSelect": false
+    },
+    {
+      "id": "persistence",
+      "question": "维护提示如何持久化？",
+      "options": ["文本存储", "二进制存储"],
+      "allowCustom": false,
+      "multiSelect": false
+    },
+    {
+      "id": "permission",
+      "question": "/setNotice 命令的权限节点前缀？",
+      "options": ["maintenancekicker.*", "admin.*", "自定义"],
+      "allowCustom": true,
+      "multiSelect": false
+    }
+  ]
+}
+```
+
+ClarifyPanel 顶部显示进度 `1/3`，单卡片纵向选项。用户选择：
+- ui-interaction → `聊天命令 + sendMessage`
+- persistence → `文本存储`
+- permission → `maintenancekicker.*`
+
+**第 2 轮 Clarify**（系统检测到 persistence=文本，自动追问 text-format）：
+```json
+{
+  "done": false,
+  "todos": [
+    {
+      "id": "text-format",
+      "question": "文本存储格式？",
+      "options": ["YAML", "CSV", "TXT"],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  ]
+}
+```
+
+用户选 `YAML`。
+
+**第 3 轮 Clarify**：
+```json
+{ "done": true, "todos": [] }
+```
+
+● 澄清结束，共 2 轮真问 + 1 轮收尾，clarifyRounds 写回 KV。
+
 ## 第一阶段：Planner 规划
 
-用户点击"生成项目"后，系统调用 Planner 分析需求。
+澄清完成后，前端再次调用 `POST /api/generate/plan`（带 taskId），后端把已确认决策拼接进 `plannerPrompt` 并调用 `deepseek-v4-pro` 出文件树。
 
 ### Planner 输入
+
+KV 中聚合后传入 `plannerPrompt` 的上下文：
 
 ```json
 {
   "userPrompt": "请帮我完成一个玩家进服后被踢出并提示正在维护的插件，并且支持用 /setNotice 命令设置踢出时的提示",
   "coreType": "PAPER",
-  "version": "1.20.6"
+  "version": "1.20.6",
+  "clarifyRounds": [
+    {
+      "answers": {
+        "ui-interaction": "聊天命令 + sendMessage",
+        "persistence": "文本存储",
+        "permission": "maintenancekicker.*"
+      }
+    },
+    {
+      "answers": { "text-format": "YAML" }
+    }
+  ]
 }
 ```
 
@@ -520,6 +627,13 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 <!-- 截图：MC 客户端显示被踢出界面，提示消息为自定义内容 -->
 
 ## 技术亮点总结
+
+### 0. precheck + 多轮 Clarify 把模糊需求收敛为可执行决策
+
+- precheck（`deepseek-v4-pro` + thinking）拦截"功能闭环 / 玩家行为 / 触发方式"未交代的输入，输入框预填补充提示
+- ClarifyPanel 单卡片纵向选项，强制覆盖 UI 方式 / 持久化（含文本格式追问）/ 权限节点等关键项
+- Reasoner 的思考流写入折叠区，todos 增量解析逐张推到面板，无空档
+- clarifyRounds 全部回灌 `plannerPrompt`，让 Planner 按"已确认决策"出文件树，避免冗余
 
 ### 1. 依赖拓扑排序 + 主类最后生成
 
