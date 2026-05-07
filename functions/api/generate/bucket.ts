@@ -314,33 +314,72 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 共享上下文：本次桶内不互相依赖，但快照已生成的全局摘要供 dispatchGen 注入
             const baseSummaries = extractSummaries(state.generatedFiles);
 
+            // 空桶直接结束（理论上不会出现，作为兜底）
+            if (targets.length === 0) {
+                state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
+                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await writer.write(sseEvent(encoder, {
+                    type: "result", bucketIndex,
+                    done: state.currentBucket >= buckets.length,
+                    completed: [], newFiles: [], errors: [],
+                    bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                await writer.close();
+                return;
+            }
+
             // 各文件结果按完成顺序入数组
             const results: FileGenOutput[] = [];
+            const errors: { path: string; reason: string }[] = [];
             const sem = makeSemaphore(concurrency);
             let replanTriggered: FileGenOutput | null = null;
 
+            // 每个并发任务自己捕获异常，失败也照常写入 errors 数组，避免一个失败拖垮整个桶
             await Promise.all(targets.map(async (target) => {
                 await sem.acquire();
                 try {
                     if (replanTriggered) return; // 早停
                     state.fileStatuses ??= {};
                     state.fileStatuses[target.path] = "generating";
-                    // 每个并发文件用独立的 summaries 副本，避免动态缺失类竞态污染
                     const localSummaries = baseSummaries.slice();
-                    const r = await generateAndCheckFile(
-                        key, target, ctx, localSummaries, blueprint, writer, encoder, state,
-                    );
-                    if (r.replan) {
-                        replanTriggered = r;
+                    try {
+                        const r = await generateAndCheckFile(
+                            key, target, ctx, localSummaries, blueprint, writer, encoder, state,
+                        );
+                        if (r.replan) {
+                            replanTriggered = r;
+                            state.fileStatuses[target.path] = "error";
+                        } else {
+                            state.fileStatuses[target.path] = "done";
+                        }
+                        results.push(r);
+                    } catch (taskErr: any) {
+                        const reason = taskErr?.message ? String(taskErr.message) : String(taskErr);
                         state.fileStatuses[target.path] = "error";
-                    } else {
-                        state.fileStatuses[target.path] = "done";
+                        errors.push({ path: target.path, reason });
+                        const failMsg = `× ${target.path} 生成异常：${reason}`;
+                        state.logs.push(failMsg);
+                        try {
+                            await writer.write(sseEvent(encoder, { type: "log", path: target.path, msg: failMsg }));
+                            await writer.write(sseEvent(encoder, { type: "file_error", path: target.path, reason }));
+                        } catch { /* writer 可能已关闭，忽略 */ }
                     }
-                    results.push(r);
                 } finally {
                     sem.release();
                 }
             }));
+
+            // 任意文件出现异常 → 触发重新规划
+            if (!replanTriggered && errors.length > 0) {
+                replanTriggered = {
+                    path: errors[0].path,
+                    content: "", apiSummary: null,
+                    reworkCount: 0, failed: true, replan: true,
+                    reason: `桶 #${bucketIndex} 中 ${errors.length} 个文件生成异常：${errors.map(e => e.path).join(", ")}`,
+                    newFiles: [],
+                };
+            }
 
             if (replanTriggered) {
                 state.status = "error";
@@ -379,8 +418,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
-            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${e.message}` }));
-            await writer.write(encoder.encode("data: [DONE]\n\n"));
+            const errMsg = e?.message ? String(e.message) : String(e);
+            try {
+                await writer.write(sseEvent(encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` }));
+                // 关键：始终发出 result 事件，避免前端拿到 null
+                await writer.write(sseEvent(encoder, {
+                    type: "result", bucketIndex, replan: true,
+                    reason: `桶 #${bucketIndex} 执行失败: ${errMsg}`,
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+            } catch { /* writer 可能已关闭 */ }
         } finally {
             await writer.close();
         }

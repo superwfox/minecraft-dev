@@ -156,6 +156,14 @@ async function readSSE(resp: Response): Promise<any> {
                         }
                         break;
                     }
+                    case "file_error": {
+                        const f = findFile(evt.path);
+                        if (f) {
+                            f.status = "error";
+                            f.streamingPhase = "";
+                        }
+                        break;
+                    }
                     case "new_file":
                         // 动态生成的缺失类：插入或更新
                         if (!findFile(evt.path)) {
