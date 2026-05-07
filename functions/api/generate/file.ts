@@ -1,5 +1,5 @@
-import { fileGenPrompt, reCheckerPrompt, reworkPrompt, summaryExtractPrompt } from "../../_lib/prompts";
-import type { FileSummary } from "../../_lib/prompts";
+import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
+import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const MAX_REWORK = 5;
@@ -104,6 +104,7 @@ async function generateSingleFile(
     key: string, filePath: string, fileRole: string,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     summaries: FileSummary[],
+    blueprint: MainBlueprint | null,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
     maxRework: number,
@@ -112,7 +113,17 @@ async function generateSingleFile(
     await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 正在生成 ${filePath}` }));
     state.logs.push(`▸ 正在生成 ${filePath}`);
 
-    const gen = fileGenPrompt(filePath, fileRole, ctx, summaries);
+    // 动态文件按类名后缀启发式推断 generatorType
+    const className = (filePath.split("/").pop() ?? "").replace(/\.java$/, "");
+    const inferredFile: PlanFileItem = {
+        path: filePath,
+        role: fileRole,
+        order: 0,
+        generatorType: inferGeneratorType(className, filePath),
+    };
+    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
+
+    const gen = dispatched.gen;
     let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
     let reworkCount = 0;
     let passed = false;
@@ -122,7 +133,7 @@ async function generateSingleFile(
         await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${filePath}...` }));
         state.logs.push(`▸ 审查 ${filePath}...`);
 
-        const check = reCheckerPrompt(filePath, content, summaries, ctx.projectName);
+        const check = dispatched.checker(filePath, content);
         const reviewRaw = await callAI(key, check.system, check.user, true, true);
         let review: any;
         try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
@@ -174,7 +185,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const target = state.plan[state.currentFileIndex];
+    const target = state.plan[state.currentFileIndex] as PlanFileItem;
     const summaries = extractSummaries(state.generatedFiles);
     const ctx = {
         projectName: state.projectName,
@@ -183,6 +194,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         version: state.version,
         javaVersion: state.javaVersion,
     };
+    const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
+    const slice = computeSlice(target, blueprint);
+    const dispatched = dispatchGen(target, ctx, summaries, slice);
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -195,7 +209,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: `正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})` }));
             state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
 
-            const gen = fileGenPrompt(target.path, target.role, ctx, summaries);
+            const gen = dispatched.gen;
             let content = stripFences(await callAIStream(key, gen.system, gen.user, writer, encoder));
             let reworkCount = 0;
             let dynamicGenDone = false;
@@ -207,7 +221,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${target.path}...` }));
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
-                const check = reCheckerPrompt(target.path, content, summaries, ctx.projectName);
+                const check = dispatched.checker(target.path, content);
                 const reviewRaw = await callAI(key, check.system, check.user, true, true);
                 let review: any;
                 try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
@@ -237,7 +251,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             const newRole = `${className} — 被 ${target.path.split("/").pop()} 引用`;
 
                             const result = await generateSingleFile(
-                                key, newPath, newRole, ctx, summaries,
+                                key, newPath, newRole, ctx, summaries, blueprint,
                                 writer, encoder, state, 1,
                             );
 

@@ -12,6 +12,62 @@ export interface FileSummary {
     description?: string;
 }
 
+/** 文件生成器类型 */
+export type GeneratorType =
+    | "CommandGen"
+    | "ListenerGen"
+    | "TaskGen"
+    | "ManagerGen"
+    | "ConfigGen"
+    | "ConfigClassGen"
+    | "ModelGen"
+    | "EnumGen"
+    | "UtilGen"
+    | "FileRelatedGen"
+    | "MainGen";
+
+export const GENERATOR_TYPES: GeneratorType[] = [
+    "CommandGen", "ListenerGen", "TaskGen", "ManagerGen",
+    "ConfigGen", "ConfigClassGen", "ModelGen", "EnumGen",
+    "UtilGen", "FileRelatedGen", "MainGen",
+];
+
+/** Planner 输出中描述主类编排的"主干蓝图" */
+export interface MainBlueprint {
+    events: { event: string; listenerClass: string; priority?: string }[];
+    commands: { name: string; executorClass: string; aliases?: string[]; permission?: string }[];
+    tasks: { taskClass: string; schedule: "timer" | "once" | "async"; periodTicks?: number; delayTicks?: number; async?: boolean }[];
+    services: { managerClass: string; lifecycle: "onEnable" | "lazy" }[];
+    config: { defaultsCopied: boolean; files: string[] };
+}
+
+/** 单个文件的蓝图切片（dispatchGen 时计算） */
+export interface BlueprintSlice {
+    eventEntry?: MainBlueprint["events"][number];
+    commandEntry?: MainBlueprint["commands"][number];
+    taskEntry?: MainBlueprint["tasks"][number];
+    serviceEntry?: MainBlueprint["services"][number];
+    /** ListenerGen 且 tag=gui 时填充：配对的另一份文件路径 */
+    guiPairPath?: string;
+    /** MainGen 时填充：完整蓝图 */
+    fullBlueprint?: MainBlueprint;
+}
+
+/** Planner 输出的单个文件项 */
+export interface PlanFileItem {
+    path: string;
+    role: string;
+    order: number;
+    depends?: string[];
+    generatorType: GeneratorType;
+    /** ListenerGen 时可选："gui" 表示自定义 GUI 监听 */
+    tag?: "gui" | null;
+    /** GUI 配对：tag="gui" 时存放配对 GUI 持有类的路径 */
+    pairPath?: string;
+    /** 服务端计算后的深度桶索引 */
+    bucket?: number;
+}
+
 /** TodoList 单项（澄清阶段） */
 export interface TodoItem {
     id: string;
@@ -156,23 +212,52 @@ export function plannerPrompt(
   "projectName": "插件名（英文，驼峰）",
   "javaVersion": "8|11|17|21",
   "packageName": "com.example.pluginname",
+  "mainBlueprint": {
+    "events":   [ { "event": "PlayerJoinEvent", "listenerClass": "JoinListener", "priority": "NORMAL" } ],
+    "commands": [ { "name": "setnotice", "executorClass": "SetNoticeCommand", "aliases": [], "permission": "plugin.cmd.setnotice" } ],
+    "tasks":    [ { "taskClass": "AutoSaveTask", "schedule": "timer", "periodTicks": 1200, "delayTicks": 0, "async": false } ],
+    "services": [ { "managerClass": "DataManager", "lifecycle": "onEnable" } ],
+    "config":   { "defaultsCopied": true, "files": ["config.yml"] }
+  },
   "files": [
-    { "path": "pom.xml", "role": "Maven 构建配置", "order": 1, "depends": [] },
-    { "path": "src/main/java/com/example/.../SomeUtil.java", "role": "工具类", "order": 2, "depends": [] },
-    { "path": "src/main/java/com/example/.../Main.java", "role": "插件主类", "order": 3, "depends": ["SomeUtil.java"] }
+    { "path": "pom.xml", "role": "Maven 构建配置", "order": 1, "depends": [], "generatorType": "FileRelatedGen", "tag": null },
+    { "path": "src/main/resources/plugin.yml", "role": "插件描述文件", "order": 2, "depends": [], "generatorType": "ConfigGen", "tag": null },
+    { "path": "src/main/java/com/example/.../SetNoticeCommand.java", "role": "/setnotice 命令：CommandExecutor + TabCompleter", "order": 3, "depends": ["DataManager.java"], "generatorType": "CommandGen", "tag": null },
+    { "path": "src/main/java/com/example/.../Main.java", "role": "插件主类，注册所有命令/监听器/任务并管理生命周期", "order": 4, "depends": ["SetNoticeCommand.java","DataManager.java"], "generatorType": "MainGen", "tag": null }
   ]
 }
+
+mainBlueprint（必填，先想清楚整体编排再列文件）：
+- events：每个监听器声明触发的事件类（如 PlayerJoinEvent）+ 监听类名（与 files[].path 中的类名匹配）+ 可选 priority
+- commands：每条命令的 name（小写，与 plugin.yml 一致）、executorClass（同时实现 CommandExecutor 与 TabCompleter 的类名）、aliases、permission
+- tasks：每个调度任务的类名 + schedule（timer 周期 / once 一次性 / async 异步）+ periodTicks（仅 timer 需要）+ delayTicks
+- services：作为 Main 字段持有的单例服务类（DataManager / EconomyManager 等），lifecycle 通常为 onEnable
+- config：是否需要 saveDefaultConfig + 涉及的 yml 文件名
+
+files[].generatorType 必须从下列枚举中精确选择：
+- "CommandGen"        — 命令类（同时实现 CommandExecutor + TabCompleter，逻辑写在一个文件内）
+- "ListenerGen"       — 事件监听类（implements Listener）。如果是自定义 Inventory GUI 的点击监听，标记 "tag": "gui" 并在 "pairPath" 填写配对的 GUI 持有类相对路径，规划阶段同样要单独列出该 GUI 持有类条目（generatorType="ListenerGen"，tag="gui"，pairPath 指向自身）
+- "TaskGen"           — BukkitRunnable / 调度任务类（不要在文件内自行调用 runTaskTimer，由 Main 启动）
+- "ManagerGen"        — 数据/服务单例（被 Main 实例化、持有，被其他类通过 Bukkit.getPluginManager().getPlugin() 反查取实例）
+- "ConfigGen"         — 资源 yml（plugin.yml / config.yml / lang.yml 等）
+- "ConfigClassGen"    — 包装 YamlConfiguration 的 Java 配置加载类
+- "ModelGen"          — POJO/DTO（不依赖 Bukkit）
+- "EnumGen"           — 枚举类
+- "UtilGen"           — 静态工具类（无实例状态、无插件引用）
+- "FileRelatedGen"    — 非 Java 项目文件（pom.xml / .gitignore / README.md）
+- "MainGen"           — 主类（extends JavaPlugin），有且仅有一个
 
 规则：
 - 根据 MC 版本推导 Java 版本：1.20+ 用 21，1.17-1.19 用 17，1.13-1.16 用 11，1.12 及以下用 8
 - 核心类型为 ${coreType}，MC 版本 ${version}
 - pom.xml 的 order 必须为 1
-- depends 数组填写该文件依赖的其他文件的文件名（不含路径前缀），例如 ["EconomyManager.java"]
-- 插件主类（继承 JavaPlugin 的类）的 order 必须是所有 Java 文件中最大的，因为它依赖所有其他类
+- depends 数组填写该文件依赖的其他文件的文件名（不含路径前缀），例如 ["DataManager.java"]
+- MainGen 文件的 order 必须最大；其 depends 必须列出所有 Listener / Command / Task / Manager 的文件名
 - files 按依赖拓扑排序：被依赖的文件 order 小，依赖方 order 大
+- 同深度（depends 互相不引用）的文件之间不能相互调用——若两个 leaf 都需要某 helper，把 helper 下沉为它们共同的依赖
 - path 使用 Maven 标准目录结构
 - 包名使用全小写
-- 必须包含 plugin.yml（放 src/main/resources/）
+- 必须包含 plugin.yml（放 src/main/resources/，generatorType 为 ConfigGen）
 - 只输出 JSON，不要解释
 
 极简原则（严格遵守）：
@@ -182,16 +267,17 @@ export function plannerPrompt(
 - 能在一个文件中实现的逻辑不要拆分成多个文件
 - 不要规划与用户需求无关的辅助类、工具类、基类、接口
 - 功能类只实现 role 中描述的功能，不要预留扩展方法
+- 禁止把 Manager 标成 Util；禁止把 TabCompleter 与 Executor 拆成两个文件
 
 Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
-- **命令类**：每个命令必须同时具备 onCommand 与 onTabComplete（可让一个类同时实现 CommandExecutor 与 TabCompleter，或拆成两个文件）。无论需求是否明说，规划阶段都必须为命令准备完整的 Executor + TabCompleter 实现，并保证 plugin.yml 的 commands 节点声明该命令；role 必须显式写出"实现 onCommand + onTabComplete"
-- **事件监听类**：每个 Listener 都必须由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
-- **Inventory GUI**：若涉及自定义 GUI，规划必须同时包含 (a) 打开/构造 GUI 的类 (b) InventoryClickEvent 监听类（用于 setCancelled(true) 防止取走物品并分发点击逻辑）；两者可为同一文件
-- **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml，并由 Main.onEnable 调用 saveDefaultConfig
-- **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的存储文件（自行管理 File + YamlConfiguration.loadConfiguration / save），并在 Main.onDisable 中落盘
-- **调度任务**：若涉及定时/重复任务，规划须明确由哪个文件负责通过 BukkitRunnable.runTaskTimer(plugin, delay, period) 注册
+- **命令类（CommandGen）**：onCommand + onTabComplete 必须在同一个类中，不要拆文件；无论需求是否明说，规划阶段都必须为命令准备完整实现并在 plugin.yml 的 commands 节点声明
+- **事件监听类（ListenerGen）**：由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
+- **Inventory GUI**：若涉及自定义 GUI，必须列出两条 ListenerGen 文件——一条是 GUI 持有类（implements InventoryHolder，提供构造 Inventory 的方法），一条是 InventoryClickEvent 监听类。两条都标 tag="gui"，pairPath 互相指向对方
+- **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml（ConfigGen），并由 Main.onEnable 调用 saveDefaultConfig
+- **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的 ManagerGen 类（自行管理 File + YamlConfiguration.loadConfiguration / save），并由 Main.onDisable 中触发落盘
+- **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
 - **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
-- **Main.java**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务；onDisable 负责数据落盘`,
+- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘`,
         user: `${userPrompt}${clarifyBlock}`,
     };
 }
@@ -322,6 +408,317 @@ export function summaryExtractPrompt(filePath: string, fileContent: string): { s
 - 只输出 JSON，不要解释`,
         user: `文件：${filePath}\n\n${fileContent}`,
     };
+}
+
+// ─── Dispatch (per-generator routing) ───────────────────────
+
+/** 把蓝图片段格式化成 system prompt 中的强制清单 */
+function formatBlueprintForMain(bp: MainBlueprint): string {
+    const events = bp.events.length
+        ? bp.events.map(e => `  - ${e.listenerClass} 监听 ${e.event}${e.priority ? `（priority=${e.priority}）` : ""}`).join("\n")
+        : "  - 无";
+    const commands = bp.commands.length
+        ? bp.commands.map(c => `  - /${c.name} → executor=${c.executorClass}` +
+            (c.aliases?.length ? `, aliases=${c.aliases.join(",")}` : "") +
+            (c.permission ? `, permission=${c.permission}` : "")).join("\n")
+        : "  - 无";
+    const tasks = bp.tasks.length
+        ? bp.tasks.map(t => `  - ${t.taskClass} → schedule=${t.schedule}` +
+            (t.periodTicks != null ? `, periodTicks=${t.periodTicks}` : "") +
+            (t.delayTicks != null ? `, delayTicks=${t.delayTicks}` : "") +
+            (t.async ? ", async=true" : "")).join("\n")
+        : "  - 无";
+    const services = bp.services.length
+        ? bp.services.map(s => `  - ${s.managerClass}（lifecycle=${s.lifecycle}）`).join("\n")
+        : "  - 无";
+    const cfgFiles = bp.config.files.length ? bp.config.files.join(", ") : "无";
+    return [
+        "事件监听：", events,
+        "命令：", commands,
+        "调度任务：", tasks,
+        "服务（Main 持有）：", services,
+        `配置：defaultsCopied=${bp.config.defaultsCopied}, files=${cfgFiles}`,
+    ].join("\n");
+}
+
+/** 根据文件类型 + 蓝图切片产出附加在 system prompt 末尾的"专项规则" */
+function specializationBlock(
+    file: PlanFileItem,
+    slice: BlueprintSlice,
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+): string {
+    const className = (file.path.split("/").pop() ?? "").replace(/\.java$/, "");
+    switch (file.generatorType) {
+        case "CommandGen": {
+            const e = slice.commandEntry;
+            const meta = e
+                ? `命令名=/${e.name}` +
+                  (e.aliases?.length ? `；aliases=${e.aliases.join(",")}` : "") +
+                  (e.permission ? `；permission=${e.permission}` : "")
+                : "（无蓝图条目，按 role 推断命令名）";
+            return [
+                "═══ CommandGen 专项规则 ═══",
+                meta,
+                "- 必须在同一个类中同时 implements CommandExecutor, TabCompleter",
+                "- 实现 onCommand(...) 与 onTabComplete(...)；onTabComplete 至少根据 args.length 返回当前层级合理候选，没有候选时返回 Collections.emptyList()",
+                "- 不要在本文件中调用 getCommand(...).setExecutor / setTabCompleter；命令注册由 Main.onEnable 统一完成",
+                "- 权限校验：通过 sender.hasPermission(\"...\") 判断，未通过 sendMessage 后 return true",
+                "- 通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取插件实例（Plugin 接口），不要强转主类",
+            ].join("\n");
+        }
+        case "ListenerGen": {
+            if (file.tag === "gui") {
+                const pair = slice.guiPairPath ?? file.pairPath ?? "（未知配对文件）";
+                return [
+                    "═══ ListenerGen / GUI 专项规则 ═══",
+                    `本文件是 GUI 配对的一部分，配对文件：${pair}`,
+                    "GUI 配对约定：必有两份文件——",
+                    "  (A) GUI 持有类：implements org.bukkit.event.Listener, org.bukkit.inventory.InventoryHolder",
+                    "      - 通过 Bukkit.createInventory(this, size, ChatColor.* + title) 构造 Inventory",
+                    "      - 暴露 open(Player p) 给外部打开",
+                    "      - 提供 getInventory() 返回当前 Inventory 实例",
+                    "  (B) 点击监听类：implements org.bukkit.event.Listener",
+                    "      - 监听 InventoryClickEvent",
+                    "      - 先 if (event.getInventory().getHolder() instanceof <配对持有类>)，再 event.setCancelled(true)",
+                    "      - 然后用 event.getRawSlot() 派发点击逻辑（调用持有类提供的方法或直接处理）",
+                    `根据当前类名 "${className}" 自行判断本文件属于 (A) 还是 (B)：包含 GUI/Menu/Inventory/Holder 字样者通常为 (A)；以 Listener 结尾者通常为 (B)`,
+                    "- 不要在本文件中调用 registerEvents；监听器注册由 Main.onEnable 统一完成",
+                    "- 事件处理方法必须加 @EventHandler 注解",
+                ].join("\n");
+            }
+            const e = slice.eventEntry;
+            const meta = e
+                ? `监听事件=${e.event}${e.priority ? `；priority=${e.priority}` : ""}`
+                : "（无蓝图条目，按 role 推断事件类）";
+            return [
+                "═══ ListenerGen 专项规则 ═══",
+                meta,
+                "- 必须 implements org.bukkit.event.Listener",
+                "- 事件处理方法必须加 @EventHandler 注解" + (e?.priority ? `，并设置 priority = EventPriority.${e.priority}` : ""),
+                "- 不要在本文件中调用 registerEvents；监听器注册由 Main.onEnable 统一完成",
+                "- 不要包含与监听职责无关的方法",
+            ].join("\n");
+        }
+        case "TaskGen": {
+            const t = slice.taskEntry;
+            const meta = t
+                ? `schedule=${t.schedule}` +
+                  (t.periodTicks != null ? `, periodTicks=${t.periodTicks}` : "") +
+                  (t.delayTicks != null ? `, delayTicks=${t.delayTicks}` : "") +
+                  (t.async ? ", async=true" : "")
+                : "（无蓝图条目）";
+            return [
+                "═══ TaskGen 专项规则 ═══",
+                meta,
+                "- 必须 extends org.bukkit.scheduler.BukkitRunnable，实现 run() 中的单次执行逻辑",
+                "- 不要在本文件中调用 runTaskTimer / runTaskLater / runTaskAsynchronously；调度由 Main.onEnable 统一启动",
+                "- 不要持有 Plugin 字段（除非业务必需）；通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取必要服务",
+                "- run() 内若有耗时操作且 schedule=async，可使用 async 调用；同步任务避免阻塞主线程",
+            ].join("\n");
+        }
+        case "ManagerGen": {
+            const s = slice.serviceEntry;
+            const lifecycle = s ? `lifecycle=${s.lifecycle}` : "（无蓝图条目）";
+            return [
+                "═══ ManagerGen 专项规则 ═══",
+                lifecycle,
+                "- 这是被 Main 持有的服务/数据单例。Main 在 onEnable 中 new 一次并保留引用，其它类通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 反查后调用",
+                "- 禁止使用 static getInstance() 单例模式；不要写 private static <ClassName> instance",
+                "- 构造时载入数据（YamlConfiguration 等），提供 save() / shutdown() 方法供 Main.onDisable 调用",
+                "- 公共方法应聚焦数据访问与变更；不要在 ManagerGen 内自行注册命令/监听/任务",
+            ].join("\n");
+        }
+        case "ConfigGen": {
+            return [
+                "═══ ConfigGen 专项规则 ═══",
+                "- 本文件是 YAML 资源文件（plugin.yml / config.yml / lang.yml 等），不是 Java 代码",
+                "- 直接输出 YAML 内容，不包含任何 Java 关键字、import、class 声明",
+                file.path.endsWith("plugin.yml")
+                    ? `- plugin.yml 必须含字段：name: ${ctx.projectName}, version: 1.0.0, main: ${ctx.packageName}.Main, api-version: ${ctx.version}\n- 所有命令必须在 commands 节点声明（每条至少 description；可选 usage / aliases / permission）\n- 涉及的权限节点必须在 permissions 节点声明（含 description 与 default）`
+                    : "- config.yml 仅放运行时可变默认值，注释用 # 说明每个字段的作用",
+            ].join("\n");
+        }
+        case "ConfigClassGen": {
+            return [
+                "═══ ConfigClassGen 专项规则 ═══",
+                "- 本类包装 org.bukkit.configuration.file.YamlConfiguration / FileConfiguration",
+                "- 提供 reload() / save() / get*(key, default) 等公共方法",
+                "- 不要在类内硬编码默认值；默认值统一由 resources/config.yml 提供，通过 saveDefaultConfig() 释放后读取",
+                "- 不要在本文件内注册命令/监听/任务",
+            ].join("\n");
+        }
+        case "ModelGen": {
+            return [
+                "═══ ModelGen 专项规则 ═══",
+                "- 本文件是纯数据 POJO/DTO，禁止 import org.bukkit.* 或任何 Bukkit/Paper API",
+                "- 玩家引用使用 java.util.UUID，不使用 Player 对象",
+                "- 提供必要的构造函数与 getter/setter，可附 toString/equals/hashCode",
+                "- 不持有插件实例，不调用任何插件方法",
+            ].join("\n");
+        }
+        case "EnumGen": {
+            return [
+                "═══ EnumGen 专项规则 ═══",
+                "- 本文件是 Java enum 声明",
+                "- 可附少量字段、构造函数、values()/valueOf() 之外的简单查询方法",
+                "- 禁止在 enum 中实现复杂业务逻辑或依赖 Bukkit/Paper API",
+            ].join("\n");
+        }
+        case "UtilGen": {
+            return [
+                "═══ UtilGen 专项规则 ═══",
+                "- 本类是静态工具类：所有方法 public static，private 构造禁止实例化",
+                "- 不持有任何实例字段，不持有插件引用",
+                "- 不要在 UtilGen 中处理事件、注册任务、读写配置文件",
+            ].join("\n");
+        }
+        case "FileRelatedGen": {
+            const lower = file.path.toLowerCase();
+            if (lower.endsWith("pom.xml")) {
+                return [
+                    "═══ FileRelatedGen / pom.xml 专项规则 ═══",
+                    `- groupId 取自包名前两段（如 ${ctx.packageName.split(".").slice(0, 2).join(".")}），artifactId=${ctx.projectName}`,
+                    `- maven-compiler-plugin 的 source/target 设为 ${ctx.javaVersion}`,
+                    `- 加入 ${ctx.coreType.toLowerCase()}-api 依赖，version 与 MC ${ctx.version} 匹配（Paper 推荐 io.papermc.paper:paper-api:${ctx.version}-R0.1-SNAPSHOT，Spigot 推荐 org.spigotmc:spigot-api 对应版本）；scope 为 provided`,
+                    "- 加入 papermc / spigotmc 仓库（按 coreType）",
+                    "- 配置 maven-shade-plugin 输出 shaded jar（artifactId 名）",
+                ].join("\n");
+            }
+            if (lower.endsWith(".gitignore")) {
+                return [
+                    "═══ FileRelatedGen / .gitignore 专项规则 ═══",
+                    "- 至少忽略 target/、*.class、.idea/、.vscode/、*.iml",
+                ].join("\n");
+            }
+            if (lower.endsWith("readme.md")) {
+                return [
+                    "═══ FileRelatedGen / README 专项规则 ═══",
+                    "- 简洁中文说明：插件名 / 简介 / 命令列表 / 配置项；不要营销话术",
+                ].join("\n");
+            }
+            return "═══ FileRelatedGen 专项规则 ═══\n- 输出对应文件的常规内容；不要与其他文件类型混合";
+        }
+        case "MainGen": {
+            const bp = slice.fullBlueprint;
+            const blueprintBlock = bp ? formatBlueprintForMain(bp) : "（无完整蓝图）";
+            return [
+                "═══ MainGen 专项规则 ═══",
+                "- 本文件是插件唯一主类，必须 extends JavaPlugin",
+                "- 严格按下方蓝图实现 onEnable / onDisable，不得遗漏或新增任何条目：",
+                blueprintBlock,
+                "",
+                "onEnable 顺序（必须按此顺序）：",
+                "  1) saveDefaultConfig()（仅当蓝图 defaultsCopied=true）",
+                "  2) 实例化所有服务（lifecycle=onEnable 的 ManagerGen），保存为字段",
+                "  3) 注册所有命令：getCommand(\"name\").setExecutor(executorInstance) 与 setTabCompleter(executorInstance)（同一类的同一实例）",
+                "  4) 注册所有监听：getServer().getPluginManager().registerEvents(listenerInstance, this)",
+                "  5) 启动调度任务：根据 schedule 字段调用 runTaskTimer / runTaskLater / runTaskAsynchronously",
+                "",
+                "onDisable：",
+                "  - 调用所有服务的 save()/shutdown() 方法（如其暴露），确保数据落盘",
+                "  - 取消调度任务（getServer().getScheduler().cancelTasks(this)）",
+                "",
+                "- Main 必须为以上每个 service 持有 getter（如 public DataManager getDataManager()），供其他类通过 Bukkit.getPluginManager().getPlugin(...) 反查后调用",
+                "- 禁止 static getInstance() 单例；插件实例通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取",
+            ].join("\n");
+        }
+    }
+    return "";
+}
+
+/** 类型专项的 reChecker 增量断言 */
+function checkerSpecializationBlock(file: PlanFileItem, slice: BlueprintSlice): string {
+    switch (file.generatorType) {
+        case "CommandGen":
+            return "类型专项断言：本文件应同时 implements CommandExecutor 与 TabCompleter，并实现 onCommand 与 onTabComplete；不应包含 setExecutor / setTabCompleter / registerEvents 调用。";
+        case "ListenerGen":
+            return file.tag === "gui"
+                ? "类型专项断言：本文件应 implements Listener；若是 GUI 持有类还应 implements InventoryHolder；不应在文件内调用 registerEvents。"
+                : "类型专项断言：本文件应 implements Listener，事件方法必须加 @EventHandler；不应在文件内调用 registerEvents。";
+        case "TaskGen":
+            return "类型专项断言：本文件应 extends BukkitRunnable 并实现 run()；不应直接调用 runTaskTimer / runTaskLater / runTaskAsynchronously（启动由 Main 完成）。";
+        case "ManagerGen":
+            return "类型专项断言：本文件不应使用 static getInstance() 单例模式，不应直接注册命令/监听/任务。";
+        case "MainGen": {
+            const bp = slice.fullBlueprint;
+            if (!bp) return "类型专项断言：MainGen 必须 extends JavaPlugin 且实现完整 onEnable / onDisable。";
+            const must: string[] = [];
+            for (const e of bp.events) must.push(`onEnable 必须注册 ${e.listenerClass}（registerEvents）`);
+            for (const c of bp.commands) must.push(`onEnable 必须为 /${c.name} 设置 ${c.executorClass} 为 Executor 与 TabCompleter`);
+            for (const t of bp.tasks) must.push(`onEnable 必须按 schedule=${t.schedule} 启动 ${t.taskClass}`);
+            for (const s of bp.services) must.push(`onEnable 必须实例化 ${s.managerClass}`);
+            return "类型专项断言（MainGen 必须满足）：\n- " + must.join("\n- ");
+        }
+        case "ModelGen":
+            return "类型专项断言：本文件不应 import org.bukkit.* 或任何 Bukkit/Paper API。";
+        case "UtilGen":
+            return "类型专项断言：本文件所有公共方法应 public static，不应持有实例字段或插件引用。";
+        case "ConfigGen":
+            return "类型专项断言：本文件应是 YAML，不应包含 Java 语法。";
+        default:
+            return "";
+    }
+}
+
+/** 根据 generatorType 选择 FileGen 与 reChecker 的 prompt 构造器 */
+export function dispatchGen(
+    file: PlanFileItem,
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+    ancestorSummaries: FileSummary[],
+    slice: BlueprintSlice,
+): {
+    gen: { system: string; user: string };
+    checker: (filePath: string, fileContent: string) => { system: string; user: string };
+} {
+    const base = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries);
+    const spec = specializationBlock(file, slice, ctx);
+    const gen = {
+        system: spec ? base.system + "\n\n" + spec : base.system,
+        user: base.user,
+    };
+    const checkerSpec = checkerSpecializationBlock(file, slice);
+    const checker = (path: string, content: string) => {
+        const baseChk = reCheckerPrompt(path, content, ancestorSummaries, ctx.projectName);
+        return {
+            system: checkerSpec ? baseChk.system + "\n\n" + checkerSpec : baseChk.system,
+            user: baseChk.user,
+        };
+    };
+    return { gen, checker };
+}
+
+/** 计算文件对应的 BlueprintSlice */
+export function computeSlice(file: PlanFileItem, blueprint: MainBlueprint | null): BlueprintSlice {
+    if (!blueprint) return {};
+    const className = (file.path.split("/").pop() ?? "").replace(/\.java$/, "");
+    const slice: BlueprintSlice = {};
+
+    if (file.generatorType === "ListenerGen") {
+        slice.eventEntry = blueprint.events.find(e => e.listenerClass === className);
+        if (file.tag === "gui" && file.pairPath) slice.guiPairPath = file.pairPath;
+    } else if (file.generatorType === "CommandGen") {
+        slice.commandEntry = blueprint.commands.find(c => c.executorClass === className);
+    } else if (file.generatorType === "TaskGen") {
+        slice.taskEntry = blueprint.tasks.find(t => t.taskClass === className);
+    } else if (file.generatorType === "ManagerGen") {
+        slice.serviceEntry = blueprint.services.find(s => s.managerClass === className);
+    } else if (file.generatorType === "MainGen") {
+        slice.fullBlueprint = blueprint;
+    }
+    return slice;
+}
+
+/** 根据类名后缀启发式推断 generatorType（用于动态缺失类补全） */
+export function inferGeneratorType(className: string, filePath: string): GeneratorType {
+    if (!filePath.endsWith(".java")) return "FileRelatedGen";
+    if (/Listener$/.test(className)) return "ListenerGen";
+    if (/Command$/.test(className) || /Cmd$/.test(className) || /Executor$/.test(className)) return "CommandGen";
+    if (/Task$/.test(className) || /Runnable$/.test(className) || /Scheduler$/.test(className)) return "TaskGen";
+    if (/Manager$/.test(className) || /Service$/.test(className) || /Repository$/.test(className) || /Store$/.test(className)) return "ManagerGen";
+    if (/Config$/.test(className) || /Settings$/.test(className)) return "ConfigClassGen";
+    if (/Util$/.test(className) || /Utils$/.test(className) || /Helper$/.test(className)) return "UtilGen";
+    if (/Enum$/.test(className) || /Type$/.test(className)) return "EnumGen";
+    return "UtilGen";
 }
 
 // ─── Build Fix ─────────────────────────────────────────────

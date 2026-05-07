@@ -1,4 +1,4 @@
-import { plannerPrompt } from "../../_lib/prompts";
+import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem } from "../../_lib/prompts";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 
@@ -7,19 +7,12 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-interface PlanFile {
-    path: string;
-    role: string;
-    order: number;
-    depends?: string[];
-}
-
 /**
  * 对文件列表进行拓扑排序，确保被依赖的文件先生成。
  * depends 中的值是文件名（不含路径前缀），如 "EconomyManager.java"。
  * 如果 AI 返回的 depends 有误（引用不存在的文件），忽略该依赖，退回 order 排序。
  */
-function topoSort(files: PlanFile[]): PlanFile[] {
+function topoSort(files: PlanFileItem[]): PlanFileItem[] {
     const nameToPath = new Map<string, string>();
     for (const f of files) {
         const fileName = f.path.split("/").pop() ?? f.path;
@@ -47,7 +40,7 @@ function topoSort(files: PlanFile[]): PlanFile[] {
     const queue = files
         .filter(f => inDegree.get(f.path) === 0)
         .sort((a, b) => a.order - b.order);
-    const sorted: PlanFile[] = [];
+    const sorted: PlanFileItem[] = [];
 
     while (queue.length > 0) {
         const current = queue.shift()!;
@@ -72,8 +65,58 @@ function topoSort(files: PlanFile[]): PlanFile[] {
     return sorted;
 }
 
+/**
+ * 基于 depends 的可解析关系计算每个文件的深度。
+ * depth(f) = 0 if 没有可解析的 depends
+ *          = 1 + max(depth(dep)) 否则
+ * 不可解析的依赖（引用不存在的文件名）会被忽略。
+ * 检测到循环依赖时，对参与循环的节点返回 0（与 topoSort 的兜底一致）。
+ */
+function computeDepths(files: PlanFileItem[]): Map<string, number> {
+    const nameToPath = new Map<string, string>();
+    for (const f of files) {
+        const fileName = f.path.split("/").pop() ?? f.path;
+        nameToPath.set(fileName, f.path);
+    }
+    const pathToFile = new Map(files.map(f => [f.path, f]));
+    const depthCache = new Map<string, number>();
+    const visiting = new Set<string>();
+
+    function depthOf(path: string): number {
+        if (depthCache.has(path)) return depthCache.get(path)!;
+        if (visiting.has(path)) return 0; // 循环依赖兜底
+        visiting.add(path);
+        const f = pathToFile.get(path);
+        if (!f) { visiting.delete(path); return 0; }
+        const deps = (f.depends ?? [])
+            .map(d => nameToPath.get(d))
+            .filter((p): p is string => !!p && p !== path);
+        let d = 0;
+        if (deps.length > 0) {
+            d = 1 + Math.max(...deps.map(depthOf));
+        }
+        visiting.delete(path);
+        depthCache.set(path, d);
+        return d;
+    }
+
+    for (const f of files) depthOf(f.path);
+    return depthCache;
+}
+
 function stripFences(raw: string): string {
     return raw.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "").trim();
+}
+
+function isValidBlueprint(bp: any): bp is MainBlueprint {
+    if (!bp || typeof bp !== "object") return false;
+    if (!Array.isArray(bp.events)) return false;
+    if (!Array.isArray(bp.commands)) return false;
+    if (!Array.isArray(bp.tasks)) return false;
+    if (!Array.isArray(bp.services)) return false;
+    if (!bp.config || typeof bp.config !== "object") return false;
+    if (!Array.isArray(bp.config.files)) return false;
+    return true;
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -96,7 +139,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             projectName: "",
             javaVersion: "",
             packageName: "",
+            mainBlueprint: null,
             plan: [],
+            buckets: [],
+            fileStatuses: {},
+            currentBucket: 0,
             generatedFiles: [],
             currentFileIndex: 0,
             logs: ["任务已创建，进入澄清阶段"],
@@ -143,14 +190,74 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return new Response(JSON.stringify({ error: "Planner 返回非 JSON", raw: content }), { status: 422 });
     }
 
-    const sortedFiles = topoSort(plan.files as PlanFile[]);
+    // —— 蓝图校验 ——
+    if (!isValidBlueprint(plan.mainBlueprint)) {
+        return new Response(JSON.stringify({
+            error: "Planner 缺少有效的 mainBlueprint",
+            raw: plan,
+        }), { status: 422 });
+    }
+    const blueprint = plan.mainBlueprint as MainBlueprint;
+
+    // —— 文件项校验：每个文件必须带合法的 generatorType ——
+    if (!Array.isArray(plan.files) || plan.files.length === 0) {
+        return new Response(JSON.stringify({ error: "Planner 未返回 files 数组" }), { status: 422 });
+    }
+    const validTypes = new Set<string>(GENERATOR_TYPES);
+    for (const f of plan.files) {
+        if (!f.path || !f.role || typeof f.order !== "number") {
+            return new Response(JSON.stringify({
+                error: "文件项缺少 path/role/order", file: f,
+            }), { status: 422 });
+        }
+        if (!f.generatorType || !validTypes.has(f.generatorType)) {
+            return new Response(JSON.stringify({
+                error: `非法 generatorType: ${f.generatorType}`, file: f,
+            }), { status: 422 });
+        }
+    }
+
+    const files = plan.files as PlanFileItem[];
+
+    // —— 拓扑排序（保证 order 单调，依赖在前） ——
+    const sortedFiles = topoSort(files);
+
+    // —— 计算深度桶 ——
+    const depthMap = computeDepths(sortedFiles);
+    let maxDepth = 0;
+    for (const d of depthMap.values()) if (d > maxDepth) maxDepth = d;
+
+    // MainGen 强制放到最后一桶 (maxDepth + 1)
+    const mainGenBucket = maxDepth + 1;
+    for (const f of sortedFiles) {
+        if (f.generatorType === "MainGen") {
+            f.bucket = mainGenBucket;
+        } else {
+            f.bucket = depthMap.get(f.path) ?? 0;
+        }
+    }
+
+    // 构建桶数组：buckets[d] = 该深度的所有文件
+    const totalBuckets = mainGenBucket + 1;
+    const buckets: PlanFileItem[][] = Array.from({ length: totalBuckets }, () => []);
+    for (const f of sortedFiles) {
+        buckets[f.bucket!].push(f);
+    }
+
+    // 初始化每文件状态
+    const fileStatuses: Record<string, "pending" | "generating" | "done" | "error" | "rework"> = {};
+    for (const f of sortedFiles) fileStatuses[f.path] = "pending";
 
     state.status = "planning";
     state.projectName = plan.projectName;
     state.javaVersion = plan.javaVersion;
     state.packageName = plan.packageName;
+    state.mainBlueprint = blueprint;
     state.plan = sortedFiles;
-    state.logs.push("Planner 完成，文件树已生成（已按依赖拓扑排序）");
+    state.buckets = buckets;
+    state.fileStatuses = fileStatuses;
+    state.currentBucket = 0;
+    state.logs.push(`Planner 完成，${sortedFiles.length} 个文件分布在 ${totalBuckets} 个深度桶`);
 
     await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
@@ -160,6 +267,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         projectName: plan.projectName,
         packageName: plan.packageName,
         javaVersion: plan.javaVersion,
+        mainBlueprint: blueprint,
+        buckets,
     }), {
         headers: { "Content-Type": "application/json" },
     });

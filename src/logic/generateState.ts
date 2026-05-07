@@ -2,11 +2,22 @@ import { reactive } from "vue";
 
 export type GenPhase = "idle" | "planning" | "clarifying" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
 
+export type GeneratorType =
+    | "CommandGen" | "ListenerGen" | "TaskGen" | "ManagerGen"
+    | "ConfigGen" | "ConfigClassGen" | "ModelGen" | "EnumGen"
+    | "UtilGen" | "FileRelatedGen" | "MainGen";
+
 export type GenFile = {
     path: string;
     role: string;
     content?: string;
-    status: "pending" | "generating" | "done";
+    status: "pending" | "generating" | "done" | "error";
+    generatorType?: GeneratorType;
+    tag?: "gui" | null;
+    pairPath?: string;
+    bucket?: number;
+    streamingContent?: string;
+    streamingPhase?: string;
 };
 
 export type TodoItem = {

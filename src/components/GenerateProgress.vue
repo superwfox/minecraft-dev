@@ -16,21 +16,35 @@
       </div>
     </div>
 
-    <!-- 文件生成卡片 -->
+    <!-- 文件生成卡片：按生成器分组 -->
     <div class="glass2 gen-card" v-if="genTask.files.length">
       <div class="gen-card-title">▪ 代码生成</div>
-      <div class="gen-files">
-        <div v-for="(f, i) in genTask.files" :key="f.path" class="gen-file"
-             :class="f.status" @click="toggleExpand(i)">
-          <span class="gen-file-icon">
-            {{ f.status === "done" ? "●" : f.status === "generating" ? "◌" : "○" }}
-          </span>
-          <span class="gen-file-path">{{ f.path }}</span>
-          <span class="gen-file-role">{{ f.role }}</span>
+      <div class="gen-groups">
+        <div v-for="g in fileGroups" :key="g.type" class="gen-group">
+          <div class="gen-group-header">
+            <span class="gen-group-label">{{ generatorLabels[g.type] || g.type }}</span>
+            <span class="gen-group-count">{{ g.files.length }}</span>
+          </div>
+          <div class="gen-group-files">
+            <template v-for="f in g.files" :key="f.path">
+              <div class="gen-file" :class="f.status" @click="toggleExpand(f.path)">
+                <span class="gen-file-icon">
+                  {{ f.status === "done" ? "●" : f.status === "generating" ? "◌" : f.status === "error" ? "×" : "○" }}
+                </span>
+                <span class="gen-file-path">{{ f.path }}</span>
+                <span v-if="f.tag === 'gui'" class="gen-file-badge">GUI</span>
+                <span v-if="f.streamingPhase" class="gen-file-phase">{{ streamPhaseLabels[f.streamingPhase] || f.streamingPhase }}</span>
+                <span class="gen-file-role">{{ f.role }}</span>
+              </div>
+              <div v-if="f.status === 'generating' && f.streamingContent" class="gen-file-stream">
+                <pre>{{ f.streamingContent }}</pre>
+              </div>
+            </template>
+          </div>
         </div>
       </div>
-      <div v-if="expandedIndex >= 0 && genTask.files[expandedIndex]?.content" class="gen-preview">
-        <pre>{{ genTask.files[expandedIndex].content }}</pre>
+      <div v-if="expandedFile?.content" class="gen-preview">
+        <pre>{{ expandedFile.content }}</pre>
       </div>
     </div>
 
@@ -68,10 +82,55 @@
 <script setup lang="ts">
 import {ref, computed, watch, nextTick} from "vue";
 import {genTask} from "../logic/generateState";
+import type {GeneratorType, GenFile} from "../logic/generateState";
 import {getDownloadUrl} from "../logic/generateHandler";
 
-const expandedIndex = ref(-1);
+const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
+
+const generatorLabels: Record<GeneratorType, string> = {
+    MainGen:        "主类",
+    CommandGen:     "命令",
+    ListenerGen:    "事件监听",
+    TaskGen:        "调度任务",
+    ManagerGen:     "数据/服务",
+    ConfigClassGen: "配置类",
+    ConfigGen:      "资源配置",
+    ModelGen:       "数据模型",
+    EnumGen:        "枚举",
+    UtilGen:        "工具类",
+    FileRelatedGen: "项目文件",
+};
+
+const groupOrder: GeneratorType[] = [
+    "FileRelatedGen", "ConfigGen", "ConfigClassGen",
+    "EnumGen", "ModelGen", "UtilGen",
+    "ManagerGen", "TaskGen", "ListenerGen", "CommandGen",
+    "MainGen",
+];
+
+const fileGroups = computed(() => {
+    const buckets = new Map<GeneratorType, GenFile[]>();
+    const fallback: GenFile[] = [];
+    for (const f of genTask.files) {
+        const t = f.generatorType;
+        if (t && groupOrder.includes(t)) {
+            if (!buckets.has(t)) buckets.set(t, []);
+            buckets.get(t)!.push(f);
+        } else {
+            fallback.push(f);
+        }
+    }
+    const ordered: { type: GeneratorType | "Other"; files: GenFile[] }[] = [];
+    for (const t of groupOrder) {
+        const fs = buckets.get(t);
+        if (fs && fs.length) ordered.push({ type: t, files: fs });
+    }
+    if (fallback.length) ordered.push({ type: "Other" as any, files: fallback });
+    return ordered;
+});
+
+const expandedFile = computed(() => genTask.files.find(f => f.path === expandedPath.value));
 const wrapRef = ref<HTMLElement | null>(null);
 const logRef = ref<HTMLElement | null>(null);
 const streamRef = ref<HTMLElement | null>(null);
@@ -100,7 +159,7 @@ const phases = [
 
 const ORDER: Record<string, number> = {idle: 0, planning: 1, generating: 2, verifying: 3, uploading: 4, building: 4, polling: 4, fixing: 4, done: 5, error: -1};
 function phaseOrder(key: string) { return ORDER[key] ?? 0; }
-function toggleExpand(i: number) { expandedIndex.value = expandedIndex.value === i ? -1 : i; }
+function toggleExpand(path: string) { expandedPath.value = expandedPath.value === path ? "" : path; }
 
 watch(() => genTask.logs.length, async () => {
     await nextTick();
@@ -173,18 +232,48 @@ watch(() => genTask.streamingContent, async () => {
   color: rgba(255,255,255,0.7);
 }
 
-.gen-files {
+.gen-groups {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: 300px;
+  gap: 10px;
+  max-height: 480px;
   overflow-y: auto;
+}
+.gen-group {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 8px 10px 6px;
+  background: rgba(255,255,255,0.015);
+}
+.gen-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 6px;
+  border-bottom: 1px dashed rgba(255,255,255,0.08);
+  margin-bottom: 4px;
+}
+.gen-group-label {
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  letter-spacing: 0.4px;
+}
+.gen-group-count {
+  font-size: 11px;
+  color: rgba(255,255,255,0.3);
+  margin-left: auto;
+  font-family: monospace;
+}
+.gen-group-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .gen-file {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 6px 10px;
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s;
@@ -196,7 +285,38 @@ watch(() => genTask.streamingContent, async () => {
 .gen-file.pending { color: rgba(255,255,255,0.3); }
 .gen-file-icon { flex: 0 0 20px; }
 .gen-file-path { color: inherit; font-family: monospace; }
+.gen-file-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.7);
+  letter-spacing: 0.5px;
+  font-family: monospace;
+}
+.gen-file-phase {
+  font-size: 11px;
+  color: wheat;
+  font-family: monospace;
+  margin-left: 4px;
+}
 .gen-file-role { margin-left: auto; color: rgba(255,255,255,0.3); font-size: 12px; }
+.gen-file-stream {
+  margin: 0 0 6px 28px;
+  background: rgba(0,0,0,0.25);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.gen-file-stream pre {
+  color: rgba(255,255,255,0.7);
+  font-family: "Monaco", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  margin: 0;
+}
 
 .gen-preview {
   background: rgba(0,0,0,0.3);

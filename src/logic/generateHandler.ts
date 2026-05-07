@@ -73,6 +73,10 @@ function extractCompletedTodos(text: string): any[] {
     return out;
 }
 
+function findFile(path: string) {
+    return genTask.files.find(f => f.path === path);
+}
+
 /** Read an SSE stream, dispatch events to genTask, return the result event */
 async function readSSE(resp: Response): Promise<any> {
     const reader = resp.body!.getReader();
@@ -98,36 +102,74 @@ async function readSSE(resp: Response): Promise<any> {
                 const evt = JSON.parse(payload);
                 switch (evt.type) {
                     case "phase":
-                        genTask.streamingPhase = evt.phase;
-                        genTask.streamingFile = evt.file || "";
-                        genTask.streamingContent = "";
-                        streamedTodoCount = 0;
-                        if (evt.phase === "clarifying") genTask.clarifyTodos = [];
-                        if (evt.round) genTask.clarifyRound = evt.round;
+                        // 桶模式：path 字段表示具体文件；非桶模式：file 字段表示当前文件
+                        if (evt.path) {
+                            const f = findFile(evt.path);
+                            if (f) {
+                                f.streamingPhase = evt.phase;
+                                if (evt.phase === "generating" || evt.phase === "reworking") {
+                                    f.streamingContent = "";
+                                    f.status = "generating";
+                                }
+                            }
+                        } else {
+                            genTask.streamingPhase = evt.phase;
+                            genTask.streamingFile = evt.file || "";
+                            genTask.streamingContent = "";
+                            streamedTodoCount = 0;
+                            if (evt.phase === "clarifying") genTask.clarifyTodos = [];
+                            if (evt.round) genTask.clarifyRound = evt.round;
+                        }
                         break;
                     case "reasoning":
                         genTask.reasoningContent += evt.content;
                         break;
                     case "delta":
-                        genTask.streamingContent += evt.content;
-                        if (genTask.streamingPhase === "clarifying") {
-                            const todos = extractCompletedTodos(genTask.streamingContent);
-                            if (todos.length > streamedTodoCount) {
-                                for (let k = streamedTodoCount; k < todos.length; k++) {
-                                    genTask.clarifyTodos.push(todos[k]);
+                        if (evt.path) {
+                            const f = findFile(evt.path);
+                            if (f) {
+                                f.streamingContent = (f.streamingContent || "") + evt.content;
+                            }
+                        } else {
+                            genTask.streamingContent += evt.content;
+                            if (genTask.streamingPhase === "clarifying") {
+                                const todos = extractCompletedTodos(genTask.streamingContent);
+                                if (todos.length > streamedTodoCount) {
+                                    for (let k = streamedTodoCount; k < todos.length; k++) {
+                                        genTask.clarifyTodos.push(todos[k]);
+                                    }
+                                    streamedTodoCount = todos.length;
                                 }
-                                streamedTodoCount = todos.length;
                             }
                         }
                         break;
                     case "log":
                         genTask.logs.push(evt.msg);
                         break;
+                    case "file_done": {
+                        const f = findFile(evt.path);
+                        if (f) {
+                            f.content = evt.content;
+                            f.status = "done";
+                            f.streamingPhase = "";
+                            f.streamingContent = "";
+                        }
+                        break;
+                    }
                     case "new_file":
-                        genTask.files.push({
-                            path: evt.path, role: evt.role,
-                            content: evt.content, status: "done",
-                        });
+                        // 动态生成的缺失类：插入或更新
+                        if (!findFile(evt.path)) {
+                            genTask.files.push({
+                                path: evt.path, role: evt.role,
+                                content: evt.content, status: "done",
+                            });
+                        }
+                        break;
+                    case "bucket_start":
+                        for (const p of evt.paths || []) {
+                            const f = findFile(p);
+                            if (f) f.status = "generating";
+                        }
                         break;
                     case "result":
                         result = evt;
@@ -143,7 +185,7 @@ async function readSSE(resp: Response): Promise<any> {
     return result;
 }
 
-/** SSE streaming file generation */
+/** SSE streaming file generation (legacy single-file flow，仅供补缺/重新规划使用) */
 async function streamFileGeneration(taskId: string): Promise<any> {
     const resp = await fetch("/api/generate/file", {
         method: "POST",
@@ -157,6 +199,17 @@ async function streamFileGeneration(taskId: string): Promise<any> {
         return await resp.json();
     }
 
+    return readSSE(resp);
+}
+
+/** SSE streaming bucket generation — 一次跑一个桶，桶内并发 */
+async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
+    const resp = await fetch("/api/generate/bucket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId, bucketIndex }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
     return readSSE(resp);
 }
 
@@ -272,29 +325,46 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;
-            genTask.files = planResult.plan.map((f: any) => ({ path: f.path, role: f.role, status: "pending" }));
+            genTask.files = planResult.plan.map((f: any) => ({
+                path: f.path,
+                role: f.role,
+                status: "pending",
+                generatorType: f.generatorType,
+                tag: f.tag ?? null,
+                pairPath: f.pairPath,
+                bucket: f.bucket,
+            }));
             genTask.logs.push(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
 
             setPhase("generating");
-            let remaining = genTask.files.length;
+            // 收集 buckets：每个 file 自带 bucket 索引；按桶号升序并发
+            const bucketMap = new Map<number, number>();
+            for (const f of genTask.files) {
+                const b = f.bucket ?? 0;
+                bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1);
+            }
+            const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
             let needReplan = false;
 
-            for (let i = 0; i < genTask.files.length && remaining > 0; i++) {
-                genTask.files[i].status = "generating";
-                genTask.currentIndex = i;
-
-                const fileResult = await streamFileGeneration(genTask.taskId);
-                if (!fileResult || fileResult.done) break;
-
-                // reChecker exhausted — need to replan from scratch
-                if (fileResult.replan) {
+            for (const bucketIndex of sortedBucketIds) {
+                if (needReplan) break;
+                const bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
+                if (!bucketResult) {
+                    throw new Error(`桶 #${bucketIndex} 无返回`);
+                }
+                if (bucketResult.replan) {
                     needReplan = true;
                     break;
                 }
-
-                genTask.files[i].content = fileResult.content;
-                genTask.files[i].status = "done";
-                remaining = fileResult.remaining ?? (genTask.files.length - i - 1);
+                // 把已完成的内容回填到 files
+                for (const c of bucketResult.completed || []) {
+                    const f = genTask.files.find(x => x.path === c.path);
+                    if (f) {
+                        f.content = c.content;
+                        f.status = "done";
+                    }
+                }
+                if (bucketResult.done) break;
             }
 
             if (needReplan) {
