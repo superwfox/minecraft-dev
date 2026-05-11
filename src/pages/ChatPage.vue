@@ -1,7 +1,9 @@
 <template>
   <div class="chat-page" :data-tick="streamTick" :data-rawTick="rawMsgTick">
     <div v-for="block in chatBlocks" :key="block.id" class="glass2 chat-block">
-      <div class="chat-user-input">{{ block.userInput }}</div>
+      <div v-for="(msg, i) in block.userMessages" :key="i" class="chat-user-input">
+        <span v-if="i > 0" class="msg-tag">补充</span>{{ msg }}
+      </div>
 
       <div v-if="block.phase === 'analyzing'" class="streaming-status">
         <span class="streaming-label">分析需求中...</span>
@@ -36,11 +38,11 @@
       <!-- 渲染结构化步骤 -->
       <StepRender v-if="block.steps && block.steps.length" :block="block"/>
 
-      <!-- 生成项目按钮 -->
-      <button v-if="block.phase === 'done' && block.steps && block.steps.length && genTask.phase === 'idle'"
-              class="floor-btn" @click="onGenerate(block)">
-        生成项目 & 构建 JAR
-      </button>
+      <!-- 生成项目按钮（仅 draft 状态可点） -->
+      <template v-if="block.phase === 'done' && block.steps && block.steps.length && block.draft && genTask.phase === 'idle'">
+        <button class="floor-btn" @click="onGenerate(block)">生成项目 & 构建 JAR</button>
+        <div class="draft-hint">继续输入可补充需求；点击按钮锁定并生成</div>
+      </template>
 
       <!-- fallback stream -->
       <div v-if="block.streamText" class="chat-stream">{{ block.streamText }}</div>
@@ -92,7 +94,7 @@
 import {ref, computed, inject, nextTick, watch} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
-import {chatBlocks, streamTick} from "../logic/chatState";
+import {chatBlocks, streamTick, freezeDraft, combineUserMessages} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo} from "../logic/chatHandler";
 import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
@@ -171,7 +173,9 @@ async function send() {
 
 function onGenerate(block: ChatBlock) {
     if (!block.coreType || !block.version) return;
-    startGenerate(block.userInput, block.coreType, block.version);
+    freezeDraft();
+    const combined = combineUserMessages(block.userMessages);
+    startGenerate(combined, block.coreType, block.version);
 }
 
 function toggleVoice() {
@@ -228,6 +232,22 @@ watch(() => genTask.phase, (p) => {
   color: #999;
   text-decoration: underline;
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.msg-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: rgba(255,255,255,0.08);
+  color: wheat;
+  text-decoration: none;
+}
+.draft-hint {
+  color: rgba(255,255,255,0.4);
+  font-size: 12px;
+  margin-top: -4px;
 }
 
 .chat-status {

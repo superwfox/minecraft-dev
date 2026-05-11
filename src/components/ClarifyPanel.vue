@@ -39,8 +39,9 @@
       <input v-if="customActive[current.id] !== undefined"
              v-model="customActive[current.id]"
              class="clarify-custom"
-             placeholder="在此输入你的其他想法"
-             @input="onCustomInput(current)"/>
+             placeholder="在此输入你的其他想法（回车进入下一题）"
+             @input="onCustomInput(current)"
+             @keydown.enter.prevent="onCustomEnter(current)"/>
     </div>
 
     <div class="clarify-footer">
@@ -122,6 +123,14 @@ function onCustomInput(todo: TodoItem) {
     const v = customActive[todo.id];
     if (todo.multiSelect) selections[todo.id] = v ? [v] : [];
     else selections[todo.id] = v;
+}
+
+function onCustomEnter(todo: TodoItem) {
+    onCustomInput(todo);
+    if (!isAnswered(todo)) return;
+    if (currentIndex.value < genTask.clarifyTodos.length - 1) {
+        currentIndex.value++;
+    }
 }
 
 function isAnswered(t: TodoItem): boolean {

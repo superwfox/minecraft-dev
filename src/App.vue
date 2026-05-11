@@ -19,16 +19,20 @@
 </template>
 
 <script setup lang="ts">
-import {provide, ref} from "vue";
+import {provide, ref, onMounted} from "vue";
 import CubeBackground from "./components/cubeBackground.vue";
 import GlassCard from "./components/glassCard.vue";
 import {useRouter} from "vue-router";
+import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
 
 const router = useRouter();
 const goHome = () => router.push("/");
 
 const centerText = ref("");
 provide("centerText", centerText);
+
+restoreSession();
+onMounted(() => startSessionPersistence());
 </script>
 
 <style>
@@ -62,5 +66,28 @@ body {
 
 .header-title {
   font-family: "ZhuoKai", sans-serif;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: wheat;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 </style>
