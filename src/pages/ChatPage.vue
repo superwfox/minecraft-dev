@@ -86,7 +86,34 @@
       </button>
       <input class="chat-input" v-model="inputText" placeholder="描述你的开发需求..."
              @keydown.enter="send" :disabled="sending"/>
+      <button class="refresh-btn"
+              @click="onRefresh" :disabled="!canRefresh"
+              title="重置全部">
+        ↻
+      </button>
     </div>
+
+    <!-- 重置确认弹窗 -->
+    <Teleport to="body">
+      <div v-if="showResetModal" class="reset-overlay" @click.self="showResetModal = false">
+        <div class="reset-modal glass2">
+          <div class="reset-title">确认重置？</div>
+          <div class="reset-desc">
+            此操作将清空：
+            <ul class="reset-list">
+              <li>所有聊天记录</li>
+              <li>已生成的代码文件（包括 IDE 中的本地编辑）</li>
+              <li>当前生成进度与构建状态</li>
+            </ul>
+            <span class="reset-warning">此操作不可撤销。</span>
+          </div>
+          <div class="reset-actions">
+            <button class="floor-btn reset-cancel" @click="showResetModal = false">取消</button>
+            <button class="floor-btn reset-confirm" @click="doReset">确认重置</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -94,12 +121,12 @@
 import {ref, computed, inject, nextTick, watch} from "vue";
 import type {Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
-import {chatBlocks, streamTick, freezeDraft, combineUserMessages} from "../logic/chatState";
+import {chatBlocks, streamTick, freezeDraft, combineUserMessages, resetChat} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo} from "../logic/chatHandler";
 import StepRender from "../components/StepRender.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyPanel from "../components/ClarifyPanel.vue";
-import {genTask, submitExtraPrompt} from "../logic/generateState";
+import {genTask, submitExtraPrompt, resetGenTask} from "../logic/generateState";
 import {startGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
@@ -108,6 +135,31 @@ const centerText = inject<Ref<string>>("centerText")!;
 const inputText = ref("");
 const extraInput = ref("");
 const sending = ref(false);
+
+const showResetModal = ref(false);
+const canRefresh = computed(() =>
+    !sending.value && ["idle", "done", "error"].includes(genTask.phase)
+);
+
+function onRefresh() {
+    if (!canRefresh.value) return;
+    showResetModal.value = true;
+}
+
+async function doReset() {
+    showResetModal.value = false;
+    const tid = genTask.taskId;
+    if (tid) {
+        try {
+            const {useIDEStore} = await import("../ide/composables/useIDEStore");
+            await useIDEStore().resetTask(tid);
+        } catch (e) { /* ignore */ }
+    }
+    resetChat();
+    resetGenTask();
+    inputText.value = "";
+    extraInput.value = "";
+}
 
 function sendExtra() {
     const t = extraInput.value.trim();
@@ -330,6 +382,92 @@ watch(() => genTask.phase, (p) => {
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(255,80,80,0.4); }
   50% { box-shadow: 0 0 0 8px rgba(255,80,80,0); }
+}
+
+.refresh-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.85);
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.refresh-btn:hover:not(:disabled) {
+  border-color: wheat;
+  color: wheat;
+}
+.refresh-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.reset-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: overlayIn 0.18s ease-out;
+}
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+.reset-modal {
+  flex-direction: column;
+  width: min(420px, 90vw);
+  padding: 22px 24px 18px;
+  gap: 14px;
+  height: auto;
+  animation: modalIn 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.reset-title {
+  font-size: 16px;
+  color: wheat;
+  letter-spacing: 0.5px;
+}
+.reset-desc {
+  font-size: 13px;
+  color: rgba(255,255,255,0.75);
+  line-height: 1.7;
+}
+.reset-list {
+  margin: 6px 0 6px 18px;
+  padding: 0;
+  color: rgba(255,255,255,0.65);
+}
+.reset-list li { margin: 2px 0; }
+.reset-warning {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255,150,150,0.85);
+  font-size: 12px;
+}
+.reset-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.reset-cancel { margin-top: 0; }
+.reset-confirm {
+  margin-top: 0;
+  background: rgba(255,120,120,0.15);
+  border-color: rgba(255,120,120,0.4);
+  color: rgba(255,180,180,0.95);
+}
+.reset-confirm:hover {
+  background: rgba(255,120,120,0.25);
+  border-color: rgba(255,120,120,0.7);
 }
 
 .chat-input {

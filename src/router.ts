@@ -5,6 +5,7 @@ const router = createRouter({
     routes: [
         {path: "/", component: () => import("./pages/HomePage.vue")},
         {path: "/chat", component: () => import("./pages/ChatPage.vue")},
+        {path: "/ide/:taskId?", component: () => import("./ide/pages/IDEPage.vue")},
     ],
 });
 

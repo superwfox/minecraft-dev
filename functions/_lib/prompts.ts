@@ -326,7 +326,11 @@ Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
 - **调度任务**：用 new BukkitRunnable() { @Override public void run() { ... } }.runTaskTimer(plugin, delay, period) 启动周期任务；一次性延迟用 runTaskLater；同步任务避免阻塞主线程，耗时操作用 runTaskAsynchronously
 - **plugin.yml 完整性**：必须含 name、version、main（全限定主类名）、api-version。命令必须在 commands 节点声明（每条至少 description；可选 usage/aliases/permission）。声明的权限节点必须列在 permissions 节点（含 description、default）
 - **权限检查**：通过 sender.hasPermission("plugin.cmd.xxx") 判断，未通过时 sender.sendMessage 提示并 return true
-- **消息着色**：使用 ChatColor 枚举或 § 字符常量（如 ChatColor.GOLD + "..."），不要在字符串字面量中写 §
+- **消息着色（必读，违反即视为错误）**：
+  · Java 代码中：用 ChatColor 枚举（如 ChatColor.GOLD + "..."），禁止在 Java 字符串字面量中直接写 § 或 &
+  · YAML / properties 配置文件中：颜色代码统一用 § 字符（如 §a 绿色、§c 红色、§6 金色、§r 重置），禁止用 & 写颜色代码
+  · 如果出于历史原因必须在 yml 用 &，则 Java 读取后必须调用 ChatColor.translateAlternateColorCodes('&', text) 转换 —— 不允许"yml 用 & 但 Java 直接 sendMessage 该字符串"这种 bug
+  · 优先方案：yml 写 §，Java 读出直接 sendMessage，无需转换
 - **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };

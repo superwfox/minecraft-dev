@@ -1,0 +1,70 @@
+import * as monaco from "monaco-editor";
+
+export const TAHAI_THEME = "tahai-dark";
+let registered = false;
+
+export function registerTahaiTheme() {
+    if (registered) return;
+    monaco.editor.defineTheme(TAHAI_THEME, {
+        base: "vs-dark",
+        inherit: true,
+        rules: [
+            {token: "", foreground: "d8d4cc", background: "00000000"},
+            {token: "comment", foreground: "5c5c5c", fontStyle: "italic"},
+            {token: "keyword", foreground: "f5deb3", fontStyle: "bold"},
+            {token: "keyword.java", foreground: "f5deb3", fontStyle: "bold"},
+            {token: "storage", foreground: "f5deb3"},
+            {token: "storage.type", foreground: "f5deb3"},
+            {token: "type", foreground: "9ad1ff"},
+            {token: "type.identifier", foreground: "9ad1ff"},
+            {token: "type.identifier.java", foreground: "9ad1ff"},
+            {token: "identifier", foreground: "e0dcd0"},
+            {token: "string", foreground: "d6a96b"},
+            {token: "string.quote", foreground: "d6a96b"},
+            {token: "number", foreground: "c8a2ff"},
+            {token: "constant.numeric", foreground: "c8a2ff"},
+            {token: "constant.language", foreground: "ff9b6a"},
+            {token: "constant", foreground: "ff9b6a"},
+            {token: "annotation", foreground: "ffd279"},
+            {token: "annotation.java", foreground: "ffd279"},
+            {token: "tag", foreground: "ff9b6a"},
+            {token: "attribute.name", foreground: "ffd279"},
+            {token: "attribute.value", foreground: "d6a96b"},
+            {token: "delimiter", foreground: "808080"},
+            {token: "operator", foreground: "b0b0b0"},
+        ],
+        colors: {
+            "editor.background": "#0d0d0f",
+            "editor.foreground": "#d8d4cc",
+            "editor.lineHighlightBackground": "#16161a",
+            "editor.lineHighlightBorder": "#16161a00",
+            "editor.selectionBackground": "#f5deb340",
+            "editor.selectionHighlightBackground": "#f5deb320",
+            "editor.inactiveSelectionBackground": "#f5deb320",
+            "editor.findMatchBackground": "#f5deb350",
+            "editor.findMatchHighlightBackground": "#f5deb325",
+            "editorCursor.foreground": "#f5deb3",
+            "editorLineNumber.foreground": "#3a3a3e",
+            "editorLineNumber.activeForeground": "#f5deb3",
+            "editorIndentGuide.background1": "#1c1c20",
+            "editorIndentGuide.activeBackground1": "#3a3a3e",
+            "editorBracketMatch.background": "#f5deb330",
+            "editorBracketMatch.border": "#f5deb360",
+            "editorWhitespace.foreground": "#2a2a2e",
+            "editorGutter.background": "#0d0d0f",
+            "scrollbar.shadow": "#00000000",
+            "scrollbarSlider.background": "#ffffff14",
+            "scrollbarSlider.hoverBackground": "#ffffff22",
+            "scrollbarSlider.activeBackground": "#f5deb340",
+            "editorWidget.background": "#16161a",
+            "editorWidget.border": "#2a2a2e",
+            "editorSuggestWidget.background": "#16161a",
+            "editorSuggestWidget.border": "#2a2a2e",
+            "editorSuggestWidget.selectedBackground": "#f5deb320",
+            "editorOverviewRuler.border": "#00000000",
+            "editorStickyScroll.background": "#0d0d0f",
+            "editorStickyScrollHover.background": "#16161a",
+        },
+    });
+    registered = true;
+}

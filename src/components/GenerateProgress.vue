@@ -65,6 +65,7 @@
       </div>
       <div v-if="genTask.phase === 'done'" class="gen-done">
         <a :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
+        <router-link :to="`/ide/${genTask.taskId}`" class="gen-download-btn ide">在 IDE 打开</router-link>
       </div>
       <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
     </div>
@@ -350,7 +351,12 @@ watch(() => genTask.streamingContent, async () => {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.gen-done { text-align: center; }
+.gen-done {
+  text-align: center;
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
 .gen-download-btn {
   display: inline-block;
   padding: 12px 36px;
@@ -363,6 +369,11 @@ watch(() => genTask.streamingContent, async () => {
   transition: opacity 0.2s;
 }
 .gen-download-btn:hover { opacity: 0.85; }
+.gen-download-btn.ide {
+  background: rgba(255,255,255,0.08);
+  color: wheat;
+  border: 1px solid rgba(245,222,179,0.3);
+}
 
 .gen-error {
   color: #999;
