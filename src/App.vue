@@ -1,5 +1,4 @@
 <template>
-  <CubeBackground/>
   <GlassCard>
     <div class="header" @click = goHome>
       <img class="header-icon" src="/icon.png" alt="icon" @click = goHome>
@@ -21,7 +20,6 @@
 
 <script setup lang="ts">
 import {provide, ref, onMounted} from "vue";
-import CubeBackground from "./components/cubeBackground.vue";
 import GlassCard from "./components/glassCard.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
