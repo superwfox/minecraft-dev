@@ -17,10 +17,15 @@ hero:
       link: https://minecraft-dev-platform.pages.dev/
 
 features:
-  - title: AI 多阶段工作流
-    details: Planner 依赖拓扑规划 → FileGen 生成 → reChecker 跨文件审查 → 结构化 API 摘要传递
+  - title: AI 多智能体工作流
+    details: 多轮澄清 → Planner 出主类蓝图 + 11 类专职生成器 → 深度桶并发生成 → 跨文件审查 + 三层错误恢复
     link: /features/ai-workflow
     linkText: 了解 AI 设计
+
+  - title: 浏览器内 IDE
+    details: Monaco 编辑器 + 浏览器内解析 .class 字节码补全 + AI 选区改写，生成后直接在线编辑再编译
+    link: /features/ide
+    linkText: 了解浏览器 IDE
 
   - title: 现代化前端体验
     details: Vue 3 + Canvas 粒子背景 + 毛玻璃 UI，实时进度反馈
@@ -79,11 +84,12 @@ AI 输出：
 
 ## 技术亮点
 
-- **AI 编排**：Planner 依赖拓扑规划，FileGen 逐文件生成，reChecker 跨文件审查，结构化 API 摘要传递
-- **云原生**：Cloudflare Pages Functions + KV 存储，无需自建服务器
-- **前端体验**：Vue 3 响应式状态 + Canvas 粒子动画 + 毛玻璃 UI
+- **多智能体编排**：Pre-checker / Clarifier / Planner / 11 类 Generator / Reviewer / Fixer 协作，主类蓝图 + 深度桶并发生成
+- **三层错误恢复**：单文件 rework、动态补缺类、重新规划、编译失败自动修复，层层兜底
+- **精准上下文**：AI 提取结构化 API 摘要（类名、方法签名、事件），跨文件契约传递，杜绝虚空调用
+- **浏览器内 IDE**：纯前端解析 Java `.class` 字节码做补全，无需任何后端语言服务
+- **云原生**：Cloudflare Pages Functions + KV + GitHub Actions，无需自建服务器
 - **安全设计**：密钥存环境变量，前端不接触敏感信息
-- **精准上下文**：AI 提取结构化 API 摘要（类名、方法签名、事件），杜绝跨文件虚空调用
 
 [深入了解架构 →](/technical/architecture)
 

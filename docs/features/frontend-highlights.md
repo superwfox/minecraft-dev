@@ -16,34 +16,33 @@
 
 Vue 3 的 `reactive()` 和 `ref()` 足够强大，无需引入状态管理库。
 
-**对话状态**（`chatState.ts`）：
-```typescript
-import { reactive, ref } from "vue";
+**对话状态**（`chatState.ts`）采用「单 Draft 上下文」模型——点击「生成」之前，用户的多条消息都累积到同一个 draft block，UI 看起来像聊天，实际维护单一上下文：
 
-export interface ChatBlock {
-  id: string;
-  userInput: string;
-  phase: "analyzing" | "fetching" | "done" | "error";
-  steps?: Step[];
-  streamText?: string;
+```typescript
+export type ChatBlock = {
+  id: number;
+  userMessages: string[];   // 同一 draft 内累积的多条用户消息
+  draft: boolean;           // 是否仍在收集（未冻结）
+  phase: "analyzing" | "fetching" | "rendering" | "streaming" | "done" | "error";
+  coreType?: string;
+  version?: string;
+  title?: string;
+  steps?: TodoStep[];
+  streamText: string;
+  rawMsg: string;
   error?: string;
-}
+};
 
 export const chatBlocks = reactive<ChatBlock[]>([]);
-export const streamTick = ref(0);
 ```
 
 **任何组件直接 import 使用**：
 ```typescript
-import { chatBlocks } from "../logic/chatState";
+import { createDraftBlock, appendToDraft, freezeDraft } from "../logic/chatState";
 
-// 添加新对话块
-chatBlocks.push({
-  id: Date.now().toString(),
-  userInput: "写一个传送插件",
-  phase: "analyzing"
-});
-
+createDraftBlock("写一个传送插件");   // 新建 draft
+appendToDraft("传送要有冷却时间");     // 追加到当前 draft，重跑分析
+freezeDraft();                        // 点击「生成」后冻结，下次输入开新 draft
 // 视图自动更新，无需 dispatch/commit
 ```
 
@@ -365,6 +364,15 @@ watch(voiceText, (text) => {
 
 [详细了解语音识别 →](/features/voice-input)
 
+### 10. Session 持久化与中断恢复
+
+`sessionPersist.ts` 用 `watch(deep)` + 300ms 防抖把 `chatBlocks` 和 `genTask` 写入 `localStorage["tahai-session-v1"]`：
+
+- 刷新页面后视觉状态完整恢复；
+- 若刷新时 phase 处于进行中态（planning / clarifying / generating / building 等），强制改为 `error` 并提示「刷新中断，请重新生成」——避免 UI 永远卡在等待已死掉的 SSE 或 Promise resolver。
+
+> IDE 模块则用 IndexedDB 单独持久化编辑中的文件，详见[浏览器 IDE](/features/ide)。
+
 ## 为什么不用 Vuex/Pinia？
 
 **传统状态管理**：
@@ -447,5 +455,6 @@ const updateInput = useDebounceFn((text: string) => {
 ## 下一步
 
 - [了解语音识别](/features/voice-input)：深入了解讯飞 STT 集成
+- [浏览器 IDE](/features/ide)：Monaco 编辑器与字节码补全
 - [查看架构设计](/technical/architecture)：了解前后端如何协作
 - [API 参考](/technical/api-reference)：查看完整的 API 文档

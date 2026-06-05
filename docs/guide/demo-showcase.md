@@ -196,16 +196,18 @@ KV 中聚合后传入 `plannerPrompt` 的上下文：
 ```
 
 **关键点**：
-- Planner 自动识别需要 6 个文件
-- 每个文件声明 `depends` 依赖，服务端按拓扑排序确定生成顺序
-- 主类 `MaintenanceKicker.java` 依赖 JoinListener 和 SetNoticeCommand，排在最后生成
+- Planner 先产出主类蓝图（mainBlueprint：注册哪些命令 / 监听 / 任务），再列出 6 个文件，每个带 `generatorType`（如 ConfigGen / ListenerGen / CommandGen / MainGen）
+- 每个文件声明 `depends` 依赖；服务端拓扑排序后按依赖深度划分「并发桶」
+- 同一深度的文件互不依赖、可并发生成；主类（MainGen）强制放在最后一个桶
 - 工具类/监听器/命令处理器先生成，主类最后整合调用
+
+> 上面的 JSON 为便于阅读做了简化；真实 Planner 输出还包含 `mainBlueprint`、每个文件的 `generatorType` 与服务端计算的 `bucket` 深度。
 
 <!-- 截图：Planner 生成的文件树展示 -->
 
-## 第二阶段：FileGen 逐文件生成
+## 第二阶段：分桶并发生成
 
-系统按拓扑排序后的 `order` 顺序逐个生成文件。注意主类排在最后，因为它依赖 JoinListener 和 SetNoticeCommand。
+系统按桶号升序逐桶生成；同一桶内的文件并发生成（默认并发 2）。注意主类在最后一个桶，因为它依赖 JoinListener 和 SetNoticeCommand。下面按文件逐一展示生成与审查过程（实际上同桶文件是并发进行的）。
 
 ### 文件 1：pom.xml
 
@@ -635,12 +637,12 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 - Reasoner 的思考流写入折叠区，todos 增量解析逐张推到面板，无空档
 - clarifyRounds 全部回灌 `plannerPrompt`，让 Planner 按"已确认决策"出文件树，避免冗余
 
-### 1. 依赖拓扑排序 + 主类最后生成
+### 1. 主类蓝图 + 依赖深度桶 + 主类最后生成
 
-- Planner 自动识别需要 6 个文件，并声明 `depends` 依赖关系
-- 服务端 Kahn 算法拓扑排序，被依赖的文件先生成
-- 主类排在最后，生成时已拥有所有依赖文件的完整 API 摘要
-- 本例中主类一次通过审查，无需修正 — 因为它精确知道 JoinListener 和 SetNoticeCommand 的构造函数签名
+- Planner 先确定主类蓝图（MainBlueprint），再声明每个文件的 `generatorType` 与 `depends`
+- 服务端拓扑排序 + 计算依赖深度，划分并发桶：同深度并发、桶间串行
+- 主类（MainGen）强制放最后一桶，生成时已拥有所有依赖文件的完整 API 摘要
+- 本例中主类一次通过审查 — 因为它精确知道 JoinListener 和 SetNoticeCommand 的构造函数签名
 
 ### 2. 结构化 API 摘要传递
 
@@ -662,6 +664,7 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 
 ## 下一步
 
-- [了解 AI 工作流](/features/ai-workflow)：深入理解 Planner、FileGen、reChecker 的设计
+- [了解 AI 工作流](/features/ai-workflow)：深入理解 Planner、Generator、reChecker 的设计
+- [浏览器 IDE](/features/ide)：在生成结果上继续在线编辑
 - [查看架构设计](/technical/architecture)：了解系统如何协调各个组件
 - [API 参考](/technical/api-reference)：查看完整的 API 文档

@@ -51,47 +51,36 @@ XFYUN_API_SECRET=...
 npm run dev
 ```
 
-这个命令会：
+这个命令（`wrangler pages dev --kv TASKS --proxy=5173 -- npx vite`）会：
 1. 启动 Vite 开发服务器（前端，端口 5173）
-2. 启动 Wrangler Pages Dev（Functions，端口 8788）
-3. 自动代理 `/api/*` 请求到 Functions
+2. 启动 Wrangler Pages Dev 并代理到 Vite，同时提供 `/api/*` Functions 与本地 KV
 
-访问 `http://localhost:5173` 查看前端页面。
+访问 Wrangler 输出的本地地址（默认 `http://localhost:8788`）查看完整应用（前端 + Functions）。
 
-### 5. 创建 KV 命名空间（首次运行）
+### 5. KV 命名空间
 
-```bash
-npx wrangler kv:namespace create TASKS
-```
+本地开发时，`npm run dev` 脚本中的 `wrangler pages dev --kv TASKS` 会**自动创建本地 KV 存储**，无需额外配置或 `wrangler.toml`。
 
-记录返回的 namespace ID，添加到 `wrangler.toml`：
-
-```toml
-[[kv_namespaces]]
-binding = "TASKS"
-id = "your-namespace-id"
-preview_id = "your-preview-namespace-id"
-```
-
-本地开发时，Wrangler 会自动创建本地 KV 存储。
+生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
 
 ## 项目结构
 
 ```
 minecraft-dev/
 ├── src/                      # 前端源码
-│   ├── pages/                # 页面组件
+│   ├── pages/                # 页面组件（HomePage / ChatPage）
 │   ├── components/           # 通用组件
-│   ├── logic/                # 业务逻辑
-│   └── router.ts             # 路由配置
+│   ├── logic/                # 业务逻辑（chat / generate / session / voice）
+│   ├── ide/                  # 浏览器内 IDE 模块
+│   ├── api/deepseek.ts       # 前端 LLM 调用封装
+│   └── router.ts             # 路由配置（/ /chat /ide/:taskId?）
 ├── functions/                # Cloudflare Functions
-│   ├── api/                  # API 端点
-│   └── _lib/                 # 共享库
+│   ├── api/                  # API 端点（generate / chat / stream / voice-auth / maven）
+│   └── _lib/                 # 共享库（prompts / github）
 ├── public/                   # 静态资源
 ├── docs/                     # 文档（VitePress）
-├── package.json              # 依赖配置
-├── vite.config.ts            # Vite 配置
-├── wrangler.toml             # Cloudflare 配置
+├── package.json              # 依赖与脚本
+├── vite.config.js            # Vite 配置（含 Monaco 插件）
 └── .dev.vars                 # 本地环境变量（不提交）
 ```
 
@@ -220,18 +209,8 @@ const REPO_NAME = "minecraft-dev-workflow";
 **问题**：访问 `/api/chat` 返回 404
 
 **解决**：
-1. 确认 `npm run dev` 同时启动了 Vite 和 Wrangler
-2. 检查 `vite.config.ts` 中的代理配置：
-   ```typescript
-   server: {
-     proxy: {
-       '/api': {
-         target: 'http://localhost:8788',
-         changeOrigin: true
-       }
-     }
-   }
-   ```
+1. 确认 `npm run dev` 同时启动了 Wrangler 与 Vite（`wrangler pages dev --kv TASKS --proxy=5173 -- npx vite`）
+2. 通过 Wrangler 的端口（默认 8788）访问，而非直接访问 Vite 的 5173——`/api/*` Functions 与本地 KV 由 Wrangler 提供
 
 ### KV 存储无法访问
 

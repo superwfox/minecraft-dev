@@ -42,8 +42,8 @@ Minecraft 插件开发是一个充满创意的领域，但对于新手和非专�
 - 自动触发云端构建，输出可用 JAR
 
 **3. 质量保证**
-- reChecker 自动审查代码，发现语法错误和逻辑问题
-- 自动修正，最多重试 2 次
+- reChecker 跨文件审查代码，发现语法错误、依赖问题和缺失类
+- 三层错误恢复：单文件返工（最多 5 次）、动态补缺类、重新规划、编译失败自动修复
 - Maven 编译验证，确保代码可运行
 
 **4. 多核心支持**
@@ -57,17 +57,19 @@ Minecraft 插件开发是一个充满创意的领域，但对于新手和非专�
 
 ```mermaid
 graph LR
-    A[用户需求] --> B[Planner 规划]
-    B --> C[FileGen 生成]
+    A[用户需求] --> A1[多轮澄清]
+    A1 --> B[Planner 出蓝图]
+    B --> C[深度桶并发生成]
     C --> D[reChecker 审查]
-    D --> E[summaryExtract 摘要]
+    D --> E[摘要传递]
     E --> F[构建 JAR]
 ```
 
-**Planner**：分析需求，生成文件树、角色描述和依赖拓扑（depends），主类排最后
-**FileGen**：逐文件生成代码，注入已生成文件的结构化 API 摘要（类名、方法签名、事件等），约束只能调用已存在的 API
-**reChecker**：审查每个文件，含跨文件调用一致性检查，发现问题自动返工
-**summaryExtract**：由 AI 提取每个文件的结构化 API 摘要，供后续文件使用
+**Clarifier**：多轮 TodoList 澄清，把模糊需求收敛为已确认决策（UI 交互 / 持久化 / 增长曲线等）
+**Planner**：产出主类蓝图（MainBlueprint）+ 带 `generatorType` 的文件树 + 依赖拓扑，划分深度桶，主类排最后一桶
+**Generator**：11 类专职生成器按文件类型生成代码，注入已生成文件的结构化 API 摘要，约束只能调用已存在的 API
+**reChecker**：跨文件审查每个文件，发现缺失类时动态补生，其他问题自动返工
+**Summarizer**：反向抽取每个文件的结构化 API 摘要，供后续桶使用
 
 [详细了解 AI 设计 →](/features/ai-workflow)
 
@@ -88,6 +90,17 @@ graph LR
 - **语音输入**：讯飞 WebSocket STT，解放双手
 
 [详细了解前端实现 →](/features/frontend-highlights)
+
+### 浏览器内 IDE
+
+生成完成后无需下载到本地，即可在浏览器里直接编辑代码：
+
+- **Monaco 编辑器**：VS Code 同款内核，自定义主题，支持 Java / YAML / XML 等
+- **纯前端智能补全**：直接解析 Maven JAR 中的 `.class` 字节码抽出 Bukkit/Paper API 符号表，无需任何后端语言服务
+- **AI 二次加工**：选中代码弹浮层一键解释/重构/修 Bug，或用底部 AI dock 让助手新建/修改文件
+- 改完点「编译」即接回构建流水线重新打包
+
+[详细了解浏览器 IDE →](/features/ide)
 
 ## 适用场景
 
@@ -119,3 +132,4 @@ graph LR
 - [快速开始](/guide/quick-start)：5 分钟上手体验
 - [查看演示](/guide/demo-showcase)：完整的维护插件生成案例
 - [了解 AI 设计](/features/ai-workflow)：深入理解 AI 工作流程
+- [浏览器 IDE](/features/ide)：生成后如何在线编辑与二次加工
