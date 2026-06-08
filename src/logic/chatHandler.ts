@@ -10,6 +10,7 @@ import {
 } from "./chatState";
 import { streamGetInfo, streamGetTodoList, consistChat, precheckPrompt } from "../api/deepseek";
 import type { ChatMsg } from "../api/deepseek";
+import { authState, fetchMe } from "./auth";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
 const VERSIONS = [
@@ -31,6 +32,17 @@ export async function handleUserInput(
     onNeedSelect: (block: ChatBlock, missing: ("coreType" | "version")[]) => void,
     onIncomplete?: (original: string, hint: string) => void,
 ) {
+    // 强制登录：未登录则提示，不发起任何 AI 调用
+    if (!authState.loaded) await fetchMe();
+    if (!authState.user) {
+        const block = createDraftBlock(input);
+        block.draft = false;
+        block.phase = "error";
+        block.error = "请先登录后再使用（点击右上角「登录」）";
+        centerText.value = "请先登录";
+        return;
+    }
+
     // 重新生成快捷：基于上一轮已确认的 block
     if (input.includes("重新生成")) {
         const prev = [...chatBlocks].reverse().find(b => b.coreType && b.version && b.steps?.length);

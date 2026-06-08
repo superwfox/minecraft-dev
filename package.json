@@ -10,7 +10,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist",
-    "font:subset": "node scripts/build-font-subset.mjs"
+    "font:subset": "node scripts/build-font-subset.mjs",
+    "img:compress": "node scripts/compress-images.mjs",
+    "gen:secret": "node scripts/gen-secret.mjs"
   },
   "dependencies": {
     "idb": "^8.0.3",
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.3",
+    "sharp": "^0.34.2",
     "subset-font": "^2.4.0",
     "vite": "^7.3.1",
     "vite-plugin-monaco-editor": "^1.1.0",

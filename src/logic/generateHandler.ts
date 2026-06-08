@@ -1,8 +1,16 @@
 import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt } from "./generateState";
 import type { GenPhase } from "./generateState";
+import { showSponsorModal, login, fetchMe } from "./auth";
 
 const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
+
+/** 不可重试错误（鉴权 / 额度），跳过 post() 的重试逻辑 */
+function noRetry(msg: string): Error {
+    const e = new Error(msg);
+    (e as any).noRetry = true;
+    return e;
+}
 
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
@@ -21,10 +29,12 @@ async function post(url: string, body: any, maxRetries = 3) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
+            if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
+            if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
             if (!resp.ok) throw new Error(await resp.text());
             return await resp.json() as any;
         } catch (e: any) {
-            if (attempt >= maxRetries) throw e;
+            if (e?.noRetry || attempt >= maxRetries) throw e;
             const delay = 2000 * Math.pow(2, attempt);
             genTask.logs.push(`! 请求失败，${delay / 1000}s 后重试 (${attempt + 1}/${maxRetries})...`);
             await new Promise(r => setTimeout(r, delay));
@@ -265,6 +275,7 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         setPhase("planning", "正在创建任务...");
         const initResult = await post("/api/generate/plan", { userPrompt, coreType, version });
         genTask.taskId = initResult.taskId;
+        fetchMe(); // 扣费后刷新顶栏剩余额度
     } catch (e: any) {
         genTask.phase = "error";
         genTask.error = e.message || String(e);
