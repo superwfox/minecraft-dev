@@ -113,7 +113,8 @@ import {useIDEStore, type IDESeedFile} from "../composables/useIDEStore";
 import {useIDEChat} from "../composables/useIDEChat";
 import {loadFromPom, type LoadStatus} from "../composables/useJarSymbols";
 import {setDynamicDict} from "../composables/useBukkitDict";
-import {genTask} from "../../logic/generateState";
+import {genTask, resetGenTask} from "../../logic/generateState";
+import {startBuildFromIDE} from "../../logic/generateHandler";
 
 const route = useRoute();
 const router = useRouter();
@@ -261,8 +262,28 @@ async function onSave() {
 }
 
 async function onCompile() {
+    if (!state.taskId || state.files.length === 0) return;
     await saveAll();
+
+    const files = state.files.map(f => ({ path: f.path, content: f.content }));
+
+    // hydrate genTask 让 ChatPage 立刻有 GenerateProgress 可渲染，不再空白
+    resetGenTask();
+    genTask.taskId = state.taskId;
+    genTask.files = state.files.map(f => ({
+        path: f.path,
+        role: f.role || "",
+        content: f.content,
+        status: "done" as const,
+        generatorType: f.generatorType ?? undefined,
+    }));
+    genTask.currentIndex = files.length;
+    genTask.phase = "uploading";
+    genTask.logs = ["▸ 从 IDE 启动构建，使用本地最新内容..."];
+
     router.push("/chat");
+    // 让 router 完成切换再启动构建，避免在 unmount 期间触发响应
+    setTimeout(() => { startBuildFromIDE(files); }, 0);
 }
 
 let resizeStartX = 0;

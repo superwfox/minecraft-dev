@@ -451,10 +451,17 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     }
 }
 
-async function buildWithRetry() {
+async function buildWithRetry(initialFiles?: { path: string; content: string }[]) {
     for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
         setPhase("uploading", "正在上传到 GitHub 并触发构建...");
-        const buildResult = await post("/api/generate/build", { taskId: genTask.taskId });
+        const payload: any = { taskId: genTask.taskId };
+        // 首次构建带上 IDE 的最新内容；后续 fix 后重建用 KV 里已被 fix 改过的版本
+        if (attempt === 0 && initialFiles) payload.files = initialFiles;
+        const buildResult = await post("/api/generate/build", payload);
+        // 从 IDE 进来的场景：填上 GenerateProgress 头部要展示的 meta
+        if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
+        if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
+        if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
         genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
 
         setPhase("building", "正在等待 GitHub Actions 构建...");
@@ -502,4 +509,18 @@ async function pollBuildStatus(): Promise<boolean> {
 
 export function getDownloadUrl(): string {
     return `/api/generate/download?taskId=${genTask.taskId}`;
+}
+
+/**
+ * 从 IDE 直接触发构建（跳过 chat/plan/clarify/file gen 阶段）。
+ * 调用者负责先 hydrate genTask（taskId/files/phase），然后此函数走 build + fix 重试链路。
+ */
+export async function startBuildFromIDE(files: { path: string; content: string }[]) {
+    try {
+        await buildWithRetry(files);
+    } catch (e: any) {
+        genTask.phase = "error";
+        genTask.error = e?.message || String(e);
+        genTask.logs.push("× " + genTask.error);
+    }
 }

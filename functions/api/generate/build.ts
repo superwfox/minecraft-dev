@@ -44,7 +44,7 @@ function json(obj: any, status: number): Response {
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { taskId } = await context.request.json() as any;
+    const { taskId, files: incomingFiles } = await context.request.json() as any;
     const token = context.env.GITHUB_PAT;
     if (!token) return json({ error: "GITHUB_PAT not configured" }, 500);
 
@@ -53,6 +53,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
+
+    // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖 KV 里的 generatedFiles
+    // （chat 阶段定型后，用户在 IDE 改动 / 新增 / 删除 不会回写后端；
+    // 这里走 build 才回写一次，保证产物 == IDE 内容）
+    if (Array.isArray(incomingFiles) && incomingFiles.length > 0) {
+        const prevByPath = new Map<string, any>(
+            (state.generatedFiles || []).map((f: any) => [f.path, f]),
+        );
+        state.generatedFiles = incomingFiles.map((f: any) => {
+            const prev = prevByPath.get(f.path);
+            return {
+                path: f.path,
+                content: String(f.content ?? ""),
+                apiSummary: prev?.apiSummary ?? null,
+            };
+        });
+        state.logs.push(`▸ 已从 IDE 同步 ${state.generatedFiles.length} 个文件到构建仓`);
+    }
 
     // ── (a) 单用户每日构建上限：粗粒度防刷 ──
     let userBuildUsed = 0;
@@ -122,7 +140,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // 通过所有校验且 GitHub 提交成功后再 increment daily 计数
         if (uid) await userBuildIncrement(context.env.TASKS, uid, userBuildUsed);
 
-        return new Response(JSON.stringify({ buildBranch: branch, runId }), {
+        return new Response(JSON.stringify({
+            buildBranch: branch,
+            runId,
+            projectName: state.projectName,
+            packageName: state.packageName,
+            javaVersion: state.javaVersion,
+        }), {
             headers: { "Content-Type": "application/json" },
         });
     } catch (e: any) {
