@@ -17,6 +17,11 @@ hero:
       link: https://minecraft-dev-platform.pages.dev/
 
 features:
+  - title: 加入 QQ 群聊
+    details: 点击跳转 QQ 入群链接
+    link: https://qm.qq.com/q/QicMlpHp6c
+    linkText: 【TAHAI | 踏海善后群 - DevRelated】
+
   - title: AI 多智能体工作流
     details: 多轮澄清 → Planner 出主类蓝图 + 11 类专职生成器 → 深度桶并发生成 → 跨文件审查 + 三层错误恢复
     link: /features/ai-workflow
