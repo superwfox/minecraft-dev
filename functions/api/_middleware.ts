@@ -45,6 +45,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         if (!session) {
             return json({ error: "请先登录", code: "AUTH_REQUIRED" }, 401);
         }
+        // 透传 uid 给下游 handler（按金额扣费、build 限额都需要）
+        (context.data as any).uid = session.uid;
 
         // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
         if (path === "/api/generate/plan") {

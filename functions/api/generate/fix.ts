@@ -1,8 +1,10 @@
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
+import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+const FIX_MODEL = "deepseek-v4-pro";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -10,13 +12,16 @@ interface Env {
     TASKS: KVNamespace;
 }
 
+interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+
 async function callAIStream(
     key: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
-) {
+): Promise<AICallResult> {
     const body = {
-        model: "deepseek-v4-pro",
+        model: FIX_MODEL,
         stream: true,
+        stream_options: { include_usage: true },
         reasoning_effort: "high",
         thinking: { type: "enabled" },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -33,6 +38,7 @@ async function callAIStream(
     const decoder = new TextDecoder();
     let full = "";
     let buffer = "";
+    let usage: UsageBreakdown | undefined;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -53,10 +59,11 @@ async function callAIStream(
                     full += delta;
                     await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
                 }
+                if (chunk.usage) usage = chunk.usage;
             } catch { /* skip */ }
         }
     }
-    return full;
+    return { content: full, model: FIX_MODEL, usage };
 }
 
 function stripFences(raw: string): string {
@@ -110,11 +117,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
+    if (state.quotaExhausted) {
+        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+            status: 402, headers: { "Content-Type": "application/json" },
+        });
+    }
+
     if (!state.runId) {
         return new Response(JSON.stringify({ error: "No build run to fix" }), {
             status: 400, headers: { "Content-Type": "application/json" },
         });
     }
+
+    const uid: string | undefined = (context.data as any)?.uid;
+    const charge = async (r: AICallResult) => {
+        if (!uid || !r.usage) return;
+        const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
+        state.totalCost = cost.total;
+        state.consumedQuota = cost.consumed;
+        if (cost.outOfQuota) state.quotaExhausted = true;
+    };
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -201,7 +223,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`↻ 修复 ${filePath}...`);
 
                 const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries);
-                const fixedContent = stripFences(await callAIStream(key, prompt.system, prompt.user, writer, encoder));
+                const fixRes = await callAIStream(key, prompt.system, prompt.user, writer, encoder);
+                await charge(fixRes);
+                const fixedContent = stripFences(fixRes.content);
 
                 fileEntry.content = fixedContent;
                 fixedCount++;

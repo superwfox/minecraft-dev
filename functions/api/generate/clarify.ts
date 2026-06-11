@@ -1,6 +1,8 @@
 import { plannerClarifyPrompt } from "../../_lib/prompts";
+import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+const CLARIFY_MODEL = "deepseek-v4-pro";
 const MAX_CLARIFY_ROUNDS = 5;
 
 interface Env {
@@ -19,13 +21,14 @@ function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
 async function callReasonerStream(
     key: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
-): Promise<string> {
+): Promise<{ content: string; usage?: UsageBreakdown }> {
     const resp = await fetch(DEEPSEEK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-            model: "deepseek-v4-pro",
+            model: CLARIFY_MODEL,
             stream: true,
+            stream_options: { include_usage: true },
             reasoning_effort: "high",
             thinking: { type: "enabled" },
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -37,6 +40,7 @@ async function callReasonerStream(
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    let usage: UsageBreakdown | undefined;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -52,6 +56,7 @@ async function callReasonerStream(
             if (payload === "[DONE]") continue;
             try {
                 const chunk = JSON.parse(payload);
+                if (chunk.usage) usage = chunk.usage;
                 const delta = chunk.choices?.[0]?.delta;
                 if (!delta) continue;
                 if (delta.reasoning_content) {
@@ -68,7 +73,7 @@ async function callReasonerStream(
             } catch { /* skip */ }
         }
     }
-    return content;
+    return { content, usage };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -83,6 +88,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+
+    if (state.quotaExhausted) {
+        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+            status: 402, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const uid: string | undefined = (context.data as any)?.uid;
 
     // 将上一轮的 answers 回填到最后一轮的 todos
     if (answers && state.clarifyRounds.length > 0) {
@@ -118,7 +131,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const { system, user } = plannerClarifyPrompt(
                 state.userPrompt, state.coreType, state.version, state.clarifyRounds,
             );
-            const content = await callReasonerStream(key, system, user, writer, encoder);
+            const callRes = await callReasonerStream(key, system, user, writer, encoder);
+            const content = callRes.content;
+            if (uid && callRes.usage) {
+                const cost = await accumulateCost(context.env.TASKS, uid, taskId, CLARIFY_MODEL, callRes.usage);
+                state.totalCost = cost.total;
+                state.consumedQuota = cost.consumed;
+                if (cost.outOfQuota) state.quotaExhausted = true;
+            }
 
             let parsed: { done?: boolean; todos?: any[]; needMoreInput?: boolean; hint?: string };
             try {

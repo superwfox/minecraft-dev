@@ -1,10 +1,14 @@
 // Cloudflare Pages Function: POST /api/stream
-// 流式请求，SSE 透传 DeepSeek 的 stream 响应
+// 流式请求，SSE 透传 DeepSeek 的 stream 响应。
+// 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 taskCost:<taskId>。
+
+import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
+    TASKS: KVNamespace;
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -14,7 +18,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!key) return new Response("API key not configured", {status: 500});
 
     const model = body.model || "deepseek-v4-flash";
-    const payload: any = {model, messages: body.messages, stream: true};
+    const taskId: string | undefined = body.taskId;
+    const uid: string | undefined = (context.data as any)?.uid;
+
+    // 任务级额度耗尽时直接拒绝
+    if (taskId) {
+        const stateRaw = await context.env.TASKS.get(taskId);
+        if (stateRaw) {
+            try {
+                const st = JSON.parse(stateRaw);
+                if (st.quotaExhausted) {
+                    return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                        status: 402, headers: { "Content-Type": "application/json" },
+                    });
+                }
+            } catch { /* ignore */ }
+        }
+    }
+
+    const payload: any = {
+        model,
+        messages: body.messages,
+        stream: true,
+        stream_options: { include_usage: true },
+    };
     if (model.includes("pro")) {
         payload.reasoning_effort = "high";
         payload.thinking = {type: "enabled"};
@@ -30,9 +57,64 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     });
 
     if (!resp.ok) return new Response(await resp.text(), {status: resp.status});
+    if (!resp.body) return new Response("Empty response", {status: 502});
 
-    // 直接透传 SSE 流
-    return new Response(resp.body, {
+    // 用 TransformStream 包一层：原样 forward 给前端，同时本端解析 usage
+    const upstream = resp.body;
+    const { readable, writable } = new TransformStream<Uint8Array>();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    const pump = (async () => {
+        const reader = upstream.getReader();
+        let buffer = "";
+        let usage: UsageBreakdown | undefined;
+        try {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                // 原样转发给前端
+                await writer.write(value);
+                // 本端解析 SSE 找 usage
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() ?? "";
+                for (const line of lines) {
+                    const t = line.trim();
+                    if (!t.startsWith("data:")) continue;
+                    const payloadStr = t.slice(5).trim();
+                    if (payloadStr === "[DONE]") continue;
+                    try {
+                        const chunk = JSON.parse(payloadStr);
+                        if (chunk.usage) usage = chunk.usage;
+                    } catch { /* skip */ }
+                }
+            }
+        } catch { /* upstream broken, end anyway */ }
+        finally {
+            try { await writer.close(); } catch { /* already closed */ }
+        }
+
+        // 流结束后累积成本
+        if (uid && taskId && usage) {
+            try {
+                const cost = await accumulateCost(context.env.TASKS, uid, taskId, model, usage);
+                const raw = await context.env.TASKS.get(taskId);
+                if (raw) {
+                    const st = JSON.parse(raw);
+                    st.totalCost = cost.total;
+                    st.consumedQuota = cost.consumed;
+                    if (cost.outOfQuota) st.quotaExhausted = true;
+                    await context.env.TASKS.put(taskId, JSON.stringify(st), { expirationTtl: 3600 });
+                }
+            } catch { /* ignore */ }
+        }
+    })();
+
+    context.waitUntil(pump);
+
+    return new Response(readable, {
         headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",

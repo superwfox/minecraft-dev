@@ -31,6 +31,19 @@ async function post(url: string, body: any, maxRetries = 3) {
             });
             if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
             if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+            if (resp.status === 429) {
+                // 构建端硬上限：不重试，向上抛
+                const j = await resp.json().catch(() => ({}));
+                throw noRetry(j?.error || "请求过于频繁");
+            }
+            if (resp.status === 400) {
+                // pom 安全校验拦截等：不重试
+                const j = await resp.json().catch(() => ({}));
+                if (j?.code === "POM_BLOCKED") {
+                    throw noRetry(`pom.xml 安全校验未通过：${j.error}`);
+                }
+                throw new Error(j?.error || await resp.text());
+            }
             if (!resp.ok) throw new Error(await resp.text());
             return await resp.json() as any;
         } catch (e: any) {

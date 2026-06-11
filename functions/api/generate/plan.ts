@@ -1,6 +1,8 @@
 import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem } from "../../_lib/prompts";
+import { accumulateCost } from "../../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+const PLANNER_MODEL = "deepseek-v4-pro";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -160,6 +162,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
+    if (state.quotaExhausted) {
+        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+            status: 402, headers: { "Content-Type": "application/json" },
+        });
+    }
+
     if (!state.clarifyDone) {
         return new Response(JSON.stringify({ error: "澄清阶段尚未完成" }), {
             status: 400, headers: { "Content-Type": "application/json" },
@@ -172,7 +180,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-            model: "deepseek-v4-pro",
+            model: PLANNER_MODEL,
             reasoning_effort: "high",
             thinking: { type: "enabled" },
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -182,6 +190,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const data = await resp.json() as any;
     const content = stripFences(data.choices?.[0]?.message?.content ?? "");
+
+    // 计费：累积 Planner 调用成本到 taskCost:<taskId>
+    const uid: string | undefined = (context.data as any)?.uid;
+    if (uid && data.usage) {
+        const cost = await accumulateCost(context.env.TASKS, uid, taskId, PLANNER_MODEL, data.usage);
+        state.totalCost = cost.total;
+        state.consumedQuota = cost.consumed;
+        if (cost.outOfQuota) state.quotaExhausted = true;
+    }
 
     let plan: any;
     try {

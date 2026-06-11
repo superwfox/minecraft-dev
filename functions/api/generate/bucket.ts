@@ -1,5 +1,6 @@
 import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
+import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const MAX_REWORK = 5;
@@ -11,6 +12,9 @@ interface Env {
     GEN_CONCURRENCY?: string;
     TASKS: KVNamespace;
 }
+
+interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+type ChargeFn = (r: AICallResult) => Promise<void>;
 
 function stripFences(raw: string): string {
     return raw.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "");
@@ -61,9 +65,10 @@ async function fetchWithBackoff(url: string, init: RequestInit, maxRetries = 3):
     }
 }
 
-async function callAI(key: string, system: string, user: string, jsonMode = false, usePro = false) {
+async function callAI(key: string, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
+    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
     const body: any = {
-        model: usePro ? "deepseek-v4-pro" : "deepseek-v4-flash",
+        model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
     if (usePro) {
@@ -79,7 +84,11 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
     });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json() as any;
-    return data.choices?.[0]?.message?.content ?? "";
+    return {
+        content: data.choices?.[0]?.message?.content ?? "",
+        model,
+        usage: data.usage,
+    };
 }
 
 /**
@@ -90,10 +99,12 @@ async function callAIStream(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     pathTag: string,
     usePro = false,
-) {
+): Promise<AICallResult> {
+    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
     const body: any = {
-        model: usePro ? "deepseek-v4-pro" : "deepseek-v4-flash",
+        model,
         stream: true,
+        stream_options: { include_usage: true },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
     if (usePro) {
@@ -112,6 +123,7 @@ async function callAIStream(
     const decoder = new TextDecoder();
     let full = "";
     let buffer = "";
+    let usage: UsageBreakdown | undefined;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -132,10 +144,11 @@ async function callAIStream(
                     full += delta;
                     await writer.write(sseEvent(encoder, { type: "delta", path: pathTag, content: delta }));
                 }
+                if (chunk.usage) usage = chunk.usage;
             } catch { /* skip */ }
         }
     }
-    return full;
+    return { content: full, model, usage };
 }
 
 interface FileGenOutput {
@@ -158,6 +171,7 @@ async function generateAndCheckFile(
     blueprint: MainBlueprint | null,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
+    charge: ChargeFn,
 ): Promise<FileGenOutput> {
     const filePath = target.path;
     const newFiles: FileGenOutput["newFiles"] = [];
@@ -168,7 +182,9 @@ async function generateAndCheckFile(
 
     const slice = computeSlice(target, blueprint);
     const dispatched = dispatchGen(target, ctx, summaries, slice);
-    let content = stripFences(await callAIStream(key, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath));
+    const initialRes = await callAIStream(key, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath);
+    await charge(initialRes);
+    let content = stripFences(initialRes.content);
 
     let reworkCount = 0;
     let dynamicGenDone = false;
@@ -181,9 +197,10 @@ async function generateAndCheckFile(
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         const check = dispatched.checker(filePath, content);
-        const reviewRaw = await callAI(key, check.system, check.user, true, true);
+        const reviewRes = await callAI(key, check.system, check.user, true, true);
+        await charge(reviewRes);
         let review: any;
-        try { review = JSON.parse(reviewRaw); } catch { passed = true; break; }
+        try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
 
         if (review.is_ok) {
             await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `● ${filePath} 审查通过` }));
@@ -214,13 +231,17 @@ async function generateAndCheckFile(
                     };
                     const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
-                    const subContent = stripFences(await callAIStream(key, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath));
+                    const subRes = await callAIStream(key, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath);
+                    await charge(subRes);
+                    const subContent = stripFences(subRes.content);
 
                     // Extract summary for the dynamically generated file
                     let subSummary: any = null;
                     try {
                         const ext = summaryExtractPrompt(newPath, subContent);
-                        subSummary = JSON.parse(await callAI(key, ext.system, ext.user, true));
+                        const sumRes = await callAI(key, ext.system, ext.user, true);
+                        await charge(sumRes);
+                        subSummary = JSON.parse(sumRes.content);
                     } catch {
                         subSummary = { description: subContent.split("\n").slice(0, 3).join(" ").slice(0, 120) };
                     }
@@ -241,7 +262,9 @@ async function generateAndCheckFile(
         state.logs.push(reworkMsg);
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
         const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries);
-        content = stripFences(await callAIStream(key, rw.system, rw.user, writer, encoder, filePath, true));
+        const rwRes = await callAIStream(key, rw.system, rw.user, writer, encoder, filePath, true);
+        await charge(rwRes);
+        content = stripFences(rwRes.content);
     }
 
     if (!passed && reworkCount >= MAX_REWORK) {
@@ -258,7 +281,9 @@ async function generateAndCheckFile(
         await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
         state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
         const ext = summaryExtractPrompt(filePath, content);
-        apiSummary = JSON.parse(await callAI(key, ext.system, ext.user, true));
+        const sumRes = await callAI(key, ext.system, ext.user, true);
+        await charge(sumRes);
+        apiSummary = JSON.parse(sumRes.content);
     } catch {
         apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
     }
@@ -279,6 +304,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+
+    if (state.quotaExhausted) {
+        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+            status: 402, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const uid: string | undefined = (context.data as any)?.uid;
+    const charge: ChargeFn = async (r) => {
+        if (!uid || !r.usage) return;
+        const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
+        state.totalCost = cost.total;
+        state.consumedQuota = cost.consumed;
+        if (cost.outOfQuota) state.quotaExhausted = true;
+    };
 
     const buckets = (state.buckets ?? []) as PlanFileItem[][];
     if (!Array.isArray(buckets) || bucketIndex < 0 || bucketIndex >= buckets.length) {
@@ -345,7 +385,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     const localSummaries = baseSummaries.slice();
                     try {
                         const r = await generateAndCheckFile(
-                            key, target, ctx, localSummaries, blueprint, writer, encoder, state,
+                            key, target, ctx, localSummaries, blueprint, writer, encoder, state, charge,
                         );
                         if (r.replan) {
                             replanTriggered = r;

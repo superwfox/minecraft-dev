@@ -148,6 +148,7 @@ async function send(userText: string) {
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
                 model: "deepseek-v4-flash",
+                taskId: store.state.taskId || undefined,
                 messages: [
                     {role: "system", content: SYSTEM_PROMPT},
                     {role: "user", content: buildPrompt(userText)},
@@ -155,6 +156,8 @@ async function send(userText: string) {
                 stream: true,
             }),
         });
+        if (resp.status === 402) throw new Error("本月额度已用尽，请登录后兑换或等下月");
+        if (resp.status === 401) throw new Error("登录已过期，请重新登录");
         if (!resp.ok) throw new Error(await resp.text());
         if (!resp.body) throw new Error("无响应流");
 
@@ -253,11 +256,13 @@ ${truncate(opts.snippet, 3000)}
 
 【任务】${opts.taskHint}${opts.customQuestion ? `\n【追加说明】${opts.customQuestion}` : ""}`;
 
+    const store = useIDEStore();
     const resp = await fetch("/api/stream", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
             model: "deepseek-v4-flash",
+            taskId: store.state.taskId || undefined,
             messages: [
                 {role: "system", content: sys},
                 {role: "user", content: user},
@@ -266,6 +271,8 @@ ${truncate(opts.snippet, 3000)}
         }),
         signal: opts.signal,
     });
+    if (resp.status === 402) throw new Error("本月额度已用尽");
+    if (resp.status === 401) throw new Error("登录已过期");
     if (!resp.ok) throw new Error(await resp.text());
     if (!resp.body) throw new Error("无响应流");
 
