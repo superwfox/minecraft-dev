@@ -20,6 +20,40 @@ export type IDESeedFile = {
 
 export type ViewMode = "category" | "folder";
 
+// build 关键元数据：KV 任务 1h 过期后，IDE 仍能凭这些 + IndexedDB 文件重建构建。
+// 存 localStorage（永久），按 taskId 隔离。
+export type IDEMeta = {
+    javaVersion?: string;
+    projectName?: string;
+    packageName?: string;
+    coreType?: string;
+    version?: string;
+};
+
+const META_PREFIX = "tahai-ide-meta:";
+
+function saveMeta(taskId: string, meta: IDEMeta) {
+    if (!taskId) return;
+    try {
+        const prev = loadMeta(taskId);
+        // 只覆盖有值的字段，避免空值冲掉历史
+        const merged: IDEMeta = {...prev};
+        for (const k of Object.keys(meta) as (keyof IDEMeta)[]) {
+            if (meta[k]) merged[k] = meta[k];
+        }
+        localStorage.setItem(META_PREFIX + taskId, JSON.stringify(merged));
+    } catch { /* localStorage 不可用时忽略 */ }
+}
+
+function loadMeta(taskId: string): IDEMeta {
+    if (!taskId) return {};
+    try {
+        return JSON.parse(localStorage.getItem(META_PREFIX + taskId) || "{}");
+    } catch {
+        return {};
+    }
+}
+
 type StoreSchema = {
     files: {
         key: string;
@@ -249,5 +283,7 @@ export function useIDEStore() {
         setSidebarWidth,
         setViewMode,
         upsertFile,
+        saveMeta,
+        loadMeta,
     };
 }

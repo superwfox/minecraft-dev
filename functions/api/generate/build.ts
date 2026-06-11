@@ -1,4 +1,4 @@
-import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch } from "../../_lib/github";
+import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom } from "../../_lib/pomGuard";
 
@@ -44,20 +44,40 @@ function json(obj: any, status: number): Response {
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { taskId, files: incomingFiles } = await context.request.json() as any;
+    const { taskId, files: incomingFiles, meta } = await context.request.json() as any;
     const token = context.env.GITHUB_PAT;
     if (!token) return json({ error: "GITHUB_PAT not configured" }, 500);
 
     const uid: string | undefined = (context.data as any)?.uid;
 
+    const hasIncoming = Array.isArray(incomingFiles) && incomingFiles.length > 0;
+
     const raw = await context.env.TASKS.get(taskId);
-    if (!raw) return json({ error: "Task not found" }, 404);
-    const state = JSON.parse(raw);
+    let state: any;
+    if (raw) {
+        state = JSON.parse(raw);
+    } else if (hasIncoming) {
+        // KV 任务已过期（TTL 1h），但 IDE 本地仍有文件：凭 IDE 传来的内容 + 元数据重建任务。
+        // javaVersion 是触发 workflow 的必需项，缺失时默认 21（现代 Paper）。
+        state = {
+            taskId,
+            status: "uploading",
+            javaVersion: meta?.javaVersion || "21",
+            projectName: meta?.projectName || "",
+            packageName: meta?.packageName || "",
+            coreType: meta?.coreType || "Paper",
+            version: meta?.version || "",
+            generatedFiles: [],
+            logs: ["▸ 服务端任务已过期，使用 IDE 本地内容重建构建"],
+        };
+    } else {
+        return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
+    }
 
     // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖 KV 里的 generatedFiles
     // （chat 阶段定型后，用户在 IDE 改动 / 新增 / 删除 不会回写后端；
     // 这里走 build 才回写一次，保证产物 == IDE 内容）
-    if (Array.isArray(incomingFiles) && incomingFiles.length > 0) {
+    if (hasIncoming) {
         const prevByPath = new Map<string, any>(
             (state.generatedFiles || []).map((f: any) => [f.path, f]),
         );
@@ -69,6 +89,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 apiSummary: prev?.apiSummary ?? null,
             };
         });
+        // 元数据兜底：KV 存在但缺 javaVersion 时也用 meta 补
+        if (meta?.javaVersion && !state.javaVersion) state.javaVersion = meta.javaVersion;
+        if (meta?.projectName && !state.projectName) state.projectName = meta.projectName;
+        if (meta?.packageName && !state.packageName) state.packageName = meta.packageName;
         state.logs.push(`▸ 已从 IDE 同步 ${state.generatedFiles.length} 个文件到构建仓`);
     }
 
@@ -101,6 +125,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     try {
         const { sha } = await getDefaultBranchSha(token);
         const branch = `build-${taskId}`;
+        // 删除可能残留的同名分支（上次构建失败未清理 + KV 过期重建），让创建幂等
+        await deleteBranch(token, branch);
         await createBranch(token, sha, branch);
         state.buildBranch = branch;
         state.logs.push(`已创建临时分支 ${branch}`);

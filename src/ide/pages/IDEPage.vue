@@ -120,7 +120,7 @@ const route = useRoute();
 const router = useRouter();
 const {state, currentFile, dirtyCount, loadFromTask, saveAll, updateContent,
        openFile, closeTab, toggleFolder, toggleCategory, setCursor, setSidebarWidth, setViewMode,
-       upsertFile} = useIDEStore();
+       upsertFile, saveMeta, loadMeta} = useIDEStore();
 
 const dirtyMap = computed(() => {
     const m: Record<string, boolean> = {};
@@ -224,6 +224,14 @@ onMounted(async () => {
         );
     }
     await loadFromTask(taskId, seed);
+    // genTask 有构建元数据时（从生成流程进来）持久化，供日后缓存重载/KV 过期后重建用
+    if (genTask.javaVersion || genTask.projectName) {
+        saveMeta(taskId, {
+            javaVersion: genTask.javaVersion,
+            projectName: genTask.projectName,
+            packageName: genTask.packageName,
+        });
+    }
     window.addEventListener("keydown", onKey);
     window.addEventListener("mousemove", onMouseMove);
     refreshPomSymbols();
@@ -267,9 +275,22 @@ async function onCompile() {
 
     const files = state.files.map(f => ({ path: f.path, content: f.content }));
 
+    // 合并 build 元数据：genTask 现值优先，localStorage 兜底（缓存重载场景 genTask 为空）
+    const stored = loadMeta(state.taskId);
+    const meta = {
+        javaVersion: genTask.javaVersion || stored.javaVersion || "",
+        projectName: genTask.projectName || stored.projectName || "",
+        packageName: genTask.packageName || stored.packageName || "",
+    };
+    // 回写一次，保证后续仍可用
+    saveMeta(state.taskId, meta);
+
     // hydrate genTask 让 ChatPage 立刻有 GenerateProgress 可渲染，不再空白
     resetGenTask();
     genTask.taskId = state.taskId;
+    genTask.projectName = meta.projectName;
+    genTask.packageName = meta.packageName;
+    genTask.javaVersion = meta.javaVersion;
     genTask.files = state.files.map(f => ({
         path: f.path,
         role: f.role || "",
@@ -283,7 +304,7 @@ async function onCompile() {
 
     router.push("/chat");
     // 让 router 完成切换再启动构建，避免在 unmount 期间触发响应
-    setTimeout(() => { startBuildFromIDE(files); }, 0);
+    setTimeout(() => { startBuildFromIDE(files, meta); }, 0);
 }
 
 let resizeStartX = 0;

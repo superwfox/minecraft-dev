@@ -451,12 +451,18 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     }
 }
 
-async function buildWithRetry(initialFiles?: { path: string; content: string }[]) {
+type BuildMeta = { javaVersion?: string; projectName?: string; packageName?: string };
+
+async function buildWithRetry(initialFiles?: { path: string; content: string }[], meta?: BuildMeta) {
     for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
         setPhase("uploading", "正在上传到 GitHub 并触发构建...");
         const payload: any = { taskId: genTask.taskId };
-        // 首次构建带上 IDE 的最新内容；后续 fix 后重建用 KV 里已被 fix 改过的版本
-        if (attempt === 0 && initialFiles) payload.files = initialFiles;
+        // 首次构建带上 IDE 的最新内容 + 元数据（供 KV 任务过期后重建）；
+        // 后续 fix 后重建用 KV 里已被 fix 改过的版本
+        if (attempt === 0 && initialFiles) {
+            payload.files = initialFiles;
+            if (meta) payload.meta = meta;
+        }
         const buildResult = await post("/api/generate/build", payload);
         // 从 IDE 进来的场景：填上 GenerateProgress 头部要展示的 meta
         if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
@@ -515,9 +521,12 @@ export function getDownloadUrl(): string {
  * 从 IDE 直接触发构建（跳过 chat/plan/clarify/file gen 阶段）。
  * 调用者负责先 hydrate genTask（taskId/files/phase），然后此函数走 build + fix 重试链路。
  */
-export async function startBuildFromIDE(files: { path: string; content: string }[]) {
+export async function startBuildFromIDE(
+    files: { path: string; content: string }[],
+    meta?: BuildMeta,
+) {
     try {
-        await buildWithRetry(files);
+        await buildWithRetry(files, meta);
     } catch (e: any) {
         genTask.phase = "error";
         genTask.error = e?.message || String(e);
