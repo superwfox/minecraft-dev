@@ -108,7 +108,7 @@ onMounted(() => {
   font-weight: normal;
   font-style: normal;
   font-display: swap;
-  unicode-range: U+0041, U+0048, U+0049, U+0054, U+4E00-9FFF, U+3000-303F, U+FF00-FFEF;
+  /* 全量字体，不再限制码位范围（原 unicode-range 是 subset 时代的残留白名单） */
 }
 
 @font-face {
