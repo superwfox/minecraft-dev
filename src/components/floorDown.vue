@@ -41,8 +41,8 @@ const sections = [
     action: null,
   },
   {
-    title: "步骤化输出",
-    desc: "返回结构化的开发步骤，每一步标注需要的事件、方法和参数，直接对照实现",
+    title: "确认即生成",
+    desc: "AI 先与你多轮确认需求，敲定后直接产出可编译的完整插件工程并自动打包 JAR",
     img: "/pageD.png",
     action: "开始对话",
   },

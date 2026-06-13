@@ -46,7 +46,7 @@ export function getTodoList(prompt: string) {
     return askDeepSeek(prompt, TODO_PRESET);
 }
 
-async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string) => void): Promise<string> {
+async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string) => void, signal?: AbortSignal): Promise<string> {
     const messages = [
         { role: "system", content: preset },
         { role: "user", content: prompt },
@@ -55,6 +55,7 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
+        signal,
     });
     if (!response.ok) throw new Error(await response.text());
     if (!response.body) throw new Error("No stream body");
@@ -85,8 +86,8 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
     return full;
 }
 
-export function streamGetInfo(prompt: string, onDelta: (chunk: string) => void) {
-    return streamAsk(prompt, INFO_PRESET, onDelta);
+export function streamGetInfo(prompt: string, onDelta: (chunk: string) => void, signal?: AbortSignal) {
+    return streamAsk(prompt, INFO_PRESET, onDelta, signal);
 }
 
 export function streamGetTodoList(prompt: string, onDelta: (chunk: string) => void) {

@@ -5,12 +5,12 @@ import {
     streamTick,
     createDraftBlock,
     appendToDraft,
-    getActiveDraft,
     combineUserMessages,
 } from "./chatState";
-import { streamGetInfo, streamGetTodoList, consistChat, precheckPrompt } from "../api/deepseek";
+import { streamGetInfo, consistChat, precheckPrompt } from "../api/deepseek";
 import type { ChatMsg } from "../api/deepseek";
 import { authState, fetchMe } from "./auth";
+import { startGenerate } from "./generateHandler";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
 const VERSIONS = [
@@ -25,6 +25,10 @@ export type RebuildInfo = { prompt: string; coreType: string; version: string } 
 let _rebuildInfo: RebuildInfo = null;
 export function getRebuildInfo(): RebuildInfo { return _rebuildInfo; }
 export function clearRebuildInfo() { _rebuildInfo = null; }
+
+// analyze(需求分析)阶段的 abort controller；ESC 撤回时中断
+let analyzeAbort: AbortController | null = null;
+export function interruptAnalyze() { analyzeAbort?.abort(); }
 
 export async function handleUserInput(
     input: string,
@@ -43,9 +47,9 @@ export async function handleUserInput(
         return;
     }
 
-    // 重新生成快捷：基于上一轮已确认的 block
+    // 重新生成快捷：基于上一轮已确认（非草稿且已定型核心/版本）的 block
     if (input.includes("重新生成")) {
-        const prev = [...chatBlocks].reverse().find(b => b.coreType && b.version && b.steps?.length);
+        const prev = [...chatBlocks].reverse().find(b => b.coreType && b.version && !b.draft);
         if (prev) {
             const prevCombined = combineUserMessages(prev.userMessages);
             const combined = prevCombined + "\n\n追加需求：" + input.replace("重新生成", "").trim();
@@ -90,12 +94,21 @@ export async function handleUserInput(
     let info: any;
     try {
         draft.rawMsg = "";
+        analyzeAbort = new AbortController();
         const raw = await streamGetInfo(combined, (chunk) => {
             draft.rawMsg += chunk;
             streamTick.value++;
-        });
+        }, analyzeAbort.signal);
         info = tryParseJson(raw);
     } catch (e: any) {
+        if (e?.name === "AbortError") {
+            // ESC 撤回：丢弃刚建的单条草稿，回到干净 idle 输入态
+            const idx = chatBlocks.indexOf(draft);
+            if (idx >= 0 && draft.userMessages.length === 1) chatBlocks.splice(idx, 1);
+            else { draft.phase = "error"; draft.error = "已中断"; }
+            centerText.value = "已中断";
+            return;
+        }
         draft.phase = "error";
         draft.error = "需求分析失败: " + (e?.message || e);
         centerText.value = "请求失败";
@@ -127,47 +140,15 @@ export async function handleUserInput(
 }
 
 export async function continueAfterSelect(block: ChatBlock, centerText: Ref<string>) {
-    centerText.value = "正在生成开发步骤...";
-    block.phase = "fetching";
+    // 平台新方向：不再生成「开发步骤」预览，确认核心/版本后直接进入需求确认(clarify)+生成。
+    block.rawMsg = "";
+    block.phase = "done";
+    block.draft = false;
+    centerText.value = "正在进入需求确认...";
 
     const combined = combineUserMessages(block.userMessages);
-    const prompt = JSON.stringify({
-        coreType: block.coreType,
-        version: block.version,
-        title: block.title,
-        rawPrompt: combined,
-    });
-
-    let steps: any;
-    try {
-        block.rawMsg = "";
-        const raw = await streamGetTodoList(prompt, (chunk) => {
-            block.rawMsg += chunk;
-            streamTick.value++;
-        });
-        steps = tryParseJson(raw);
-    } catch (e: any) {
-        block.phase = "error";
-        block.error = "步骤生成失败: " + (e?.message || e);
-        centerText.value = "请求失败";
-        return;
-    }
-
-    if (!Array.isArray(steps)) {
-        block.phase = "streaming";
-        centerText.value = "对话中";
-        fallbackStream(block, combined, centerText);
-        return;
-    }
-
-    centerText.value = "渲染完成";
-    block.rawMsg = "";
-    block.phase = "rendering";
-    block.steps = steps;
-
-    setTimeout(() => {
-        block.phase = "done";
-    }, 300);
+    // 不 await：后续由 genTask 阶段驱动 UI；startGenerate 内部自行处理错误。
+    startGenerate(combined, block.coreType!, block.version!).catch(() => { /* guard 抛错忽略 */ });
 }
 
 function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>) {

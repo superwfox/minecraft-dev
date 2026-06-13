@@ -1,9 +1,25 @@
-import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt } from "./generateState";
+import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, cancelPendingInput } from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 
 const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
+
+// ── ESC 撤回中断（仅思考/需求确认阶段）──
+// clarify 阶段的 SSE fetch controller；ESC 时 abort 断流（后端 waitUntil 仍会读完并结算 token）
+let clarifyAbort: AbortController | null = null;
+
+/** 判断错误是否来自 ESC 中断：fetch abort 抛 AbortError，等待 Promise 被拒抛 InterruptError */
+function isInterrupt(e: any): boolean {
+    return e?.interrupted === true || e?.name === "AbortError";
+}
+
+/** ESC 撤回：中断进行中的需求确认（abort SSE + 取消等待用户输入的 Promise）。
+ *  token 花费由后端 clarify.ts 的 context.waitUntil 自动结算，前端无需处理。 */
+export function interruptGenerate() {
+    clarifyAbort?.abort();
+    cancelPendingInput();
+}
 
 /** 不可重试错误（鉴权 / 额度），跳过 post() 的重试逻辑 */
 function noRetry(msg: string): Error {
@@ -250,10 +266,12 @@ async function streamClarify(
     answers?: Record<string, string | string[]>,
     extraPrompt?: string,
 ): Promise<any> {
+    clarifyAbort = new AbortController();
     const resp = await fetch("/api/generate/clarify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId, answers, extraPrompt }),
+        signal: clarifyAbort.signal,
     });
     if (!resp.ok) throw new Error(await resp.text());
     return readSSE(resp);
@@ -333,6 +351,12 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
             answers = userAnswers;
         }
     } catch (e: any) {
+        if (isInterrupt(e)) {
+            // ESC 撤回：安静复位回 idle（消耗已由后端结算）
+            resetGenTask();
+            fetchMe(); // 刷新顶栏剩余额度，反映已结算的扣费
+            return;
+        }
         genTask.phase = "error";
         genTask.error = e.message || String(e);
         genTask.logs.push("× " + genTask.error);
