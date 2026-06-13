@@ -118,7 +118,18 @@ git push -u origin master
    XFYUN_APP_ID=...
    XFYUN_API_KEY=...
    XFYUN_API_SECRET=...
+
+   # GitHub 登录（OAuth）—— 缺这三个会导致点登录后 404 / 500
+   GITHUB_OAUTH_CLIENT_ID=Iv23...      # GitHub App 的 Client ID，不是 App ID
+   GITHUB_OAUTH_CLIENT_SECRET=...      # GitHub App 设置页生成的 client secret
+   SESSION_SECRET=...                  # 会话签名密钥，可用 npm run gen:secret 生成
    ```
+
+   > ⚠️ `GITHUB_OAUTH_CLIENT_ID` 必须填 GitHub App 设置页里的 **Client ID**（形如
+   > `Iv23...`），**不能**填 **App ID**（纯数字）。填成 App ID 会让
+   > `github.com/login/oauth/authorize` 返回 404。
+   > 同时确认 GitHub App 的 **Callback URL** 设置为 `https://<你的域名>/api/auth/callback`，
+   > 且该域名指向的是带 Functions 的**平台** Pages 项目。
 
 ### 4. 创建 KV 命名空间
 
