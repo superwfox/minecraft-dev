@@ -130,6 +130,11 @@ git push -u origin master
    > `github.com/login/oauth/authorize` 返回 404。
    > 同时确认 GitHub App 的 **Callback URL** 设置为 `https://<你的域名>/api/auth/callback`，
    > 且该域名指向的是带 Functions 的**平台** Pages 项目。
+   >
+   > ⚠️ **GitHub App 必须设为 Public。** 在 App 设置页最底部点 **Make this GitHub App
+   > public**（可见性从 *Only on this account* 改为 *Any account*）。若保持 Private，
+   > 则只有应用所属账号本人能登录，**其他用户**访问 authorize 页会因 app 不可见而
+   > 收到 **404**（典型症状：自己能登、别人点登录就 404）。改完即时生效，无需重新部署。
 
 ### 4. 创建 KV 命名空间
 
