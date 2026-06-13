@@ -19,9 +19,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     authorize.searchParams.set("scope", "read:user");
     authorize.searchParams.set("state", state);
 
-    // 30 分钟：GitHub App 首次登录可能要先走「安装」再授权，留足时间避免 state cookie 过期
     const headers = new Headers({ Location: authorize.toString() });
-    headers.append("Set-Cookie", `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`);
-    headers.append("Set-Cookie", `oauth_return=${encodeURIComponent(returnTo)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`);
+    headers.append("Set-Cookie", `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
+    headers.append("Set-Cookie", `oauth_return=${encodeURIComponent(returnTo)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
     return new Response(null, { status: 302, headers });
 };

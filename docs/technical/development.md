@@ -119,22 +119,19 @@ git push -u origin master
    XFYUN_API_KEY=...
    XFYUN_API_SECRET=...
 
-   # GitHub 登录（OAuth）—— 缺这三个会导致点登录后 404 / 500
-   GITHUB_OAUTH_CLIENT_ID=Iv23...      # GitHub App 的 Client ID，不是 App ID
-   GITHUB_OAUTH_CLIENT_SECRET=...      # GitHub App 设置页生成的 client secret
-   SESSION_SECRET=...                  # 会话签名密钥，可用 npm run gen:secret 生成
+   # GitHub 登录（OAuth）—— 缺这三个会导致点登录后 500 / 登录失败
+   GITHUB_OAUTH_CLIENT_ID=...           # OAuth App 的 Client ID
+   GITHUB_OAUTH_CLIENT_SECRET=...       # OAuth App 设置页生成的 client secret
+   SESSION_SECRET=...                   # 会话签名密钥，可用 npm run gen:secret 生成
    ```
 
-   > ⚠️ `GITHUB_OAUTH_CLIENT_ID` 必须填 GitHub App 设置页里的 **Client ID**（形如
-   > `Iv23...`），**不能**填 **App ID**（纯数字）。填成 App ID 会让
-   > `github.com/login/oauth/authorize` 返回 404。
-   > 同时确认 GitHub App 的 **Callback URL** 设置为 `https://<你的域名>/api/auth/callback`，
-   > 且该域名指向的是带 Functions 的**平台** Pages 项目。
+   > 登录使用 **OAuth App**（不是 GitHub App）：Settings → Developer settings →
+   > **OAuth Apps** → New OAuth App。**Authorization callback URL** 填
+   > `https://<你的域名>/api/auth/callback`，并确认该域名指向的是带 Functions 的**平台**
+   > Pages 项目。把它的 Client ID / client secret 填入上面两个变量即可。
    >
-   > ⚠️ **GitHub App 必须设为 Public。** 在 App 设置页最底部点 **Make this GitHub App
-   > public**（可见性从 *Only on this account* 改为 *Any account*）。若保持 Private，
-   > 则只有应用所属账号本人能登录，**其他用户**访问 authorize 页会因 app 不可见而
-   > 收到 **404**（典型症状：自己能登、别人点登录就 404）。改完即时生效，无需重新部署。
+   > 注：OAuth App 对任意 GitHub 用户开箱即用，无需安装、无 public/private 开关；
+   > 这也是登录场景比 GitHub App 更合适的原因（GitHub App 会强制「先安装再授权」）。
 
 ### 4. 创建 KV 命名空间
 
