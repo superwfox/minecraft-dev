@@ -104,7 +104,7 @@ onMounted(() => {
 <style>
 @font-face {
   font-family: "ZhuoKai";
-  src: url("/jiangxizhuokai_subset.woff2") format("woff2");
+  src: url("/jiangxizhuokai_full.woff2") format("woff2");
   font-weight: normal;
   font-style: normal;
   font-display: swap;

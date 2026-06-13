@@ -5,7 +5,7 @@
       <div class="cc-progress">{{ qIndex + 1 }} / {{ todos.length }}</div>
       <div class="cc-question">{{ current?.question }}</div>
       <div class="cc-sub">
-        {{ current?.multiSelect ? "多选 · 向下拖动卡片加入组合，可选多张" : "单选 · 向下拖动选择一张" }}
+        {{ current?.multiSelect ? "多选 · 向下拖动加入组合" : "单选 · 向下拖动选择" }} · ← → 切换题目
       </div>
     </div>
 
@@ -52,11 +52,15 @@
 
     <!-- 底部控制 -->
     <div class="cc-foot">
-      <button class="cc-btn ghost" @click="skip">跳过本题</button>
+      <button class="cc-nav" @click="goPrev" :disabled="qIndex === 0" title="上一题 (←)">‹</button>
+      <button class="cc-btn ghost" @click="skip">跳过</button>
       <span class="cc-foot-spacer"></span>
+      <span class="cc-count">已答 {{ answeredCount }} / {{ todos.length }}</span>
       <button v-if="current?.multiSelect" class="cc-btn" :disabled="selectedCount === 0" @click="confirmMulti">
-        确认（{{ selectedCount }}）
+        本题确认（{{ selectedCount }}）
       </button>
+      <button v-if="allAnswered" class="cc-btn primary" @click="finish">完成确认</button>
+      <button class="cc-nav" @click="goNext" :disabled="qIndex >= todos.length - 1" title="下一题 (→)">›</button>
     </div>
   </div>
 </template>
@@ -91,7 +95,6 @@ const palette: Record<string, { bg: string; text: string; dot: string }> = {
 };
 const colorKeys = ["cream", "wheat", "orange", "brown", "cocoa", "gray"];
 const sizeFactor: Record<string, number> = { s: 0.86, m: 1, l: 1.16 };
-const sizeKeys: ("s" | "m" | "l")[] = ["m", "l", "s", "m", "l", "s"];
 
 const baseW = 184, baseH = 256;
 
@@ -116,7 +119,7 @@ function buildCards() {
     const single = !t.multiSelect;
     const list: CardKind[] = t.options.map((opt, i) => ({
         id: `${t.id}:${i}`, label: opt, value: opt, isCustom: false,
-        size: sizeKeys[i % sizeKeys.length],
+        size: "m", // 同一题卡片为同类，统一大小
         // 单选题：同类型卡（统一暖色）；多选题：组合卡（多色循环）
         color: single ? "wheat" : colorKeys[i % colorKeys.length],
         selected: false, exiting: null, entering: true, gone: false, relX: 0, relY: 0,
@@ -127,6 +130,12 @@ function buildCards() {
             size: "m", color: single ? "cream" : "gray",
             selected: false, exiting: null, entering: true, gone: false, relX: 0, relY: 0,
         });
+    }
+    // 重访已答题目时恢复此前选择（高亮，便于复核/修改）
+    const prior = roundAnswers[t.id];
+    if (prior !== undefined) {
+        const arr = Array.isArray(prior) ? prior : [prior];
+        for (const c of list) if (c.value && arr.includes(c.value)) c.selected = true;
     }
     cards.value = list;
     // 入场动画
@@ -249,13 +258,25 @@ function endDrag() {
     else selectSingle(card);
 }
 
+// ── 题目导航（← →）──
+const answeredCount = computed(() => todos.value.filter(t => roundAnswers[t.id] !== undefined).length);
+const allAnswered = computed(() => todos.value.length > 0 && answeredCount.value === todos.value.length);
+const isLast = computed(() => qIndex.value >= todos.value.length - 1);
+
+function goPrev() { if (qIndex.value > 0) qIndex.value--; }
+function goNext() { if (qIndex.value < todos.value.length - 1) qIndex.value++; }
+
 // ── 作答 ──
 function selectSingle(card: CardKind) {
     if (!current.value) return;
     roundAnswers[current.value.id] = card.value;
     card.exiting = "chosen";
     for (const c of cards.value) if (c.id !== card.id) c.exiting = "return"; // 其余回归
-    setTimeout(() => { cards.value.forEach(c => { c.gone = true; }); advance(); }, 480);
+    const last = isLast.value;
+    setTimeout(() => {
+        if (last) buildCards();   // 末题：重建当前题显示已选高亮，等待「完成确认」
+        else qIndex.value++;       // 否则自动进入下一题（watch → buildCards）
+    }, 480);
 }
 
 function toggleMulti(card: CardKind) {
@@ -265,13 +286,13 @@ function confirmMulti() {
     if (!current.value) return;
     const picked = cards.value.filter(c => c.selected).map(c => c.value).filter(Boolean);
     roundAnswers[current.value.id] = picked;
-    advance();
+    if (!isLast.value) goNext();
 }
 
 function skip() {
     if (!current.value) return;
     roundAnswers[current.value.id] = current.value.multiSelect ? [] : "";
-    advance();
+    if (!isLast.value) goNext();
 }
 
 // ── 自定义输入 ──
@@ -293,16 +314,17 @@ function confirmCustom() {
         const customCard = cards.value.find(c => c.isCustom);
         if (customCard) customCard.exiting = "chosen";
         for (const c of cards.value) if (!c.isCustom) c.exiting = "return";
-        setTimeout(() => { cards.value.forEach(c => { c.gone = true; }); advance(); }, 480);
+        const last = isLast.value;
+        setTimeout(() => {
+            if (last) buildCards();
+            else qIndex.value++;
+        }, 480);
     }
 }
 
-function advance() {
-    if (qIndex.value < todos.value.length - 1) {
-        qIndex.value++;
-        return;
-    }
-    // 本轮全部作答 → 提交快照
+// 全部题目作答完成后，由「完成确认」提交本轮快照
+function finish() {
+    if (!allAnswered.value) return;
     const snapshot: Record<string, string | string[]> = {};
     for (const t of todos.value) snapshot[t.id] = roundAnswers[t.id] ?? (t.multiSelect ? [] : "");
     for (const k of Object.keys(roundAnswers)) delete roundAnswers[k];
@@ -364,12 +386,23 @@ function fxFrame(t: number) {
     ctx.globalAlpha = 1;
 }
 
+// ← / → 切换题目（可返回上一题修改）
+function onKey(e: KeyboardEvent) {
+    if (customOpen.value) return;
+    const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); goPrev(); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); goNext(); }
+}
+
 onMounted(() => {
     window.addEventListener("mousemove", onMove, { passive: true });
+    window.addEventListener("keydown", onKey);
     rafId = requestAnimationFrame(fxFrame);
 });
 onUnmounted(() => {
     window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("keydown", onKey);
     window.removeEventListener("pointermove", onDrag);
     window.removeEventListener("pointerup", endDrag);
     window.removeEventListener("pointercancel", endDrag);
@@ -545,9 +578,11 @@ onUnmounted(() => {
     z-index: 700;
     display: flex;
     align-items: center;
-    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
     padding: 0 28px;
-    max-width: 640px;
+    max-width: 680px;
     margin: 0 auto;
 }
 .cc-foot-spacer { flex: 1; }
@@ -565,6 +600,35 @@ onUnmounted(() => {
 .cc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .cc-btn.ghost { background: transparent; opacity: 0.6; }
 .cc-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
+.cc-btn.primary {
+    background: wheat;
+    color: #1c1812;
+    border-color: wheat;
+    font-weight: 700;
+}
+.cc-btn.primary:hover:not(:disabled) { background: #f0d9a8; }
+
+.cc-nav {
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+    border: 1px solid rgba(255, 240, 225, 0.28);
+    background: rgba(255, 255, 255, 0.08);
+    color: #f3e7d4;
+    border-radius: 10px;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    transition: transform 0.15s ease, background 0.15s ease;
+}
+.cc-nav:hover:not(:disabled) { background: rgba(255, 255, 255, 0.18); transform: translateY(-1px); }
+.cc-nav:disabled { opacity: 0.25; cursor: not-allowed; }
+
+.cc-count {
+    font-size: 12px;
+    color: rgba(255, 245, 235, 0.5);
+    letter-spacing: 0.04em;
+}
 
 @media (prefers-reduced-motion: reduce) {
     .cc-card, .cc-card-inner, .cc-hint {
