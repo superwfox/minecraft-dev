@@ -44,10 +44,15 @@
       </div>
     </div>
 
-    <!-- 自定义输入（其他…） -->
+    <!-- 自定义输入（其他…）：实时映射到卡面 -->
     <div v-if="customOpen" class="cc-custom">
       <input ref="customInput" v-model="customText" class="cc-custom-input"
-             placeholder="输入你的想法，回车确认" @keydown.enter.prevent="confirmCustom"/>
+             placeholder="输入你的想法…"
+             @input="onCustomInput"
+             @keydown.enter.prevent="confirmCustom"
+             @keydown.esc.stop.prevent="cancelCustom"/>
+      <button class="cc-btn primary" :disabled="!customText.trim()" @click="confirmCustom">确定</button>
+      <button class="cc-btn ghost" @click="cancelCustom">取消</button>
     </div>
 
     <!-- 底部控制 -->
@@ -108,6 +113,7 @@ const cards = ref<CardKind[]>([]);
 const customOpen = ref(false);
 const customText = ref("");
 const customInput = ref<HTMLInputElement | null>(null);
+let editingCustom: CardKind | null = null; // 正在编辑的「其他…」牌
 
 const selectedCount = computed(() => cards.value.filter(c => c.selected).length);
 
@@ -131,11 +137,19 @@ function buildCards() {
             selected: false, exiting: null, entering: true, gone: false, relX: 0, relY: 0,
         });
     }
-    // 重访已答题目时恢复此前选择（高亮，便于复核/修改）
+    // 重访已答题目时恢复此前选择（高亮，便于复核/修改）；自定义答案回填到「其他…」牌
     const prior = roundAnswers[t.id];
     if (prior !== undefined) {
-        const arr = Array.isArray(prior) ? prior : [prior];
-        for (const c of list) if (c.value && arr.includes(c.value)) c.selected = true;
+        const arr = Array.isArray(prior) ? prior : (prior === "" ? [] : [prior]);
+        const optSet = new Set(t.options);
+        for (const c of list) {
+            if (c.isCustom) {
+                const customVal = arr.find(a => a && !optSet.has(a));
+                if (customVal) { c.value = customVal; c.label = customVal; c.selected = true; }
+            } else if (c.value && arr.includes(c.value)) {
+                c.selected = true;
+            }
+        }
     }
     cards.value = list;
     // 入场动画
@@ -253,7 +267,7 @@ function endDrag() {
     drag.value = null;
     if (!card) return;
     if (zone !== "select") return; // 未进入选择区 → 回弹到扇形原位
-    if (card.isCustom) { openCustom(); return; }
+    if (card.isCustom) { openCustom(card); return; }
     if (current.value?.multiSelect) toggleMulti(card);
     else selectSingle(card);
 }
@@ -269,6 +283,7 @@ function goNext() { if (qIndex.value < todos.value.length - 1) qIndex.value++; }
 // ── 作答 ──
 function selectSingle(card: CardKind) {
     if (!current.value) return;
+    if (customOpen.value) cancelCustom();
     roundAnswers[current.value.id] = card.value;
     card.exiting = "chosen";
     for (const c of cards.value) if (c.id !== card.id) c.exiting = "return"; // 其余回归
@@ -280,6 +295,7 @@ function selectSingle(card: CardKind) {
 }
 
 function toggleMulti(card: CardKind) {
+    if (customOpen.value) cancelCustom();
     card.selected = !card.selected;
 }
 function confirmMulti() {
@@ -295,30 +311,49 @@ function skip() {
     if (!isLast.value) goNext();
 }
 
-// ── 自定义输入 ──
-function openCustom() {
+// ── 自定义输入（其他…）──
+function openCustom(card: CardKind) {
+    editingCustom = card;
     customOpen.value = true;
-    customText.value = "";
+    customText.value = card.value || ""; // 重新编辑时回填
+    card.selected = true;                // 编辑中即点亮该牌
+    onCustomInput();                     // 同步当前文字到卡面
     nextTick(() => customInput.value?.focus());
+}
+// 输入实时映射到卡面
+function onCustomInput() {
+    if (editingCustom) editingCustom.label = customText.value.trim() || "其他…";
 }
 function confirmCustom() {
     const v = customText.value.trim();
-    if (!v || !current.value) return;
+    const card = editingCustom;
+    if (!card || !current.value) { customOpen.value = false; return; }
+    if (!v) { cancelCustom(); return; }
+    card.value = v;
+    card.label = v;
     customOpen.value = false;
+    editingCustom = null;
     if (current.value.multiSelect) {
-        // 多选：把自定义值并入答案，标记自定义牌为已选
-        const customCard = cards.value.find(c => c.isCustom);
-        if (customCard) { customCard.value = v; customCard.label = v; customCard.selected = true; }
+        card.selected = true; // 已选，纳入组合（点「本题确认」提交）
     } else {
         roundAnswers[current.value.id] = v;
-        const customCard = cards.value.find(c => c.isCustom);
-        if (customCard) customCard.exiting = "chosen";
-        for (const c of cards.value) if (!c.isCustom) c.exiting = "return";
+        card.exiting = "chosen";
+        for (const c of cards.value) if (c.id !== card.id) c.exiting = "return";
         const last = isLast.value;
         setTimeout(() => {
             if (last) buildCards();
             else qIndex.value++;
         }, 480);
+    }
+}
+function cancelCustom() {
+    customOpen.value = false;
+    customText.value = "";
+    if (editingCustom) {
+        editingCustom.label = "其他…";
+        editingCustom.value = "";
+        editingCustom.selected = false;
+        editingCustom = null;
     }
 }
 
@@ -555,11 +590,14 @@ onUnmounted(() => {
     bottom: 12vh;
     z-index: 700;
     display: flex;
+    align-items: center;
     justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
     padding: 0 24px;
 }
 .cc-custom-input {
-    width: min(420px, 90vw);
+    width: min(360px, 80vw);
     background: rgba(20, 16, 12, 0.9);
     border: 1px solid rgba(255, 240, 225, 0.28);
     border-radius: 10px;
