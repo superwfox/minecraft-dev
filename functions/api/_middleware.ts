@@ -20,7 +20,7 @@ function needsAuth(path: string): boolean {
 
 // 需要 IP 限流的端点（避开 IDE 高频的 /api/maven/jar 与 /api/voice-auth）
 function needsIpLimit(path: string): boolean {
-    return needsAuth(path) || path === "/api/sponsor/bind" || path === "/api/auth/callback";
+    return needsAuth(path) || path === "/api/sponsor/request" || path === "/api/auth/callback";
 }
 
 function json(obj: any, status: number): Response {

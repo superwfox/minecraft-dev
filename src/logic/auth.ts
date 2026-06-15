@@ -10,7 +10,11 @@ export interface QuotaInfo {
     tier: Tier;
 }
 
-export const AFDIAN_URL = "https://afdian.com/a/beijihug";
+// 个人收款档位（1 元 = 1 件）
+export const SPONSOR_TIERS: { id: string; amount: number; label: string; badge: string }[] = [
+    { id: "t25", amount: 25, label: "¥25", badge: "银徽" },
+    { id: "t50", amount: 50, label: "¥50", badge: "金徽" },
+];
 
 export const authState = reactive({
     loaded: false,
@@ -57,13 +61,12 @@ export async function logout(): Promise<void> {
     authState.quota = null;
 }
 
-export async function redeemOrder(orderNo: string): Promise<{ ok: boolean; reason?: string; added?: number }> {
-    const resp = await fetch("/api/sponsor/bind", {
+/** 选档位 → 拿到专属备注码（转账时填写），登记待审 */
+export async function requestSponsor(tier: string): Promise<{ ok: boolean; code?: string; amount?: number; reason?: string }> {
+    const resp = await fetch("/api/sponsor/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderNo }),
+        body: JSON.stringify({ tier }),
     });
-    const data = await resp.json().catch(() => ({ ok: false, reason: "网络错误" }));
-    if (data.ok && data.quota) authState.quota = data.quota;
-    return data;
+    return resp.json().catch(() => ({ ok: false, reason: "网络错误" }));
 }

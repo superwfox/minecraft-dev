@@ -9,18 +9,7 @@
           <div class="quota-sub" v-if="authState.quota">
             免费 {{ authState.quota.freeRemaining }} · 充值 {{ authState.quota.paidBalance }}
           </div>
-          <div class="redeem-row">
-            <input
-              v-model="orderNo"
-              class="redeem-input"
-              placeholder="爱发电订单号"
-              @keyup.enter="doRedeem"
-            >
-            <button class="redeem-btn" :disabled="redeeming" @click="doRedeem">
-              {{ redeeming ? "..." : "兑换" }}
-            </button>
-          </div>
-          <div v-if="redeemMsg" class="redeem-msg" :class="{ ok: redeemOk }">{{ redeemMsg }}</div>
+          <button class="recharge-btn" @click="openSponsor">充值额度</button>
           <div class="quota-logout" @click="doLogout">退出登录</div>
         </div>
       </div>
@@ -59,7 +48,7 @@ import GlassCard from "./components/glassCard.vue";
 import SponsorModal from "./components/sponsorModal.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
-import {authState, fetchMe, login, logout, redeemOrder, currentLogo} from "./logic/auth";
+import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
 
 const router = useRouter();
 const goHome = () => router.push("/");
@@ -69,25 +58,8 @@ provide("centerText", centerText);
 
 const logoSrc = computed(() => currentLogo());
 
-// 订单兑换
-const orderNo = ref("");
-const redeeming = ref(false);
-const redeemMsg = ref("");
-const redeemOk = ref(false);
-
-async function doRedeem() {
-  const no = orderNo.value.trim();
-  if (!no || redeeming.value) return;
-  redeeming.value = true;
-  redeemMsg.value = "";
-  try {
-    const r = await redeemOrder(no);
-    redeemOk.value = !!r.ok;
-    redeemMsg.value = r.ok ? `兑换成功，+${r.added} 件` : (r.reason || "兑换失败");
-    if (r.ok) orderNo.value = "";
-  } finally {
-    redeeming.value = false;
-  }
+function openSponsor() {
+  showSponsorModal.value = true;
 }
 
 function doLogout() {
@@ -250,6 +222,22 @@ body {
 
 .redeem-msg.ok {
   color: #9be39b;
+}
+
+.recharge-btn {
+  margin-top: 12px;
+  width: 100%;
+  padding: 8px 0;
+  border-radius: 8px;
+  border: none;
+  background: wheat;
+  color: #1c1812;
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.recharge-btn:hover {
+  opacity: 0.88;
 }
 
 .quota-logout {
