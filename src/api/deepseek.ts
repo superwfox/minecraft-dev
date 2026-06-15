@@ -1,3 +1,5 @@
+import { byokHeaders } from "../logic/byok";
+
 export type ChatMsg = {
     role: string;
     content: string;
@@ -30,7 +32,7 @@ async function askDeepSeek(prompt: string, preset: string): Promise<string> {
     ];
     const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -53,7 +55,7 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
     ];
     const response = await fetch("/api/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
         signal,
     });
@@ -110,7 +112,7 @@ export async function precheckPrompt(prompt: string): Promise<{ complete: boolea
     ];
     const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ model: "deepseek-v4-pro", messages }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -138,7 +140,7 @@ export function consistChat(
     const done = (async () => {
         const response = await fetch("/api/stream", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...byokHeaders() },
             body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
             signal: controller.signal,
         });

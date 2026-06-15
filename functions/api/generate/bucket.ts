@@ -1,8 +1,8 @@
 import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
 const DEFAULT_CONCURRENCY = 2;
@@ -65,8 +65,8 @@ async function fetchWithBackoff(url: string, init: RequestInit, maxRetries = 3):
     }
 }
 
-async function callAI(key: string, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
-    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
+async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
+    const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -77,9 +77,9 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
     }
     if (jsonMode) body.response_format = { type: "json_object" };
 
-    const resp = await fetchWithBackoff(DEEPSEEK_URL, {
+    const resp = await fetchWithBackoff(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -95,12 +95,12 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
  * 流式调用 AI 生成。所有 SSE 事件都打上 path 标签，便于前端按文件路由。
  */
 async function callAIStream(
-    key: string, system: string, user: string,
+    llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     pathTag: string,
     usePro = false,
 ): Promise<AICallResult> {
-    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
+    const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
         stream: true,
@@ -112,9 +112,9 @@ async function callAIStream(
         body.thinking = { type: "enabled" };
     }
 
-    const resp = await fetchWithBackoff(DEEPSEEK_URL, {
+    const resp = await fetchWithBackoff(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -164,7 +164,7 @@ interface FileGenOutput {
 
 /** 生成单个文件（含 reChecker + rework + 动态缺失类补全） */
 async function generateAndCheckFile(
-    key: string,
+    llm: LLMProvider,
     target: PlanFileItem,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     summaries: FileSummary[],
@@ -182,7 +182,7 @@ async function generateAndCheckFile(
 
     const slice = computeSlice(target, blueprint);
     const dispatched = dispatchGen(target, ctx, summaries, slice);
-    const initialRes = await callAIStream(key, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath);
+    const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath);
     await charge(initialRes);
     let content = stripFences(initialRes.content);
 
@@ -197,7 +197,7 @@ async function generateAndCheckFile(
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         const check = dispatched.checker(filePath, content);
-        const reviewRes = await callAI(key, check.system, check.user, true, true);
+        const reviewRes = await callAI(llm, check.system, check.user, true, true);
         await charge(reviewRes);
         let review: any;
         try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
@@ -231,7 +231,7 @@ async function generateAndCheckFile(
                     };
                     const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
-                    const subRes = await callAIStream(key, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath);
+                    const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath);
                     await charge(subRes);
                     const subContent = stripFences(subRes.content);
 
@@ -239,7 +239,7 @@ async function generateAndCheckFile(
                     let subSummary: any = null;
                     try {
                         const ext = summaryExtractPrompt(newPath, subContent);
-                        const sumRes = await callAI(key, ext.system, ext.user, true);
+                        const sumRes = await callAI(llm, ext.system, ext.user, true);
                         await charge(sumRes);
                         subSummary = JSON.parse(sumRes.content);
                     } catch {
@@ -262,7 +262,7 @@ async function generateAndCheckFile(
         state.logs.push(reworkMsg);
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
         const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries);
-        const rwRes = await callAIStream(key, rw.system, rw.user, writer, encoder, filePath, true);
+        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
@@ -281,7 +281,7 @@ async function generateAndCheckFile(
         await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
         state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
         const ext = summaryExtractPrompt(filePath, content);
-        const sumRes = await callAI(key, ext.system, ext.user, true);
+        const sumRes = await callAI(llm, ext.system, ext.user, true);
         await charge(sumRes);
         apiSummary = JSON.parse(sumRes.content);
     } catch {
@@ -298,7 +298,7 @@ async function generateAndCheckFile(
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex } = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
+    const llm = await resolveLLM(context);
     const concurrency = Math.max(1, parseInt(context.env.GEN_CONCURRENCY || "") || DEFAULT_CONCURRENCY);
 
     const raw = await context.env.TASKS.get(taskId);
@@ -313,7 +313,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const uid: string | undefined = (context.data as any)?.uid;
     const charge: ChargeFn = async (r) => {
-        if (!uid || !r.usage) return;
+        if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
@@ -385,7 +385,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     const localSummaries = baseSummaries.slice();
                     try {
                         const r = await generateAndCheckFile(
-                            key, target, ctx, localSummaries, blueprint, writer, encoder, state, charge,
+                            llm, target, ctx, localSummaries, blueprint, writer, encoder, state, charge,
                         );
                         if (r.replan) {
                             replanTriggered = r;

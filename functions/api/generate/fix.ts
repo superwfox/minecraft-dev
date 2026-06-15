@@ -2,9 +2,7 @@ import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
-
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
-const FIX_MODEL = "deepseek-v4-pro";
+import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -15,11 +13,12 @@ interface Env {
 interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
 
 async function callAIStream(
-    key: string, system: string, user: string,
+    llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<AICallResult> {
+    const model = llm.modelFor("pro");
     const body = {
-        model: FIX_MODEL,
+        model,
         stream: true,
         stream_options: { include_usage: true },
         reasoning_effort: "high",
@@ -27,9 +26,9 @@ async function callAIStream(
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -63,7 +62,7 @@ async function callAIStream(
             } catch { /* skip */ }
         }
     }
-    return { content: full, model: FIX_MODEL, usage };
+    return { content: full, model, usage };
 }
 
 function stripFences(raw: string): string {
@@ -110,7 +109,7 @@ function parseErrorFiles(log: string): Map<string, string[]> {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId } = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
+    const llm = await resolveLLM(context);
     const token = context.env.GITHUB_PAT;
 
     const raw = await context.env.TASKS.get(taskId);
@@ -131,7 +130,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const uid: string | undefined = (context.data as any)?.uid;
     const charge = async (r: AICallResult) => {
-        if (!uid || !r.usage) return;
+        if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
@@ -223,7 +222,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`↻ 修复 ${filePath}...`);
 
                 const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries);
-                const fixRes = await callAIStream(key, prompt.system, prompt.user, writer, encoder);
+                const fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
                 await charge(fixRes);
                 const fixedContent = stripFences(fixRes.content);
 

@@ -1,6 +1,7 @@
 import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput } from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
+import { byokHeaders } from "./byok";
 
 const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -44,7 +45,7 @@ async function post(url: string, body: any, maxRetries = 3) {
         try {
             const resp = await fetch(url, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...byokHeaders() },
                 body: JSON.stringify(body),
             });
             if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
@@ -238,7 +239,7 @@ async function readSSE(resp: Response): Promise<any> {
 async function streamFileGeneration(taskId: string): Promise<any> {
     const resp = await fetch("/api/generate/file", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ taskId }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -255,7 +256,7 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
     const resp = await fetch("/api/generate/bucket", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ taskId, bucketIndex }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -271,7 +272,7 @@ async function streamClarify(
     clarifyAbort = new AbortController();
     const resp = await fetch("/api/generate/clarify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ taskId, answers, extraPrompt }),
         signal: clarifyAbort.signal,
     });
@@ -284,7 +285,7 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
     gradeAbort = new AbortController();
     const resp = await fetch("/api/generate/grade", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ taskId, correction }),
         signal: gradeAbort.signal,
     });
@@ -296,7 +297,7 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
 async function streamBuildFix(taskId: string): Promise<any> {
     const resp = await fetch("/api/generate/fix", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
         body: JSON.stringify({ taskId }),
     });
     if (!resp.ok) throw new Error(await resp.text());

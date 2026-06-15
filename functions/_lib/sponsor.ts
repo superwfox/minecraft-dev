@@ -16,6 +16,14 @@ export function tierAmount(id: string): number | null {
     return t ? t.amount : null;
 }
 
+// 自定义金额：不处理小数，floor 取整；范围 [1, 99999]
+const MAX_CUSTOM = 99999;
+export function normalizeAmount(raw: any): number | null {
+    const n = Math.floor(Number(raw));
+    if (!Number.isFinite(n) || n < 1) return null;
+    return Math.min(n, MAX_CUSTOM);
+}
+
 export interface Pending {
     uid: string;
     login: string;

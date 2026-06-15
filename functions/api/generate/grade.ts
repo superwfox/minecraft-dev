@@ -1,6 +1,7 @@
 import { graderPrompt } from "../../_lib/prompts";
 import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/complexity";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { resolveLLM } from "../../_lib/llm";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
@@ -19,14 +20,14 @@ function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
 }
 
 async function callReasonerStream(
-    key: string, system: string, user: string,
+    url: string, key: string, model: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-            model: GRADE_MODEL,
+            model,
             stream: true,
             stream_options: { include_usage: true },
             reasoning_effort: "high",
@@ -74,8 +75,8 @@ async function callReasonerStream(
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
-    if (!key) return new Response("API key not configured", { status: 500 });
+    const llm = await resolveLLM(context);
+    if (!llm.apiKey) return new Response("API key not configured", { status: 500 });
 
     const taskId = body.taskId as string;
     const correction = body.correction as string | undefined;
@@ -106,10 +107,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "phase", phase: "grading" }));
 
             const { system, user } = graderPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, correction);
-            const callRes = await callReasonerStream(key, system, user, writer, encoder);
+            const callRes = await callReasonerStream(llm.url, llm.apiKey, llm.modelFor("pro"), system, user, writer, encoder);
 
-            if (uid && callRes.usage) {
-                const cost = await accumulateCost(context.env.TASKS, uid, taskId, GRADE_MODEL, callRes.usage);
+            if (!llm.byok && uid && callRes.usage) {
+                const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), callRes.usage);
                 state.totalCost = cost.total;
                 state.consumedQuota = cost.consumed;
                 if (cost.outOfQuota) state.quotaExhausted = true;

@@ -3,8 +3,7 @@
 // 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 taskCost:<taskId>。
 
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
-
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+import { resolveLLM, tierFromModel } from "../_lib/llm";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -13,11 +12,11 @@ interface Env {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
+    const llm = await resolveLLM(context);
+    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
 
-    if (!key) return new Response("API key not configured", {status: 500});
-
-    const model = body.model || "deepseek-v4-flash";
+    const tier = tierFromModel(body.model);
+    const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
     const uid: string | undefined = (context.data as any)?.uid;
 
@@ -42,16 +41,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         stream: true,
         stream_options: { include_usage: true },
     };
-    if (model.includes("pro")) {
+    if (tier === "pro") {
         payload.reasoning_effort = "high";
         payload.thinking = {type: "enabled"};
     }
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(llm.url, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer " + key,
+            "Authorization": "Bearer " + llm.apiKey,
         },
         body: JSON.stringify(payload),
     });
@@ -96,8 +95,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             try { await writer.close(); } catch { /* already closed */ }
         }
 
-        // 流结束后累积成本
-        if (uid && taskId && usage) {
+        // 流结束后累积成本（BYOK 自带 key 时跳过）
+        if (!llm.byok && uid && taskId && usage) {
             try {
                 const cost = await accumulateCost(context.env.TASKS, uid, taskId, model, usage);
                 const raw = await context.env.TASKS.get(taskId);

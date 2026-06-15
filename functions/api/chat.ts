@@ -2,8 +2,7 @@
 // 非流式请求，转发到 DeepSeek
 
 import { accumulateCost } from "../_lib/quota";
-
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
+import { resolveLLM, tierFromModel } from "../_lib/llm";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -12,11 +11,11 @@ interface Env {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
+    const llm = await resolveLLM(context);
+    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
 
-    if (!key) return new Response("API key not configured", {status: 500});
-
-    const model = body.model || "deepseek-v4-flash";
+    const tier = tierFromModel(body.model);
+    const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
     const uid: string | undefined = (context.data as any)?.uid;
 
@@ -36,17 +35,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const payload: any = {model, messages: body.messages};
-    if (model.includes("pro")) {
+    if (tier === "pro") {
         payload.reasoning_effort = "high";
         payload.thinking = {type: "enabled"};
     }
     if (body.response_format) payload.response_format = body.response_format;
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(llm.url, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer " + key,
+            "Authorization": "Bearer " + llm.apiKey,
         },
         body: JSON.stringify(payload),
     });
@@ -54,7 +53,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!resp.ok) return new Response(await resp.text(), {status: resp.status});
 
     const data = await resp.json() as any;
-    if (uid && taskId && data.usage) {
+    if (!llm.byok && uid && taskId && data.usage) {
         // 不阻塞响应：waitUntil 后台累积
         context.waitUntil(accumulateCost(context.env.TASKS, uid, taskId, model, data.usage).then(async (cost) => {
             // 回写 state.totalCost / consumedQuota，方便前端展示

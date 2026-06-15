@@ -1,6 +1,7 @@
 import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem, type PlannerGradeContext } from "../../_lib/prompts";
 import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
+import { resolveLLM } from "../../_lib/llm";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const PLANNER_MODEL = "deepseek-v4-pro";
@@ -201,11 +202,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, gradeContext);
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const llm = await resolveLLM(context);
+    const resp = await fetch(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify({
-            model: PLANNER_MODEL,
+            model: llm.modelFor("pro"),
             reasoning_effort: "high",
             thinking: { type: "enabled" },
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -216,10 +218,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const data = await resp.json() as any;
     const content = stripFences(data.choices?.[0]?.message?.content ?? "");
 
-    // 计费：累积 Planner 调用成本到 taskCost:<taskId>
+    // 计费：累积 Planner 调用成本到 taskCost:<taskId>（BYOK 自带 key 时跳过）
     const uid: string | undefined = (context.data as any)?.uid;
-    if (uid && data.usage) {
-        const cost = await accumulateCost(context.env.TASKS, uid, taskId, PLANNER_MODEL, data.usage);
+    if (!llm.byok && uid && data.usage) {
+        const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), data.usage);
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;

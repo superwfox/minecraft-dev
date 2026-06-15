@@ -1,5 +1,6 @@
 import {reactive, ref} from "vue";
 import {useIDEStore} from "./useIDEStore";
+import {byokHeaders} from "../../logic/byok";
 
 export type IDEFileAction = { path: string; action: "create" | "edit"; content: string };
 export type IDEMessage = {
@@ -145,7 +146,7 @@ async function send(userText: string) {
     try {
         const resp = await fetch("/api/stream", {
             method: "POST",
-            headers: {"Content-Type": "application/json"},
+            headers: {"Content-Type": "application/json", ...byokHeaders()},
             body: JSON.stringify({
                 model: "deepseek-v4-flash",
                 taskId: store.state.taskId || undefined,
@@ -259,7 +260,7 @@ ${truncate(opts.snippet, 3000)}
     const store = useIDEStore();
     const resp = await fetch("/api/stream", {
         method: "POST",
-        headers: {"Content-Type": "application/json"},
+        headers: {"Content-Type": "application/json", ...byokHeaders()},
         body: JSON.stringify({
             model: "deepseek-v4-flash",
             taskId: store.state.taskId || undefined,

@@ -61,12 +61,23 @@ export async function logout(): Promise<void> {
     authState.quota = null;
 }
 
-/** 选档位 → 拿到专属备注码（转账时填写），登记待审 */
-export async function requestSponsor(tier: string): Promise<{ ok: boolean; code?: string; amount?: number; reason?: string }> {
+type SponsorReq = { ok: boolean; code?: string; amount?: number; reason?: string };
+
+async function postSponsorRequest(payload: Record<string, unknown>): Promise<SponsorReq> {
     const resp = await fetch("/api/sponsor/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier }),
+        body: JSON.stringify(payload),
     });
     return resp.json().catch(() => ({ ok: false, reason: "网络错误" }));
+}
+
+/** 选档位 → 拿到专属备注码（转账时填写），登记待审 */
+export function requestSponsor(tier: string): Promise<SponsorReq> {
+    return postSponsorRequest({ tier });
+}
+
+/** 自定义金额（前端也 floor 一次，最终以后端为准） */
+export function requestSponsorAmount(amount: number): Promise<SponsorReq> {
+    return postSponsorRequest({ amount: Math.floor(amount) });
 }

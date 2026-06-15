@@ -1,8 +1,8 @@
 import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
-const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
 
@@ -13,8 +13,8 @@ interface Env {
 
 interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
 
-async function callAI(key: string, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
-    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
+async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
+    const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -25,9 +25,9 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
     }
     if (jsonMode) body.response_format = { type: "json_object" };
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -40,11 +40,11 @@ async function callAI(key: string, system: string, user: string, jsonMode = fals
 }
 
 async function callAIStream(
-    key: string, system: string, user: string,
+    llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     usePro = false,
 ): Promise<AICallResult> {
-    const model = usePro ? "deepseek-v4-pro" : "deepseek-v4-flash";
+    const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
         stream: true,
@@ -56,9 +56,9 @@ async function callAIStream(
         body.thinking = { type: "enabled" };
     }
 
-    const resp = await fetch(DEEPSEEK_URL, {
+    const resp = await fetch(llm.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
         body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -115,7 +115,7 @@ type ChargeFn = (r: AICallResult) => Promise<void>;
 
 /** Generate a single file with optional reChecker + rework, return content and summary */
 async function generateSingleFile(
-    key: string, filePath: string, fileRole: string,
+    llm: LLMProvider, filePath: string, fileRole: string,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     summaries: FileSummary[],
     blueprint: MainBlueprint | null,
@@ -139,7 +139,7 @@ async function generateSingleFile(
     const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
 
     const gen = dispatched.gen;
-    const initialGen = await callAIStream(key, gen.system, gen.user, writer, encoder);
+    const initialGen = await callAIStream(llm, gen.system, gen.user, writer, encoder);
     await charge(initialGen);
     let content = stripFences(initialGen.content);
     let reworkCount = 0;
@@ -151,7 +151,7 @@ async function generateSingleFile(
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         const check = dispatched.checker(filePath, content);
-        const reviewRes = await callAI(key, check.system, check.user, true, true);
+        const reviewRes = await callAI(llm, check.system, check.user, true, true);
         await charge(reviewRes);
         let review: any;
         try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
@@ -170,7 +170,7 @@ async function generateSingleFile(
 
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
         const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries);
-        const rwRes = await callAIStream(key, rw.system, rw.user, writer, encoder, true);
+        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
@@ -182,7 +182,7 @@ async function generateSingleFile(
         await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
         state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
         const ext = summaryExtractPrompt(filePath, content);
-        const sumRes = await callAI(key, ext.system, ext.user, true);
+        const sumRes = await callAI(llm, ext.system, ext.user, true);
         await charge(sumRes);
         apiSummary = JSON.parse(sumRes.content);
     } catch {
@@ -194,7 +194,7 @@ async function generateSingleFile(
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId } = await context.request.json() as any;
-    const key = context.env.DEEPSEEK_API_KEY;
+    const llm = await resolveLLM(context);
 
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
@@ -214,7 +214,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const uid: string | undefined = (context.data as any)?.uid;
     const charge: ChargeFn = async (r) => {
-        if (!uid || !r.usage) return;
+        if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
@@ -246,7 +246,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
 
             const gen = dispatched.gen;
-            const initialRes = await callAIStream(key, gen.system, gen.user, writer, encoder);
+            const initialRes = await callAIStream(llm, gen.system, gen.user, writer, encoder);
             await charge(initialRes);
             let content = stripFences(initialRes.content);
             let reworkCount = 0;
@@ -260,7 +260,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
                 const check = dispatched.checker(target.path, content);
-                const reviewRes = await callAI(key, check.system, check.user, true, true);
+                const reviewRes = await callAI(llm, check.system, check.user, true, true);
                 await charge(reviewRes);
                 let review: any;
                 try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
@@ -290,7 +290,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             const newRole = `${className} — 被 ${target.path.split("/").pop()} 引用`;
 
                             const result = await generateSingleFile(
-                                key, newPath, newRole, ctx, summaries, blueprint,
+                                llm, newPath, newRole, ctx, summaries, blueprint,
                                 writer, encoder, state, 1, charge,
                             );
 
@@ -318,7 +318,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
-                const rwRes = await callAIStream(key, rw.system, rw.user, writer, encoder, true);
+                const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
                 await charge(rwRes);
                 content = stripFences(rwRes.content);
             }
@@ -348,7 +348,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${target.path} 的 API 摘要...` }));
                 state.logs.push(`▸ 提取 ${target.path} 的 API 摘要...`);
                 const ext = summaryExtractPrompt(target.path, content);
-                const sumRes = await callAI(key, ext.system, ext.user, true);
+                const sumRes = await callAI(llm, ext.system, ext.user, true);
                 await charge(sumRes);
                 apiSummary = JSON.parse(sumRes.content);
             } catch {
