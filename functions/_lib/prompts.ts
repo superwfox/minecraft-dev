@@ -192,19 +192,126 @@ export function plannerClarifyPrompt(
     };
 }
 
+// ─── Grader（复杂度分级 + 实现路径）────────────────────────────
+
+export function graderPrompt(
+    userPrompt: string,
+    coreType: string,
+    version: string,
+    clarifyRounds?: ClarifyRound[],
+    correction?: string,
+): { system: string; user: string } {
+    const clarifyBlock = clarifyRounds?.length
+        ? "\n\n用户已确认的决策（分级与画图必须据此）：\n" + clarifyRounds.flatMap(r =>
+            r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
+        ).join("\n")
+        : "";
+    const correctionBlock = correction?.trim()
+        ? `\n\n【用户对上一版理解的修正，必须采纳重画】：${correction.trim()}`
+        : "";
+
+    return {
+        system: `你是一个 Minecraft ${coreType} ${version} 插件需求的「复杂度分级 + 实现路径」分析器。在生成完整 plan 之前，先抽取打分向量、定级，并在非直接级时给出可视化的实现路径。
+
+只输出 JSON（不要任何解释、不要 markdown 代码块），格式：
+{
+  "valid": true,
+  "vector": {
+    "triggers": 1,
+    "features": 1,
+    "branches": 0,
+    "ui": "none|command|gui_static|gui_session",
+    "state_lifecycle": "none|memory|persistent",
+    "state_scope": "none|player|global|cross",
+    "temporality": "instant|scheduled|continuous",
+    "state_shared": false,
+    "external_deps": []
+  },
+  "level": "直接|简单|中等|复杂",
+  "level_reason": "命中的主导维度一句话",
+  "paths": []
+}
+
+打分字段含义：
+- triggers 触发源数量(1|"2-3"|"4+")，features 功能点数，branches 条件分支数(含无状态分支)
+- ui: none/command/gui_static/gui_session(带会话状态的 GUI)
+- state_lifecycle: memory=重启丢失；persistent=跨重启需存储
+- state_scope: global=全局控制变量；cross=跨世界/跨服
+- temporality: scheduled=延时/定时一次；continuous=重复 task 持续监控
+- state_shared: ≥2 个功能/task 读写同一份可变状态
+- external_deps: 硬集成插件名，仅限 Vault / PlaceholderAPI / WorldGuard 这类 Paper 生态；软依赖不算
+
+【核心原则】复杂度由「状态」驱动，不由功能数量驱动：
+- "进服给钻石" = 无状态单动作 → 直接
+- "进服给钻石 + 退服广播 + /heal" = 三需求叠加但全无状态、互不相干 → 仍是简单
+- "余额持久化 + 多处读写余额" = 功能可能更少，但状态被多处共享且跨重启 → 复杂
+区分「大」与「复杂」的不是功能数，是有没有被多处共享/修改的（尤其持久的）状态。
+
+【定级指引】（你只给建议，代码侧会再按硬规则强制下限，所以宁可判高不要判低）：
+- memory 或 gui_static → 至少 简单
+- persistent / state_scope=global|cross / scheduled|continuous / gui_session / 1 个硬集成 → 至少 中等
+- state_shared=true / ≥2 硬集成 → 复杂
+- 都不命中 → 直接
+
+【最简实现 + Paper 专项（最高优先）】下游用低端模型生成代码，路径与图必须导向最简可行实现：
+- 持久化只用 YAML 配置文件 或 PDC（PersistentDataContainer）；**绝不出现 SQL / JDBC / SQLite / MySQL / 数据库 / D1** 等词。
+- 外部依赖能省则省；只认 Vault / PlaceholderAPI / WorldGuard 这类硬集成。
+- 全程 Paper/Bukkit 语义（事件 / 命令 / 调度任务 / Inventory GUI / config.yml / PDC），不要 Web/后端词汇。
+
+【paths：实现路径（直接级必须为空数组 []）】level != 直接 时给 1~3 条：
+- 简单级通常只给 1 条（仅供用户确认理解，不是让他选）。
+- 中等/复杂级：只有存在真实实现取舍分歧时才给 2~3 条；无实质分歧就给 1 条，**严禁为凑数造复杂或冗余方案**。每条都必须是最简可行实现。
+- 每条：{ "id":"p1", "title":"简短标题", "summary":"一句话取舍说明", "mermaid":"flowchart TD ...", "axes":["persistent","task"] }
+  · axes 填该路径点亮的深度轴（persistent/task/state_shared/external/gui_session）。
+
+【mermaid 内容约束】（随等级递增，每个图元素都要能对应 vector，图即 plan 自检源）：
+- 简单：flowchart，展示 触发源 → 分支判断 → 各分支动作。
+- 中等及以上：在此基础上标注状态读写节点（注释或不同形状区分）；定时/持续 task 用循环或子图。
+- 涉及外部插件：外部调用画成独立节点并标依赖方向。
+- 必须是合法可渲染的 mermaid flowchart；节点文字用中文并以 A["中文标签"] 形式包裹，避免括号/特殊字符导致语法错误。
+
+核心类型：${coreType}，MC 版本：${version}`,
+        user: `用户需求：${userPrompt}${clarifyBlock}${correctionBlock}\n\n请输出分级 JSON。`,
+    };
+}
+
 // ─── Planner ────────────────────────────────────────────────
+
+export interface PlannerGradeContext {
+    axes: string[];
+    chosenPath?: { title: string; summary: string; mermaid: string };
+}
 
 export function plannerPrompt(
     userPrompt: string,
     coreType: string,
     version: string,
     clarifyRounds?: ClarifyRound[],
+    gradeContext?: PlannerGradeContext,
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
         ? "\n\n用户已确认的决策（必须严格遵守）：\n" + clarifyRounds.flatMap(r =>
             r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
         ).join("\n")
         : "";
+
+    // 据分级结果点亮的深度轴，追加 plan 必须交代的章节（实现仍取最简）
+    const AXIS_REQ: Record<string, string> = {
+        persistent: "【持久化】只用 YAML 配置文件 或 PDC（PersistentDataContainer），禁止 SQL/JDBC/数据库；须写明：存什么、读写时机、由 Main.onDisable 落盘。",
+        task: "【调度任务】须写明：周期(periodTicks)或一次性、主线程约束、由 Main 启动并在 onDisable cancel。",
+        state_shared: "【共享状态】须写明：这份可变状态唯一写入方是谁、其他类只读、读取一致性如何保证（避免多处并发写）。",
+        external: "【外部硬集成】须在 plugin.yml 声明 depend/softdepend，写明缺失该插件时的降级行为；只用 Vault/PlaceholderAPI/WorldGuard 这类。",
+        gui_session: "【GUI 会话】须写明：会话状态存哪、InventoryClickEvent 点击如何路由、InventoryCloseEvent 关闭时如何清理。",
+    };
+    const axes = gradeContext?.axes ?? [];
+    const axisBlock = axes.length
+        ? "\n\n据复杂度分级，本需求点亮了以下轴，plan 必须覆盖对应内容（写进相关文件的 role），但实现一律取最简：\n"
+            + axes.map(a => "- " + (AXIS_REQ[a] || a)).join("\n")
+        : "";
+    const pathBlock = gradeContext?.chosenPath
+        ? `\n\n用户已选定的实现路径，plan 必须严格按此方案，且覆盖其流程图中每个元素：\n标题：${gradeContext.chosenPath.title}\n说明：${gradeContext.chosenPath.summary}\n流程图(mermaid)：\n${gradeContext.chosenPath.mermaid}`
+        : "";
+    const gradeBlock = axisBlock + pathBlock;
 
     return {
         system: `你是一个 Minecraft ${coreType} 插件项目规划器。根据用户需求输出一个 JSON 对象（不要输出其他内容），格式如下：
@@ -277,7 +384,7 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 - **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的 ManagerGen 类（自行管理 File + YamlConfiguration.loadConfiguration / save），并由 Main.onDisable 中触发落盘
 - **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
 - **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
-- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘`,
+- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}`,
         user: `${userPrompt}${clarifyBlock}`,
     };
 }

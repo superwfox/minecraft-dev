@@ -50,6 +50,9 @@
       <!-- 活动卡：手牌式需求确认（全屏覆盖） -->
       <ClarifyCards v-if="clarifyWaiting && genTask.clarifyTodos.length"/>
 
+      <!-- 活动卡：手牌式实现路径确认门（全屏覆盖） -->
+      <PathCards v-if="pathGateWaiting && genTask.grade && genTask.grade.paths.length"/>
+
       <!-- 活动卡：需求不明，请求补充 -->
       <div v-if="genTask.phase === 'awaiting_input'" class="more-input-wrap glass2">
         <div class="more-input-hint">{{ genTask.moreInputHint }}</div>
@@ -120,7 +123,8 @@ import {chatBlocks, resetChat} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo, interruptAnalyze} from "../logic/chatHandler";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
-import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting} from "../logic/generateState";
+import PathCards from "../components/PathCards.vue";
+import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting} from "../logic/generateState";
 import {startGenerate, interruptGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
@@ -168,6 +172,8 @@ const composerDisabled = computed(() =>
     sending.value
     || !!selectingBlock.value
     || genTask.phase === "clarifying"
+    || genTask.phase === "grading"
+    || genTask.phase === "confirming"
     || genTask.phase === "awaiting_input"
 );
 const composerPlaceholder = computed(() =>
@@ -182,7 +188,11 @@ const canRefresh = computed(() =>
 
 // ESC 仅在思考/需求确认阶段可中断
 const canInterrupt = computed(() =>
-    sending.value || genTask.phase === "clarifying" || genTask.phase === "awaiting_input"
+    sending.value
+    || genTask.phase === "clarifying"
+    || genTask.phase === "grading"
+    || genTask.phase === "confirming"
+    || genTask.phase === "awaiting_input"
 );
 
 const statusText = computed(() => {
@@ -191,6 +201,8 @@ const statusText = computed(() => {
     const p = genTask.phase;
     if (p === "planning") return "正在创建任务…";
     if (p === "clarifying") return clarifyWaiting.value ? "" : "正在生成确认问题…";
+    if (p === "grading") return "正在分析需求复杂度…";
+    if (p === "confirming") return pathGateWaiting.value ? "" : "正在准备实现路径…";
     if (p === "awaiting_input") return "请补充需求描述";
     if (p === "error") return "请调整需求后重试";
     if (fallbackText.value) return "对话中";
@@ -301,6 +313,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 const phaseLabels: Record<string, string> = {
     planning: "正在规划项目...",
     clarifying: "请确认澄清问题...",
+    grading: "正在分析复杂度...",
+    confirming: "请确认实现路径...",
     awaiting_input: "请补充需求描述...",
     generating: "正在生成代码...",
     verifying: "正在校验文件...",

@@ -1,4 +1,4 @@
-import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, cancelPendingInput } from "./generateState";
+import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput } from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 
@@ -6,8 +6,9 @@ const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
 
 // ── ESC 撤回中断（仅思考/需求确认阶段）──
-// clarify 阶段的 SSE fetch controller；ESC 时 abort 断流（后端 waitUntil 仍会读完并结算 token）
+// clarify / grade 阶段的 SSE fetch controller；ESC 时 abort 断流（后端 waitUntil 仍会读完并结算 token）
 let clarifyAbort: AbortController | null = null;
+let gradeAbort: AbortController | null = null;
 
 /** 判断错误是否来自 ESC 中断：fetch abort 抛 AbortError，等待 Promise 被拒抛 InterruptError */
 function isInterrupt(e: any): boolean {
@@ -18,6 +19,7 @@ function isInterrupt(e: any): boolean {
  *  token 花费由后端 clarify.ts 的 context.waitUntil 自动结算，前端无需处理。 */
 export function interruptGenerate() {
     clarifyAbort?.abort();
+    gradeAbort?.abort();
     cancelPendingInput();
 }
 
@@ -277,6 +279,19 @@ async function streamClarify(
     return readSSE(resp);
 }
 
+/** SSE streaming 复杂度分级（可带 correction 重画） */
+async function streamGrade(taskId: string, correction?: string): Promise<any> {
+    gradeAbort = new AbortController();
+    const resp = await fetch("/api/generate/grade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId, correction }),
+        signal: gradeAbort.signal,
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    return readSSE(resp);
+}
+
 /** SSE streaming build fix */
 async function streamBuildFix(taskId: string): Promise<any> {
     const resp = await fetch("/api/generate/fix", {
@@ -363,6 +378,42 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         return;
     }
 
+    // ── Phase 2.5: 复杂度分级 +（非直接级）实现路径确认门 ──
+    let chosenPathId: string | undefined;
+    try {
+        let correction: string | undefined;
+        while (true) {
+            genTask.reasoningContent = "";
+            setPhase("grading", "正在分析需求复杂度...");
+            const gradeRes = await streamGrade(genTask.taskId, correction);
+            correction = undefined;
+            // 直接级 / 兜底 → 走原路径，不出确认门
+            if (!gradeRes || gradeRes.direct) break;
+
+            // 非直接级：展示手牌路径门，等用户选路径或打回
+            genTask.grade = { level: gradeRes.level, paths: gradeRes.paths || [] };
+            setPhase("confirming", "请确认实现路径");
+            const choice = await waitForPathChoice();
+            if (choice.correction) {
+                correction = choice.correction;
+                genTask.grade = null;
+                continue; // 带修正重新分级
+            }
+            chosenPathId = choice.pathId;
+            genTask.grade = null;
+            break;
+        }
+    } catch (e: any) {
+        if (isInterrupt(e)) {
+            resetGenTask();
+            fetchMe();
+            return;
+        }
+        // 分级异常不阻断生成：按原路径继续（plan 仍会按 vector 注入轴要求）
+        genTask.grade = null;
+        genTask.logs.push("! 分级阶段异常，按原路径继续: " + (e.message || e));
+    }
+
     // ── Phase 3: planning + generating + build (with replan loop) ──
     for (let replanAttempt = 0; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
         try {
@@ -377,7 +428,7 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 ? "正在根据澄清结果生成项目规划..."
                 : `正在重新规划 (第${replanAttempt}次)...`);
 
-            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId });
+            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId, chosenPathId });
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;

@@ -48,5 +48,7 @@ public/maven.yml
 # Claude Code
 .claude/
 
+#reference
 font
 scripts
+planReference

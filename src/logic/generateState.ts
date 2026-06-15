@@ -1,6 +1,15 @@
 import { reactive, ref } from "vue";
 
-export type GenPhase = "idle" | "planning" | "clarifying" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
+export type GenPhase = "idle" | "planning" | "clarifying" | "grading" | "confirming" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
+
+export type GradePath = {
+    id: string;
+    title: string;
+    summary: string;
+    mermaid: string;
+    axes?: string[];
+};
+export type GradeInfo = { level: string; paths: GradePath[] };
 
 export type GeneratorType =
     | "CommandGen" | "ListenerGen" | "TaskGen" | "ManagerGen"
@@ -53,6 +62,7 @@ export type GenTask = {
     reasoningContent: string;
     reasoningVisible: boolean;
     moreInputHint: string;
+    grade: GradeInfo | null;
 };
 
 export const genTask = reactive<GenTask>({
@@ -74,6 +84,7 @@ export const genTask = reactive<GenTask>({
     reasoningContent: "",
     reasoningVisible: true,
     moreInputHint: "",
+    grade: null,
 });
 
 export function resetGenTask() {
@@ -95,7 +106,9 @@ export function resetGenTask() {
     genTask.reasoningContent = "";
     genTask.reasoningVisible = true;
     genTask.moreInputHint = "";
+    genTask.grade = null;
     clarifyWaiting.value = false;
+    pathGateWaiting.value = false;
 }
 
 // 中断标记：ESC 撤回时抛出，startGenerate 的 catch 据此安静复位
@@ -150,9 +163,40 @@ export function submitExtraPrompt(extra: string) {
     }
 }
 
-/** ESC 中断：拒绝任何正在等待用户输入的 Promise（澄清答题 / 补充描述） */
+// ── 实现路径确认门（confirming 阶段）：选路径 或 打回修正 ──
+export const pathGateWaiting = ref(false);
+let pathResolver: ((r: { pathId?: string; correction?: string }) => void) | null = null;
+let pathRejecter: ((e: any) => void) | null = null;
+
+export function waitForPathChoice(): Promise<{ pathId?: string; correction?: string }> {
+    pathGateWaiting.value = true;
+    return new Promise((resolve, reject) => {
+        pathResolver = resolve;
+        pathRejecter = reject;
+    });
+}
+function resolvePath(r: { pathId?: string; correction?: string }) {
+    if (pathResolver) {
+        const fn = pathResolver;
+        pathResolver = null;
+        pathRejecter = null;
+        pathGateWaiting.value = false;
+        fn(r);
+    }
+}
+export function submitPathChoice(pathId: string) { resolvePath({ pathId }); }
+export function submitPathReject(correction: string) { resolvePath({ correction }); }
+
+/** ESC 中断：拒绝任何正在等待用户输入的 Promise（澄清答题 / 补充描述 / 路径确认） */
 export function cancelPendingInput() {
     clarifyWaiting.value = false;
+    pathGateWaiting.value = false;
+    if (pathRejecter) {
+        const r = pathRejecter;
+        pathResolver = null;
+        pathRejecter = null;
+        r(new InterruptError());
+    }
     if (clarifyRejecter) {
         const r = clarifyRejecter;
         clarifyResolver = null;

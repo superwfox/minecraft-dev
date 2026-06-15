@@ -7,7 +7,7 @@ import type { GenPhase, GenTask } from "./generateState";
 const STORAGE_KEY = "tahai-session-v1";
 
 const INTERRUPTED_PHASES: GenPhase[] = [
-    "planning", "clarifying", "awaiting_input",
+    "planning", "clarifying", "grading", "confirming", "awaiting_input",
     "generating", "verifying", "uploading",
     "building", "polling", "fixing",
 ];
@@ -71,6 +71,7 @@ export function restoreSession() {
             genTask.reasoningContent = "";
             genTask.clarifyTodos = [];
             genTask.moreInputHint = "";
+            genTask.grade = null;
         }
     }
 }

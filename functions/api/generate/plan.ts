@@ -1,4 +1,5 @@
-import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem } from "../../_lib/prompts";
+import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem, type PlannerGradeContext } from "../../_lib/prompts";
+import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
@@ -174,7 +175,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds);
+    // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
+    const chosenPathId = body.chosenPathId as string | undefined;
+    if (state.grade?.gateRequired) {
+        if (chosenPathId) state.grade.chosenPathId = chosenPathId;
+        if (!state.grade.chosenPathId) {
+            return new Response(JSON.stringify({ error: "请先在确认门选择实现路径", code: "PATH_NOT_CONFIRMED" }), {
+                status: 400, headers: { "Content-Type": "application/json" },
+            });
+        }
+    }
+
+    // 据分级结果构建 plannerPrompt 的 gradeContext（点亮轴 + 所选路径）
+    let gradeContext: PlannerGradeContext | undefined;
+    if (state.grade?.vector) {
+        const axes = litAxes(state.grade.vector);
+        let chosenPath: PlannerGradeContext["chosenPath"];
+        const pid = state.grade.chosenPathId;
+        if (pid && Array.isArray(state.grade.paths)) {
+            const p = state.grade.paths.find((x: any) => x.id === pid);
+            if (p) chosenPath = { title: p.title, summary: p.summary, mermaid: p.mermaid };
+        }
+        if (axes.length || chosenPath) gradeContext = { axes, chosenPath };
+    }
+
+    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, gradeContext);
 
     const resp = await fetch(DEEPSEEK_URL, {
         method: "POST",
