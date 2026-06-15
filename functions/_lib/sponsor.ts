@@ -34,9 +34,13 @@ export function genCode(): string {
     return "TH-" + s;
 }
 
-/** 站长鉴权：会话 uid == env.ADMIN_UID（你的 GitHub uid，形如 gh_12345） */
+/** 站长鉴权：会话 uid == env.ADMIN_UID。宽容匹配——带不带 gh_ 前缀都认、忽略首尾空格，
+ *  支持逗号分隔多个管理员。你的 uid 形如 gh_65709399（gh_ + GitHub 数字 id）。 */
 export function isAdmin(uid: string | undefined | null, env: { ADMIN_UID?: string }): boolean {
-    return !!uid && !!env.ADMIN_UID && uid === env.ADMIN_UID;
+    if (!uid || !env.ADMIN_UID) return false;
+    const strip = (s: string) => s.trim().replace(/^gh_/, "");
+    const me = strip(String(uid));
+    return env.ADMIN_UID.split(",").some(a => strip(a) === me && me !== "");
 }
 
 const PENDING_TTL = 7 * 24 * 3600; // 7 天
