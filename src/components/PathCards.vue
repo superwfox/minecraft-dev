@@ -42,14 +42,24 @@
       </div>
     </div>
 
-    <!-- mermaid 全屏预览 -->
+    <!-- mermaid 全屏预览：可拖动 + 缩放 -->
     <div v-if="previewOpen" class="pc-preview" @click.self="closePreview">
       <div class="pc-preview-box">
         <div class="pc-preview-head">
-          <span>{{ previewTitle }}</span>
-          <button class="pc-preview-close" @click="closePreview">×</button>
+          <span class="pc-preview-name">{{ previewTitle }}</span>
+          <div class="pc-preview-tools">
+            <button class="pc-tool" @click="zoomBtn(-1)" title="缩小">－</button>
+            <button class="pc-tool" @click="fitView" title="适应窗口">适应</button>
+            <button class="pc-tool" @click="zoomBtn(1)" title="放大">＋</button>
+            <button class="pc-tool close" @click="closePreview" title="关闭">×</button>
+          </div>
         </div>
-        <div class="pc-preview-svg" v-html="previewSvg"></div>
+        <div class="pc-preview-canvas" ref="pvCanvas"
+             :class="{ grabbing: pvDragging }"
+             @pointerdown="pvDown" @wheel.prevent="pvWheel">
+          <div class="pc-preview-content" :style="pvStyle" v-html="previewSvg"></div>
+        </div>
+        <div class="pc-preview-hint">滚轮缩放 · 按住拖动平移 · Esc 关闭</div>
       </div>
     </div>
 
@@ -237,7 +247,10 @@ let mermaidMod: any = null;
 async function ensureMermaid() {
     if (mermaidMod) return mermaidMod;
     const m = (await import("mermaid")).default;
-    m.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" });
+    m.initialize({
+        startOnLoad: false, theme: "dark", securityLevel: "loose",
+        flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" },
+    });
     mermaidMod = m;
     return m;
 }
@@ -248,16 +261,77 @@ async function openPreview(card: CardKind | null) {
     if (!card) return;
     previewTitle.value = card.title;
     previewSvg.value = "<div class='pc-preview-loading'>渲染中…</div>";
+    pvScale.value = 1; pvX.value = 0; pvY.value = 0;
     previewOpen.value = true;
     try {
         const m = await ensureMermaid();
         const { svg } = await m.render("pcmmd-" + Math.random().toString(36).slice(2), card.mermaid);
-        if (previewOpen.value) previewSvg.value = svg;
+        if (previewOpen.value) {
+            previewSvg.value = svg;
+            await nextTick();
+            fitView();
+        }
     } catch {
         previewSvg.value = "<pre class='pc-preview-err'>流程图渲染失败，原始定义：\n" + escapeHtml(card.mermaid) + "</pre>";
     }
 }
 function closePreview() { previewOpen.value = false; }
+
+// ── 预览画布：拖动平移 + 滚轮/按钮缩放（transform-origin 0 0）──
+const pvCanvas = ref<HTMLElement | null>(null);
+const pvScale = ref(1);
+const pvX = ref(0);
+const pvY = ref(0);
+const pvDragging = ref(false);
+const pvStyle = computed(() => ({ transform: `translate(${pvX.value}px, ${pvY.value}px) scale(${pvScale.value})` }));
+const clampScale = (s: number) => Math.min(6, Math.max(0.15, s));
+
+let pvDrag: { x: number; y: number; ox: number; oy: number } | null = null;
+function pvDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    pvDrag = { x: e.clientX, y: e.clientY, ox: pvX.value, oy: pvY.value };
+    pvDragging.value = true;
+    window.addEventListener("pointermove", pvMove);
+    window.addEventListener("pointerup", pvUp);
+}
+function pvMove(e: PointerEvent) {
+    if (!pvDrag) return;
+    pvX.value = pvDrag.ox + (e.clientX - pvDrag.x);
+    pvY.value = pvDrag.oy + (e.clientY - pvDrag.y);
+}
+function pvUp() {
+    pvDrag = null;
+    pvDragging.value = false;
+    window.removeEventListener("pointermove", pvMove);
+    window.removeEventListener("pointerup", pvUp);
+}
+// 围绕某画布坐标点缩放，保持该点不动
+function zoomAt(cx: number, cy: number, factor: number) {
+    const ns = clampScale(pvScale.value * factor);
+    pvX.value = cx - (cx - pvX.value) * (ns / pvScale.value);
+    pvY.value = cy - (cy - pvY.value) * (ns / pvScale.value);
+    pvScale.value = ns;
+}
+function pvWheel(e: WheelEvent) {
+    const r = pvCanvas.value?.getBoundingClientRect();
+    if (!r) return;
+    zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+}
+function zoomBtn(inOut: number) {
+    const c = pvCanvas.value;
+    zoomAt(c ? c.clientWidth / 2 : 0, c ? c.clientHeight / 2 : 0, inOut > 0 ? 1.25 : 0.8);
+}
+function fitView() {
+    const c = pvCanvas.value; if (!c) return;
+    const svg = c.querySelector("svg") as SVGGraphicsElement | null;
+    let sw = svg?.clientWidth || 0, sh = svg?.clientHeight || 0;
+    if ((!sw || !sh) && svg?.getBBox) { try { const b = svg.getBBox(); sw = b.width; sh = b.height; } catch { /* */ } }
+    if (!sw || !sh) { pvScale.value = 1; pvX.value = 0; pvY.value = 0; return; }
+    const s = clampScale(Math.min(c.clientWidth / sw, c.clientHeight / sh) * 0.92);
+    pvScale.value = s;
+    pvX.value = (c.clientWidth - sw * s) / 2;
+    pvY.value = (c.clientHeight - sh * s) / 2;
+}
 
 // ── 打回修正 ──
 const rejectOpen = ref(false);
@@ -355,6 +429,8 @@ onUnmounted(() => {
     window.removeEventListener("pointermove", onDrag);
     window.removeEventListener("pointerup", endDrag);
     window.removeEventListener("pointercancel", endDrag);
+    window.removeEventListener("pointermove", pvMove);
+    window.removeEventListener("pointerup", pvUp);
     cancelAnimationFrame(rafId);
 });
 </script>
@@ -447,23 +523,45 @@ onUnmounted(() => {
     border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;
 }
 .pc-preview-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 18px; color: #f3e7d4; font-size: 15px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 14px 10px 18px; color: #f3e7d4; font-size: 15px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
-.pc-preview-close {
-    border: none; background: transparent; color: #f3e7d4; font-size: 24px; line-height: 1;
-    cursor: pointer; opacity: 0.7;
+.pc-preview-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-preview-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.pc-tool {
+    min-width: 32px; height: 30px; padding: 0 8px;
+    border: 1px solid rgba(255, 240, 225, 0.22); background: rgba(255, 255, 255, 0.06);
+    color: #f3e7d4; border-radius: 8px; font-size: 14px; line-height: 1; cursor: pointer;
 }
-.pc-preview-close:hover { opacity: 1; }
-.pc-preview-svg {
-    flex: 1; overflow: auto; padding: 20px;
-    display: flex; align-items: center; justify-content: center;
+.pc-tool:hover { background: rgba(255, 255, 255, 0.16); }
+.pc-tool.close { font-size: 20px; border-color: transparent; background: transparent; }
+
+.pc-preview-canvas {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    cursor: grab;
+    touch-action: none;
+    background:
+        radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 0) 0 0 / 22px 22px;
 }
-.pc-preview-svg :deep(svg) { max-width: none; height: auto; }
-.pc-preview-svg :deep(.pc-preview-loading) { color: rgba(255, 245, 235, 0.5); }
-.pc-preview-svg :deep(.pc-preview-err) {
-    color: #ff9a8a; font-size: 12px; white-space: pre-wrap; font-family: monospace;
+.pc-preview-canvas.grabbing { cursor: grabbing; }
+.pc-preview-content {
+    position: absolute;
+    left: 0; top: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+.pc-preview-content :deep(svg) { max-width: none !important; height: auto; display: block; }
+.pc-preview-content :deep(.pc-preview-loading) { color: rgba(255, 245, 235, 0.5); padding: 20px; }
+.pc-preview-content :deep(.pc-preview-err) {
+    color: #ff9a8a; font-size: 12px; white-space: pre-wrap; font-family: monospace; padding: 20px;
+}
+.pc-preview-hint {
+    padding: 7px 0; text-align: center;
+    font-size: 11px; color: rgba(255, 245, 235, 0.4);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 /* 打回 */
