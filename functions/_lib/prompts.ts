@@ -318,7 +318,7 @@ export function plannerPrompt(
 {
   "projectName": "插件名（英文，驼峰）",
   "javaVersion": "8|11|17|21",
-  "packageName": "com.example.pluginname",
+  "packageName": "com.tahai.pluginname",
   "mainBlueprint": {
     "events":   [ { "event": "PlayerJoinEvent", "listenerClass": "JoinListener", "priority": "NORMAL" } ],
     "commands": [ { "name": "setnotice", "executorClass": "SetNoticeCommand", "aliases": [], "permission": "plugin.cmd.setnotice" } ],
@@ -329,8 +329,8 @@ export function plannerPrompt(
   "files": [
     { "path": "pom.xml", "role": "Maven 构建配置", "order": 1, "depends": [], "generatorType": "FileRelatedGen", "tag": null },
     { "path": "src/main/resources/plugin.yml", "role": "插件描述文件", "order": 2, "depends": [], "generatorType": "ConfigGen", "tag": null },
-    { "path": "src/main/java/com/example/.../SetNoticeCommand.java", "role": "/setnotice 命令：CommandExecutor + TabCompleter", "order": 3, "depends": ["DataManager.java"], "generatorType": "CommandGen", "tag": null },
-    { "path": "src/main/java/com/example/.../Main.java", "role": "插件主类，注册所有命令/监听器/任务并管理生命周期", "order": 4, "depends": ["SetNoticeCommand.java","DataManager.java"], "generatorType": "MainGen", "tag": null }
+    { "path": "src/main/java/com/tahai/.../SetNoticeCommand.java", "role": "/setnotice 命令：CommandExecutor + TabCompleter", "order": 3, "depends": ["DataManager.java"], "generatorType": "CommandGen", "tag": null },
+    { "path": "src/main/java/com/tahai/.../Main.java", "role": "插件主类，注册所有命令/监听器/任务并管理生命周期", "order": 4, "depends": ["SetNoticeCommand.java","DataManager.java"], "generatorType": "MainGen", "tag": null }
   ]
 }
 
@@ -363,7 +363,7 @@ files[].generatorType 必须从下列枚举中精确选择：
 - files 按依赖拓扑排序：被依赖的文件 order 小，依赖方 order 大
 - 同深度（depends 互相不引用）的文件之间不能相互调用——若两个 leaf 都需要某 helper，把 helper 下沉为它们共同的依赖
 - path 使用 Maven 标准目录结构
-- 包名使用全小写
+- 包名使用全小写；**必须以 com.tahai 开头，形如 com.tahai.<插件名全小写>**，对应源码路径 src/main/java/com/tahai/<插件名>/...（禁止用 com.example）
 - 必须包含 plugin.yml（放 src/main/resources/，generatorType 为 ConfigGen）
 - 只输出 JSON，不要解释
 

@@ -28,7 +28,7 @@ INTENT:edit
 
 如果意图不是 chat，每个相关文件追加一个块：
 
-FILE create src/main/java/com/example/Foo.java
+FILE create src/main/java/com/tahai/Foo.java
 \`\`\`java
 完整文件内容
 \`\`\`

@@ -216,10 +216,10 @@ onMounted(async () => {
         }));
     if (!seed.length) {
         seed.push(
-            {path: "pom.xml", content: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project>\n    <groupId>com.example</groupId>\n    <artifactId>demo</artifactId>\n    <version>1.0.0</version>\n</project>\n", generatorType: "FileRelatedGen", role: "Maven 构建"},
-            {path: "src/main/java/com/example/Main.java", content: "package com.example;\n\nimport org.bukkit.plugin.java.JavaPlugin;\n\npublic class Main extends JavaPlugin {\n    @Override\n    public void onEnable() {\n        getLogger().info(\"Demo enabled\");\n    }\n}\n", generatorType: "MainGen", role: "插件主类"},
-            {path: "src/main/java/com/example/JoinListener.java", content: "package com.example;\n\nimport org.bukkit.event.EventHandler;\nimport org.bukkit.event.Listener;\nimport org.bukkit.event.player.PlayerJoinEvent;\n\npublic class JoinListener implements Listener {\n    @EventHandler\n    public void onJoin(PlayerJoinEvent e) {\n    }\n}\n", generatorType: "ListenerGen", role: "玩家加入监听"},
-            {path: "src/main/resources/plugin.yml", content: "name: Demo\nversion: 1.0\nmain: com.example.Main\napi-version: 1.21\n", generatorType: "FileRelatedGen", role: "插件描述"},
+            {path: "pom.xml", content: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project>\n    <groupId>com.tahai</groupId>\n    <artifactId>demo</artifactId>\n    <version>1.0.0</version>\n</project>\n", generatorType: "FileRelatedGen", role: "Maven 构建"},
+            {path: "src/main/java/com/tahai/Main.java", content: "package com.tahai;\n\nimport org.bukkit.plugin.java.JavaPlugin;\n\npublic class Main extends JavaPlugin {\n    @Override\n    public void onEnable() {\n        getLogger().info(\"Demo enabled\");\n    }\n}\n", generatorType: "MainGen", role: "插件主类"},
+            {path: "src/main/java/com/tahai/JoinListener.java", content: "package com.tahai;\n\nimport org.bukkit.event.EventHandler;\nimport org.bukkit.event.Listener;\nimport org.bukkit.event.player.PlayerJoinEvent;\n\npublic class JoinListener implements Listener {\n    @EventHandler\n    public void onJoin(PlayerJoinEvent e) {\n    }\n}\n", generatorType: "ListenerGen", role: "玩家加入监听"},
+            {path: "src/main/resources/plugin.yml", content: "name: Demo\nversion: 1.0\nmain: com.tahai.Main\napi-version: 1.21\n", generatorType: "FileRelatedGen", role: "插件描述"},
             {path: "src/main/resources/config.yml", content: "maintenance-mode: false\n", generatorType: "ConfigGen", role: "运行时配置"},
         );
     }
