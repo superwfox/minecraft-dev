@@ -129,6 +129,7 @@ export function plannerClarifyPrompt(
     coreType: string,
     version: string,
     priorRounds: ClarifyRound[],
+    skillContext?: string,
 ): { system: string; user: string } {
     const history = priorRounds.length
         ? "\n\n已完成的澄清轮次：\n" + priorRounds.map((r, i) =>
@@ -189,7 +190,7 @@ export function plannerClarifyPrompt(
 
 最多 5 轮澄清，其后即使还有模糊点也必须 done:true。
 
-核心类型：${coreType}，MC 版本：${version}`,
+核心类型：${coreType}，MC 版本：${version}${skillContext ?? ""}`,
         user: `用户原始需求：${userPrompt}${history}\n\n请产出本轮的 TodoList（若已充分覆盖则返回 done:true）。`,
     };
 }
@@ -202,6 +203,7 @@ export function graderPrompt(
     version: string,
     clarifyRounds?: ClarifyRound[],
     correction?: string,
+    skillContext?: string,
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
         ? "\n\n用户已确认的决策（分级与画图必须据此）：\n" + clarifyRounds.flatMap(r =>
@@ -272,7 +274,7 @@ export function graderPrompt(
 - 涉及外部插件：外部调用画成独立节点并标依赖方向。
 - 必须是合法可渲染的 mermaid flowchart；节点文字用中文并以 A["中文标签"] 形式包裹，避免括号/特殊字符导致语法错误。
 
-核心类型：${coreType}，MC 版本：${version}`,
+核心类型：${coreType}，MC 版本：${version}${skillContext ?? ""}`,
         user: `用户需求：${userPrompt}${clarifyBlock}${correctionBlock}\n\n请输出分级 JSON。`,
     };
 }
@@ -327,6 +329,21 @@ export function skillFileGenContext(bundles: SkillBundle[]): string {
         + "以下是用户挂载能力包的库坐标与骨架代码（pom 依赖 / 暴露符号 globals / Main 接线 main_wiring / Java 骨架）。\n"
         + "若本文件属于或涉及这些能力，请照抄其库坐标与骨架，按本项目包名与业务调整；不要臆造文档未给出的其它库。与本文件无关的能力包可忽略。\n\n"
         + blocks.join("\n\n────────\n\n");
+}
+
+/** 给 clarify / grade 阶段的能力引导：让澄清问题与分级都围绕已挂载能力来做 */
+export function skillClarifyContext(bundles: SkillBundle[]): string {
+    if (!bundles?.length) return "";
+    const blocks = bundles.map((b) => {
+        const lines = [`【能力包：${b.name}】`];
+        if (b.capability) lines.push(`能力：${b.capability}`);
+        if (b.usage) lines.push(`用法：\n${b.usage}`);
+        if (b.deny) lines.push(`⛔ 禁止：\n${b.deny}`);
+        return lines.join("\n");
+    });
+    return "\n\n══ 用户已挂载以下能力包（生成时会按此实现，分析需求时必须纳入考虑）══\n"
+        + blocks.join("\n\n")
+        + "\n\n要点：澄清问题 / 复杂度分级都要**优先围绕这些能力的落地细节**——要对接的服务端/地址/端口/凭证、目标对象（群号等）、要启用能力包里的哪些子功能、与现有业务如何衔接；不要问能力包已替用户决定好的事，也不要给出与能力包 deny 冲突的方向。";
 }
 
 export function plannerPrompt(

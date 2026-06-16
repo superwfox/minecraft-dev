@@ -330,7 +330,7 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     // ── Phase 1: create taskId (no plan yet) ──
     try {
         setPhase("planning", "正在创建任务...");
-        const initResult = await post("/api/generate/plan", { userPrompt, coreType, version });
+        const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds: [...selected] });
         genTask.taskId = initResult.taskId;
         fetchMe(); // 扣费后刷新顶栏剩余额度
     } catch (e: any) {

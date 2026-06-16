@@ -1,4 +1,4 @@
-import { plannerClarifyPrompt } from "../../_lib/prompts";
+import { plannerClarifyPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
 
@@ -129,8 +129,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 type: "phase", phase: "clarifying", round: state.clarifyRounds.length + 1,
             }));
 
+            const skillCtx = state.skills?.length ? skillClarifyContext(state.skills) : "";
             const { system, user } = plannerClarifyPrompt(
-                state.userPrompt, state.coreType, state.version, state.clarifyRounds,
+                state.userPrompt, state.coreType, state.version, state.clarifyRounds, skillCtx,
             );
             const callRes = await callReasonerStream(llm.url, llm.apiKey, llm.modelFor("pro"), system, user, writer, encoder);
             const content = callRes.content;

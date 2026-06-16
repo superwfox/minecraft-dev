@@ -1,4 +1,4 @@
-import { graderPrompt } from "../../_lib/prompts";
+import { graderPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/complexity";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
@@ -106,7 +106,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             await writer.write(sseEvent(encoder, { type: "phase", phase: "grading" }));
 
-            const { system, user } = graderPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, correction);
+            const skillCtx = state.skills?.length ? skillClarifyContext(state.skills) : "";
+            const { system, user } = graderPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, correction, skillCtx);
             const callRes = await callReasonerStream(llm.url, llm.apiKey, llm.modelFor("pro"), system, user, writer, encoder);
 
             if (!llm.byok && uid && callRes.usage) {

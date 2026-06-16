@@ -133,6 +133,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // ─── Mode 1: initialize task, no plan yet ───
     if (!body.taskId) {
         const { userPrompt, coreType, version } = body;
+        // 建任务即拉取已挂载 skill，让 clarify / grade / plan / fileGen 全程都能感知能力
+        const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
+        const skills = skillIds.length ? await getSkillBundles(context.env, skillIds) : [];
         const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const state = {
             taskId,
@@ -152,6 +155,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             currentBucket: 0,
             generatedFiles: [],
             currentFileIndex: 0,
+            skills,
             logs: ["任务已创建，进入澄清阶段"],
         };
         await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
