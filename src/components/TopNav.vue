@@ -3,7 +3,7 @@
     <div class="topnav-tabs">
       <router-link to="/ide" class="tab" :class="{ active: act('ide'), busy: ideBusy }">IDE</router-link>
       <router-link to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }">CHAT</router-link>
-      <router-link to="/skills" class="tab" :class="{ active: act('skills') }">Skill</router-link>
+      <router-link to="/skills" class="tab" :class="{ active: act('skills') }">SKILL</router-link>
     </div>
     <div class="topnav-status">{{ statusText }}</div>
   </nav>

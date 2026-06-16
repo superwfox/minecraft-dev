@@ -6,26 +6,35 @@
       <div class="sk-sub">
         <template v-if="skillsState.loading">正在从社区仓库加载…</template>
         <template v-else-if="skillsState.error">加载失败：{{ skillsState.error }}（可稍后刷新）</template>
-        <template v-else>
-          像安排手牌一样挑选能力 · 已收录 {{ skillsState.all.length }} 个 · 已选 {{ selected.length }}
-        </template>
+        <template v-else>像安排手牌一样挑选能力 · 已收录 {{ skillsState.all.length }} 个</template>
       </div>
       <div class="sk-contrib"><SkillSubmit/></div>
     </div>
 
+    <!-- 拖动方向提示 -->
+    <div class="sk-edge-hints" v-show="drag">
+      <div class="sk-edge-hint" :class="{ on: drag && drag.zone === 'collapse' }">
+        <span class="ar">↓</span>加入手牌
+      </div>
+    </div>
+
+    <canvas class="sk-fx" ref="fxRef"></canvas>
+
     <!-- 卡牌台（扇形手牌） -->
     <div class="sk-stage" ref="stageRef">
       <div
-        v-for="(c, idx) in cards"
+        v-for="c in cards"
+        v-show="cardShown(c)"
         :key="c.id"
         class="sk-card"
-        :style="outerStyle(c, idx)"
+        :class="{ grabbing: drag && drag.id === c.id }"
+        :style="outerStyle(c)"
       >
         <div
           class="sk-card-inner"
-          :class="{ active: activeId === c.id, readme: c.kind === 'readme', selected: c.kind === 'skill' && isSelected(c.brief!.id) }"
-          :style="innerStyle(c, idx)"
-          @click="openCard(c)"
+          :class="{ active: activeId === c.id, readme: c.kind === 'readme', grabbing: drag && drag.id === c.id }"
+          :style="innerStyle(c)"
+          @pointerdown="startDrag($event, c)"
         >
           <svg class="sk-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet">
             <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
@@ -40,12 +49,19 @@
               <span v-for="t in c.tags" :key="t" class="sk-tag">{{ t }}</span>
             </div>
           </div>
-          <div v-if="c.kind === 'skill' && isSelected(c.brief!.id)" class="sk-card-badge">已选</div>
         </div>
       </div>
     </div>
 
-    <div class="sk-hint">移动鼠标聚焦 · 按 Space 或点击查看详情</div>
+    <!-- 已选手牌（底部收集区，点击移出） -->
+    <div class="sk-tray" v-show="chosen.length">
+      <span class="sk-tray-label">我的手牌 · 点击移出</span>
+      <button v-for="b in chosen" :key="b.id" class="sk-chip" :style="chipStyle(b)" @click="unselect(b)">
+        {{ b.name || b.id }}
+      </button>
+    </div>
+
+    <div class="sk-hint">向下拖动卡片加入手牌 · 点击 / Space 查看详情</div>
 
     <!-- README 弹层 -->
     <Teleport to="body">
@@ -101,8 +117,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
-import { skillsState, selected, fetchSkills, isSelected, toggleSkill } from "../logic/skills";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { skillsState, fetchSkills, isSelected, toggleSkill, addSkill, removeSkill, selectedBriefs } from "../logic/skills";
 import type { SkillBrief } from "../logic/skills";
 import { renderMarkdown } from "../logic/miniMarkdown";
 import SkillSubmit from "../components/SkillSubmit.vue";
@@ -115,6 +131,10 @@ type SkCard = {
     tags: string[];
     color: string;
     brief?: SkillBrief;
+    exiting: null | "down";
+    entering: boolean;
+    relX: number;
+    relY: number;
 };
 
 const palette: Record<string, { bg: string; text: string; dot: string }> = {
@@ -126,96 +146,172 @@ const palette: Record<string, { bg: string; text: string; dot: string }> = {
     gray:   { bg: "#b4a695", text: "#403728", dot: "rgba(255,250,242,.6)" },
 };
 const skillColors = ["wheat", "orange", "brown", "cream", "gray"];
-
 const baseW = 184, baseH = 256;
 
-const cards = computed<SkCard[]>(() => {
+// ── 卡片（本地态，持退场/入场瞬态）──
+const cards = ref<SkCard[]>([]);
+function buildCards() {
     const list: SkCard[] = [{
         id: "__readme__", kind: "readme", color: "cocoa",
         label: "README", sub: "技能库说明 · 点击查看", tags: [],
+        exiting: null, entering: false, relX: 0, relY: 0,
     }];
     skillsState.all.forEach((b, i) => {
         list.push({
             id: b.id, kind: "skill", brief: b, color: skillColors[i % skillColors.length],
-            label: b.name || b.id,
-            sub: b.capability || b.description || "",
+            label: b.name || b.id, sub: b.capability || b.description || "",
             tags: (b.tags || []).slice(0, 3),
+            exiting: null, entering: false, relX: 0, relY: 0,
         });
     });
-    return list;
-});
+    cards.value = list;
+}
+watch(() => skillsState.all, buildCards, { immediate: true });
 
-// ── 扇形布局（移植 ClarifyCards）──
-const n = computed(() => cards.value.length);
+const colorOf = (id: string) => cards.value.find((c) => c.id === id)?.color ?? "wheat";
+
+// 卡是否在手牌区显示：README 始终；skill 仅未选（退场动画期间仍显示）
+function cardShown(c: SkCard): boolean {
+    return !!c.exiting || c.kind === "readme" || !isSelected(c.brief!.id);
+}
+// 参与扇形布局的卡（退场中的不占位 → 手牌立即收拢）
+const laidOut = computed(() => cards.value.filter((c) => !c.exiting && (c.kind === "readme" || !isSelected(c.brief!.id))));
+const chosen = computed(() => selectedBriefs());
+
+// ── 扇形布局 ──
+const n = computed(() => laidOut.value.length);
 const globalScale = computed(() => Math.max(0.58, Math.min(1.0, 1.0 - (n.value - 5) * 0.045)));
 const step = computed(() => baseW * globalScale.value * 0.5);
-
 const slots = computed(() => {
     const cnt = n.value, mid = (cnt - 1) / 2;
     const spread = Math.min(5.5, 24 / Math.max(cnt, 1));
-    const map: Record<string, { x: number; rot: number; arc: number }> = {};
-    cards.value.forEach((c, idx) => {
+    const map: Record<string, { x: number; rot: number; arc: number; idx: number }> = {};
+    laidOut.value.forEach((c, idx) => {
         const d = idx - mid;
-        map[c.id] = { x: d * step.value, rot: d * spread, arc: d * d * 1.6 };
+        map[c.id] = { x: d * step.value, rot: d * spread, arc: d * d * 1.6, idx };
     });
     return map;
 });
 
 const activeId = ref<string | null>(null);
 const stageRef = ref<HTMLElement | null>(null);
+const drag = ref<any>(null);
 
-function geom(card: SkCard, idx: number) {
-    const slot = slots.value[card.id];
-    if (!slot) return { x: 0, y: 0, rot: 0, scale: 1, z: 1 };
+function geom(card: SkCard) {
     const bs = globalScale.value;
+    if (drag.value && drag.value.id === card.id) {
+        const d = drag.value;
+        return { x: d.baseX + d.dx, y: d.baseY + d.dy, rot: 0, scale: bs * 1.18, opacity: 1, z: 1000 };
+    }
+    if (card.exiting === "down") return { x: card.relX, y: card.relY + 220, rot: 4, scale: bs * 0.62, opacity: 0.15, z: 999 };
+    const slot = slots.value[card.id];
+    if (!slot) return null;
+    if (card.entering) return { x: slot.x, y: slot.arc + 170, rot: 0, scale: bs * 0.6, opacity: 0, z: 60 };
     const active = activeId.value === card.id;
-    let rot = slot.rot, y = slot.arc, scale = bs, z = idx + 1;
+    let rot = slot.rot, y = slot.arc, scale = bs, z = slot.idx + 1;
     if (active) { rot = 0; y = slot.arc - 46; scale = bs * 1.16; z = 200; }
-    return { x: slot.x, y, rot, scale, z };
+    return { x: slot.x, y, rot, scale, opacity: 1, z };
 }
-function outerStyle(card: SkCard, idx: number) {
-    const g = geom(card, idx);
+function outerStyle(card: SkCard) {
+    const g = geom(card); if (!g) return { display: "none" };
     return {
-        width: baseW + "px", height: baseH + "px", zIndex: g.z,
+        width: baseW + "px", height: baseH + "px", zIndex: g.z, opacity: g.opacity,
         transform: `translate(-50%,-50%) translate(${g.x}px, ${g.y}px)`,
     };
 }
-function innerStyle(card: SkCard, idx: number) {
-    const g = geom(card, idx);
+function innerStyle(card: SkCard) {
+    const g = geom(card); if (!g) return {};
     return {
         background: palette[card.color].bg, color: palette[card.color].text,
         transform: `rotate(${g.rot}deg) scale(${g.scale})`,
     };
 }
 const dotColor = (card: SkCard) => palette[card.color].dot;
+const chipStyle = (b: SkillBrief) => {
+    const c = palette[colorOf(b.id)] ?? palette.wheat;
+    return { background: c.bg, color: c.text };
+};
 
-// 悬停聚焦：鼠标 x 选最近卡
+// 悬停聚焦
 function onMove(e: MouseEvent) {
+    if (drag.value) return;
     const el = stageRef.value; if (!el) return;
     const r = el.getBoundingClientRect();
     const cx = e.clientX - (r.left + r.width / 2), cy = e.clientY - (r.top + r.height / 2);
     if (Math.abs(cy) > baseH * globalScale.value * 0.6 + 80) { activeId.value = null; return; }
     let best: string | null = null, bestDist = Infinity;
-    for (const c of cards.value) {
+    for (const c of laidOut.value) {
         const dist = Math.abs(cx - slots.value[c.id].x);
         if (dist < bestDist) { bestDist = dist; best = c.id; }
     }
     activeId.value = bestDist <= step.value + baseW * globalScale.value * 0.5 ? best : null;
 }
 
+// ── 拖拽：向下拖入手牌（collapse）；小位移=点击预览 ──
+function zoneFor(y: number): "collapse" | "none" {
+    return y > window.innerHeight * 0.8 ? "collapse" : "none";
+}
+function startDrag(e: PointerEvent, card: SkCard) {
+    if (e.button !== 0 || card.exiting) return;
+    e.preventDefault();
+    const g = geom(card); if (!g) return;
+    const sc = globalScale.value * 1.18;
+    drag.value = {
+        id: card.id, startX: e.clientX, startY: e.clientY,
+        baseX: g.x, baseY: g.y, dx: 0, dy: 0, zone: "none",
+        halfW: baseW * sc / 2, halfH: baseH * sc / 2, color: palette[card.color].bg,
+    };
+    activeId.value = null;
+    window.addEventListener("pointermove", onDrag);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+}
+function onDrag(e: PointerEvent) {
+    const d = drag.value; if (!d) return;
+    d.dx = e.clientX - d.startX;
+    d.dy = e.clientY - d.startY;
+    d.zone = zoneFor(e.clientY);
+}
+function endDrag() {
+    const d = drag.value; if (!d) return;
+    window.removeEventListener("pointermove", onDrag);
+    window.removeEventListener("pointerup", endDrag);
+    window.removeEventListener("pointercancel", endDrag);
+    const card = cards.value.find((c) => c.id === d.id);
+    const zone = d.zone;
+    const moved = Math.hypot(d.dx, d.dy);
+    if (card) { card.relX = d.baseX + d.dx; card.relY = d.baseY + d.dy; }
+    drag.value = null;
+    if (!card) return;
+    // 几乎没动 = 点击 → 预览
+    if (moved < 8) { openCard(card); return; }
+    // 向下拖入手牌（README 不可选 → 回弹）
+    if (zone === "collapse" && card.kind === "skill") {
+        card.exiting = "down";
+        setTimeout(() => { card.exiting = null; addSkill(card.brief!.id); }, 360);
+    }
+}
+
+// 从手牌移出（点 chip）→ 回扇形，入场动画
+function unselect(b: SkillBrief) {
+    removeSkill(b.id);
+    const c = cards.value.find((x) => x.id === b.id);
+    if (c) {
+        c.entering = true;
+        requestAnimationFrame(() => requestAnimationFrame(() => { c.entering = false; }));
+    }
+}
+
 // ── 弹层 ──
 const readmeOpen = ref(false);
 const detail = ref<SkillBrief | null>(null);
 const readmeHtml = computed(() => renderMarkdown(skillsState.readme) || "<p>（暂无说明）</p>");
-
 function openCard(c: SkCard) {
     if (c.kind === "readme") readmeOpen.value = true;
     else detail.value = c.brief || null;
 }
-
 function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") { readmeOpen.value = false; detail.value = null; return; }
-    // 延续 mermaid 卡片操作逻辑：聚焦某卡后按 Space 查看详情（再按 / Esc 关闭）
     if (e.key === " " || e.code === "Space") {
         if (readmeOpen.value || detail.value) { e.preventDefault(); readmeOpen.value = false; detail.value = null; return; }
         const c = cards.value.find((x) => x.id === activeId.value);
@@ -223,14 +319,71 @@ function onKey(e: KeyboardEvent) {
     }
 }
 
+// ── 粒子流（向下喷发，移植 reference）──
+const fxRef = ref<HTMLCanvasElement | null>(null);
+let particles: any[] = [], rafId = 0, last = 0;
+const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function fxFrame(t: number) {
+    rafId = requestAnimationFrame(fxFrame);
+    const cv = fxRef.value as any; if (!cv) return;
+    const ctx = cv._ctx || (cv._ctx = cv.getContext("2d"));
+    const dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth, h = window.innerHeight;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+        cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const dt = Math.min(34, (t - last) || 16); last = t;
+    const k = dt / 16;
+
+    const d = drag.value;
+    if (d && !reduce && d.zone === "collapse" && stageRef.value) {
+        const r = stageRef.value.getBoundingClientRect();
+        const cx = r.left + r.width / 2 + d.baseX + d.dx;
+        const cy = r.top + r.height / 2 + d.baseY + d.dy;
+        const anchorY = Math.min(cy + d.halfH, h - 24);
+        for (let i = 0; i < 7; i++) {
+            const inward = Math.random();
+            particles.push({
+                x: cx + (Math.random() * 2 - 1) * d.halfW * 0.9,
+                y: anchorY - inward * 150,
+                vx: (Math.random() * 2 - 1) * 0.6,
+                vy: 1.3 + Math.random() * 1.7,
+                r0: (3 + inward * 11) * (0.85 + Math.random() * 0.3),
+                life: 1, decay: 1 / (40 + Math.random() * 34),
+                color: d.color,
+            });
+        }
+        if (particles.length > 360) particles.splice(0, particles.length - 360);
+    }
+
+    ctx.clearRect(0, 0, w, h);
+    for (const p of particles) { p.x += p.vx * k; p.y += p.vy * k; p.life -= p.decay * k; }
+    particles = particles.filter((p) => p.life > 0);
+    ctx.globalCompositeOperation = "lighter";
+    for (const p of particles) {
+        ctx.globalAlpha = p.life < 0 ? 0 : p.life;
+        ctx.fillStyle = p.color;
+        const rr = p.r0 * p.life;
+        ctx.beginPath(); ctx.arc(p.x, p.y, rr > 0.4 ? rr : 0.4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+}
+
 onMounted(() => {
     fetchSkills();
     window.addEventListener("mousemove", onMove, { passive: true });
     window.addEventListener("keydown", onKey);
+    rafId = requestAnimationFrame(fxFrame);
 });
 onUnmounted(() => {
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("keydown", onKey);
+    window.removeEventListener("pointermove", onDrag);
+    window.removeEventListener("pointerup", endDrag);
+    window.removeEventListener("pointercancel", endDrag);
+    cancelAnimationFrame(rafId);
 });
 </script>
 
@@ -256,37 +409,39 @@ onUnmounted(() => {
     text-align: center;
     padding: 0 24px;
 }
-.sk-title {
-    font-family: "ZhuoKai", sans-serif;
-    font-size: 24px;
-    color: #f3e7d4;
-    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
-}
-.sk-sub {
-    font-size: 13px;
-    color: rgba(255, 245, 235, 0.5);
-    letter-spacing: 0.03em;
-}
-.sk-contrib {
-    margin-top: 10px;
-    pointer-events: auto;
-}
+.sk-title { font-family: "ZhuoKai", sans-serif; font-size: 24px; color: #f3e7d4; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5); }
+.sk-sub { font-size: 13px; color: rgba(255, 245, 235, 0.5); letter-spacing: 0.03em; }
+.sk-contrib { margin-top: 10px; pointer-events: auto; }
 
-.sk-stage {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 54%;
-    height: 0;
+.sk-edge-hints {
+    position: fixed;
+    left: 0; right: 0;
+    bottom: 17vh;
+    z-index: 600;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
 }
+.sk-edge-hint {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 13px; letter-spacing: 0.12em; color: rgba(255, 245, 235, 0.4);
+    transition: color 0.2s ease, transform 0.2s cubic-bezier(.34, 1.56, .64, 1);
+}
+.sk-edge-hint .ar { font-size: 22px; line-height: 1; }
+.sk-edge-hint.on { color: #8fd16a; transform: scale(1.22); }
+
+.sk-fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1500; }
+
+.sk-stage { position: absolute; left: 0; right: 0; top: 52%; height: 0; }
 
 .sk-card {
     position: absolute;
     left: 50%;
     top: 0;
     will-change: transform;
-    transition: transform 0.5s cubic-bezier(.34, 1.56, .64, 1);
+    transition: transform 0.5s cubic-bezier(.34, 1.56, .64, 1), opacity 0.35s ease;
 }
+.sk-card.grabbing { transition: none; }
 .sk-card-inner {
     position: relative;
     width: 100%;
@@ -295,90 +450,53 @@ onUnmounted(() => {
     padding: 16px 15px;
     display: flex;
     flex-direction: column;
-    cursor: pointer;
+    cursor: grab;
+    touch-action: none;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     background-image: linear-gradient(155deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .06));
     transition: transform 0.5s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.35s ease;
 }
 .sk-card-inner.active { box-shadow: 0 12px 44px rgba(255, 180, 120, .28), 0 8px 24px rgba(0, 0, 0, .5); }
-.sk-card-inner.selected { box-shadow: 0 12px 44px rgba(143, 209, 106, .35), 0 8px 24px rgba(0, 0, 0, .5); }
+.sk-card-inner.grabbing { cursor: grabbing; box-shadow: 0 16px 60px rgba(143, 209, 106, .3), 0 12px 30px rgba(0, 0, 0, .55); }
 .sk-card-inner.readme { background-image: linear-gradient(155deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .14)); }
 
 .sk-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
-.sk-card-top {
-    position: relative;
-    z-index: 2;
-    font-size: 11px;
-    opacity: 0.7;
-    letter-spacing: 0.05em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.sk-card-body {
-    position: relative;
-    z-index: 2;
-    margin-top: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-}
-.sk-card-label {
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1.25;
-    word-break: break-word;
-}
-.sk-card-desc {
-    font-size: 12px;
-    line-height: 1.4;
-    opacity: 0.78;
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-}
+.sk-card-top { position: relative; z-index: 2; font-size: 11px; opacity: 0.7; letter-spacing: 0.05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sk-card-body { position: relative; z-index: 2; margin-top: auto; display: flex; flex-direction: column; gap: 7px; }
+.sk-card-label { font-size: 18px; font-weight: 700; line-height: 1.25; word-break: break-word; }
+.sk-card-desc { font-size: 12px; line-height: 1.4; opacity: 0.78; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .sk-card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-.sk-tag {
-    font-size: 10px;
-    padding: 1px 7px;
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.18);
-    opacity: 0.85;
-}
-.sk-card-badge {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    z-index: 3;
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 8px;
-    background: rgba(60, 120, 40, 0.85);
-    color: #eaffd8;
-}
+.sk-tag { font-size: 10px; padding: 1px 7px; border-radius: 7px; background: rgba(0, 0, 0, 0.18); opacity: 0.85; }
 
-.sk-empty {
+/* 已选手牌收集区 */
+.sk-tray {
     position: fixed;
-    top: 50%;
-    left: 0;
-    right: 0;
-    text-align: center;
-    color: rgba(255, 245, 235, 0.45);
+    bottom: 0; left: 0; right: 0;
+    min-height: 13vh;
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 22px 24px 18px;
+    background: linear-gradient(0deg, rgba(143, 209, 106, 0.06), transparent);
+}
+.sk-tray-label { position: absolute; top: 4px; left: 0; right: 0; text-align: center; font-size: 12px; letter-spacing: 0.06em; opacity: 0.45; pointer-events: none; }
+.sk-chip {
+    border: none;
+    border-radius: 11px;
+    padding: 9px 16px;
+    cursor: pointer;
+    font-weight: 700;
     font-size: 14px;
-    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    transition: transform 0.18s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.18s ease;
 }
-.sk-hint {
-    position: fixed;
-    bottom: 26px;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 12px;
-    color: rgba(255, 245, 235, 0.4);
-    pointer-events: none;
-}
+.sk-chip:hover { transform: translateY(-4px); box-shadow: 0 10px 22px rgba(0, 0, 0, 0.6); }
+.sk-chip:active { transform: translateY(-1px) scale(0.96); }
+
+.sk-hint { position: fixed; bottom: 26px; left: 0; right: 0; text-align: center; font-size: 12px; color: rgba(255, 245, 235, 0.4); pointer-events: none; z-index: 501; }
 
 /* 弹层 */
 .sk-overlay {
@@ -395,33 +513,10 @@ onUnmounted(() => {
     animation: skFade 0.2s ease-out;
 }
 @keyframes skFade { from { opacity: 0; } to { opacity: 1; } }
-.sk-modal {
-    flex-direction: column;
-    width: min(760px, 94vw);
-    max-height: 100%;
-    border-radius: 18px !important;
-    padding: 0 !important;
-    overflow: hidden;
-    color: #f3e7d4;
-}
-.sk-modal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 20px;
-    border-bottom: 1px solid rgba(255, 240, 225, 0.12);
-    flex-shrink: 0;
-}
+.sk-modal { flex-direction: column; width: min(760px, 94vw); max-height: 100%; border-radius: 18px !important; padding: 0 !important; overflow: hidden; color: #f3e7d4; }
+.sk-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid rgba(255, 240, 225, 0.12); flex-shrink: 0; }
 .sk-modal-title { font-size: 18px; font-weight: 700; color: wheat; }
-.sk-x {
-    border: none;
-    background: transparent;
-    color: rgba(255, 245, 235, 0.6);
-    font-size: 16px;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 8px;
-}
+.sk-x { border: none; background: transparent; color: rgba(255, 245, 235, 0.6); font-size: 16px; cursor: pointer; padding: 4px 8px; border-radius: 8px; }
 .sk-x:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 
 .sk-md { padding: 18px 22px 24px; overflow: auto; line-height: 1.65; font-size: 14px; }
@@ -450,38 +545,21 @@ onUnmounted(() => {
 .sk-detail .sk-card-tags { padding: 10px 20px 0; }
 .sk-struct { padding: 14px 20px 0; }
 .sk-struct-title { font-size: 12px; color: rgba(255, 245, 235, 0.5); margin-bottom: 6px; }
-.sk-struct-row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 4px 0;
-    border-top: 1px solid rgba(255, 240, 225, 0.06);
-    font-size: 12px;
-}
+.sk-struct-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(255, 240, 225, 0.06); font-size: 12px; }
 .sk-struct-kind { font-size: 10px; padding: 1px 6px; border-radius: 6px; flex-shrink: 0; }
 .sk-struct-kind.gen { background: rgba(224, 149, 74, 0.25); color: #f0c79a; }
 .sk-struct-kind.ref { background: rgba(180, 166, 149, 0.22); color: #d8cdbd; }
 .sk-struct-file { font-family: "Monaco", monospace; color: #f3e7d4; }
 .sk-struct-gen { color: #ffd98a; font-size: 11px; }
 .sk-struct-role { color: rgba(255, 245, 235, 0.55); }
-
 .sk-detail-actions { padding: 18px 20px 0; display: flex; justify-content: flex-end; }
-.sk-btn {
-    border: 1px solid rgba(255, 240, 225, 0.28);
-    background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4;
-    border-radius: 11px;
-    padding: 9px 22px;
-    font-size: 14px;
-    cursor: pointer;
-    transition: background 0.15s, transform 0.15s;
-}
+.sk-btn { border: 1px solid rgba(255, 240, 225, 0.28); background: rgba(255, 255, 255, 0.08); color: #f3e7d4; border-radius: 11px; padding: 9px 22px; font-size: 14px; cursor: pointer; transition: background 0.15s, transform 0.15s; }
 .sk-btn:hover { transform: translateY(-1px); }
 .sk-btn.primary { background: wheat; color: #1c1812; border-color: wheat; font-weight: 700; }
 .sk-btn.ghost { background: transparent; opacity: 0.7; }
 .sk-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
 
 @media (prefers-reduced-motion: reduce) {
-    .sk-card { transition: transform 0.15s linear; }
+    .sk-card, .sk-card-inner { transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear; }
 }
 </style>
