@@ -10,6 +10,7 @@
           像安排手牌一样挑选能力 · 已收录 {{ skillsState.all.length }} 个 · 已选 {{ selected.length }}
         </template>
       </div>
+      <div class="sk-contrib"><SkillSubmit/></div>
     </div>
 
     <!-- 卡牌台（扇形手牌） -->
@@ -104,6 +105,7 @@ import { ref, computed, onMounted, onUnmounted } from "vue";
 import { skillsState, selected, fetchSkills, isSelected, toggleSkill } from "../logic/skills";
 import type { SkillBrief } from "../logic/skills";
 import { renderMarkdown } from "../logic/miniMarkdown";
+import SkillSubmit from "../components/SkillSubmit.vue";
 
 type SkCard = {
     id: string;
@@ -264,6 +266,10 @@ onUnmounted(() => {
     font-size: 13px;
     color: rgba(255, 245, 235, 0.5);
     letter-spacing: 0.03em;
+}
+.sk-contrib {
+    margin-top: 10px;
+    pointer-events: auto;
 }
 
 .sk-stage {

@@ -15,7 +15,7 @@ interface Env {
 
 // 需要登录的（贵）端点
 function needsAuth(path: string): boolean {
-    return path.startsWith("/api/generate/") || path === "/api/chat" || path === "/api/stream";
+    return path.startsWith("/api/generate/") || path === "/api/chat" || path === "/api/stream" || path === "/api/skills/submit";
 }
 
 // 需要 IP 限流的端点（避开 IDE 高频的 /api/maven/jar 与 /api/voice-auth）
@@ -45,8 +45,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         if (!session) {
             return json({ error: "请先登录", code: "AUTH_REQUIRED" }, 401);
         }
-        // 透传 uid 给下游 handler（按金额扣费、build 限额都需要）
+        // 透传 uid / login 给下游 handler（扣费/限额需要 uid；skill 上传 PR @mention 需要 login）
         (context.data as any).uid = session.uid;
+        (context.data as any).login = session.login;
 
         // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
         if (path === "/api/generate/plan") {
