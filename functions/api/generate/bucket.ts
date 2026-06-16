@@ -1,11 +1,12 @@
-import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
+import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
-const MAX_REWORK = 5;
+const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
 const DEFAULT_CONCURRENCY = 2;
+const LLM_TIMEOUT_MS = 150000; // 单次 LLM 调用上限，超时 abort，避免某次 hang 拖垮整桶导致前端「无返回」
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -77,18 +78,25 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
     }
     if (jsonMode) body.response_format = { type: "json_object" };
 
-    const resp = await fetchWithBackoff(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json() as any;
-    return {
-        content: data.choices?.[0]?.message?.content ?? "",
-        model,
-        usage: data.usage,
-    };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    try {
+        const resp = await fetchWithBackoff(llm.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json() as any;
+        return {
+            content: data.choices?.[0]?.message?.content ?? "",
+            model,
+            usage: data.usage,
+        };
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /**
@@ -112,43 +120,50 @@ async function callAIStream(
         body.thinking = { type: "enabled" };
     }
 
-    const resp = await fetchWithBackoff(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    try {
+        const resp = await fetchWithBackoff(llm.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let full = "";
-    let buffer = "";
-    let usage: UsageBreakdown | undefined;
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        let buffer = "";
+        let usage: UsageBreakdown | undefined;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                const chunk = JSON.parse(payload);
-                const delta = chunk.choices?.[0]?.delta?.content;
-                if (delta) {
-                    full += delta;
-                    await writer.write(sseEvent(encoder, { type: "delta", path: pathTag, content: delta }));
-                }
-                if (chunk.usage) usage = chunk.usage;
-            } catch { /* skip */ }
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                try {
+                    const chunk = JSON.parse(payload);
+                    const delta = chunk.choices?.[0]?.delta?.content;
+                    if (delta) {
+                        full += delta;
+                        await writer.write(sseEvent(encoder, { type: "delta", path: pathTag, content: delta }));
+                    }
+                    if (chunk.usage) usage = chunk.usage;
+                } catch { /* skip */ }
+            }
         }
+        return { content: full, model, usage };
+    } finally {
+        clearTimeout(timer);
     }
-    return { content: full, model, usage };
 }
 
 interface FileGenOutput {
@@ -181,7 +196,8 @@ async function generateAndCheckFile(
     state.logs.push(`▸ 正在生成 ${filePath}`);
 
     const slice = computeSlice(target, blueprint);
-    const dispatched = dispatchGen(target, ctx, summaries, slice);
+    const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx);
     const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath);
     await charge(initialRes);
     let content = stripFences(initialRes.content);
@@ -229,7 +245,7 @@ async function generateAndCheckFile(
                         path: newPath, role: newRole, order: 0,
                         generatorType: inferGeneratorType(className, newPath),
                     };
-                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
+                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx);
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
                     const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath);
                     await charge(subRes);
@@ -299,11 +315,13 @@ async function generateAndCheckFile(
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex } = await context.request.json() as any;
     const llm = await resolveLLM(context);
-    const concurrency = Math.max(1, parseInt(context.env.GEN_CONCURRENCY || "") || DEFAULT_CONCURRENCY);
+    let concurrency = Math.max(1, parseInt(context.env.GEN_CONCURRENCY || "") || DEFAULT_CONCURRENCY);
 
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    // 挂了 skill 的任务：prompt 更大、文件更多，降并发到 1，避免大 prompt × 并发撞 CF Worker 限制
+    if (state.skills?.length) concurrency = 1;
 
     if (state.quotaExhausted) {
         return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {

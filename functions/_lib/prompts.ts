@@ -311,16 +311,26 @@ export function skillPlannerContext(bundles: SkillBundle[]): string {
         + blocks.join("\n\n");
 }
 
-/** 给 FileGen 的照抄参考段（各 md 全文：pom 坐标 / globals / main_wiring / 骨架代码） */
+// 蒸馏 skill md：只留 frontmatter（pom/globals/depends/main_wiring）+ 代码块，去掉散文，控制注入体积
+function distillSkillMd(md: string): string {
+    const fm = md.match(/^---\n([\s\S]*?)\n---/);
+    const front = fm ? fm[1].trim() : "";
+    const codes = [...md.matchAll(/```[\w-]*\n([\s\S]*?)```/g)].map((m) => m[1].replace(/\s+$/, "")).join("\n\n");
+    const out: string[] = [];
+    if (front) out.push(front);
+    if (codes) out.push("```java\n" + codes + "\n```");
+    return out.length ? out.join("\n\n") : md;
+}
+
+/** 给 FileGen 的照抄参考段（精炼：pom 坐标 + 暴露符号 + 骨架代码，去散文控体积；usage 教学已在前序阶段注入） */
 export function skillFileGenContext(bundles: SkillBundle[]): string {
     if (!bundles?.length) return "";
     const blocks = bundles.map((b) => {
         const parts = [`【能力包：${b.name}】${b.capability ? " — " + b.capability : ""}`];
         if (b.deny) parts.push(`⛔ 绝对禁止（违反即视为错误，必须严格遵守）：\n${b.deny}`);
-        if (b.usage) parts.push(`【用法教学】\n${b.usage}`);
         const files = b.files.map((f) => {
             const tag = f.kind === "gen" ? `gen/${f.fileGen || "?"}` : "ref";
-            return `── ${f.file}（${tag}）${f.role ? "：" + f.role : ""} ──\n${f.body}`;
+            return `── ${f.file}（${tag}）${f.role ? "：" + f.role : ""} ──\n${distillSkillMd(f.body)}`;
         }).join("\n\n");
         parts.push(files);
         return parts.join("\n\n");
