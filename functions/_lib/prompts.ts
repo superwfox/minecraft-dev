@@ -273,6 +273,7 @@ export function graderPrompt(
 - 中等及以上：在此基础上标注状态读写节点（注释或不同形状区分）；定时/持续 task 用循环或子图。
 - 涉及外部插件：外部调用画成独立节点并标依赖方向。
 - 必须是合法可渲染的 mermaid flowchart；节点文字用中文并以 A["中文标签"] 形式包裹，避免括号/特殊字符导致语法错误。
+- 不要用 style / classDef 给节点自定义填充色或文字色（深色背景下常不可读）；统一用默认主题配色，强调关键节点请靠形状（菱形判断、子图分组）而非颜色。
 
 核心类型：${coreType}，MC 版本：${version}${skillContext ?? ""}`,
         user: `用户需求：${userPrompt}${clarifyBlock}${correctionBlock}\n\n请输出分级 JSON。`,

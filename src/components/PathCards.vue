@@ -514,11 +514,11 @@ onUnmounted(() => {
 .pc-preview {
     position: fixed; inset: 0; z-index: 2000;
     background: rgba(0, 0, 0, 0.78);
-    display: flex; align-items: center; justify-content: center; padding: 5vh 4vw;
+    display: flex; align-items: flex-start; justify-content: center; padding: 92px 4vw 24px;
     animation: pcFadeIn 0.18s ease-out;
 }
 .pc-preview-box {
-    width: 92vw; height: 90vh; max-width: 1400px;
+    width: 92vw; height: calc(100vh - 116px); max-width: 1400px;
     background: rgba(20, 16, 12, 0.96); border: 1px solid rgba(255, 240, 225, 0.18);
     border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;
 }
@@ -554,6 +554,14 @@ onUnmounted(() => {
     will-change: transform;
 }
 .pc-preview-content :deep(svg) { max-width: none !important; height: auto; display: block; }
+/* 强制节点文字白色 + 黑描边，保证 AI 给节点上的任何高亮色背景上都可读 */
+.pc-preview-content :deep(.nodeLabel),
+.pc-preview-content :deep(.node foreignObject div),
+.pc-preview-content :deep(.node text) {
+    color: #fff !important;
+    fill: #fff !important;
+    text-shadow: 0 0 3px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.95);
+}
 .pc-preview-content :deep(.pc-preview-loading) { color: rgba(255, 245, 235, 0.5); padding: 20px; }
 .pc-preview-content :deep(.pc-preview-err) {
     color: #ff9a8a; font-size: 12px; white-space: pre-wrap; font-family: monospace; padding: 20px;
