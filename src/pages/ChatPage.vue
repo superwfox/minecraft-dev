@@ -66,8 +66,17 @@
         </div>
       </div>
 
+      <!-- 已选 skill 手牌条 -->
+      <div v-if="chosenSkills.length" class="composer-skills">
+        <span class="cs-label">手牌</span>
+        <span v-for="b in chosenSkills" :key="b.id" class="cs-chip" :title="b.capability || ''">
+          {{ b.name || b.id }}
+          <button class="cs-x" @click="removeSkill(b.id)" title="移出">✕</button>
+        </span>
+      </div>
+
       <!-- 居中聚焦输入框 -->
-      <div class="composer glass2" :class="{ disabled: composerDisabled }">
+      <div class="composer glass2" :class="{ disabled: composerDisabled, 'composer-carded': hasSkills }">
         <textarea ref="composerEl" class="composer-input" v-model="inputText"
                   :placeholder="composerPlaceholder" :disabled="composerDisabled"
                   rows="4"
@@ -112,6 +121,8 @@
         </div>
       </div>
     </Teleport>
+
+    <SkillTray/>
   </div>
 </template>
 
@@ -124,6 +135,8 @@ import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildIn
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
 import PathCards from "../components/PathCards.vue";
+import SkillTray from "../components/SkillTray.vue";
+import {selectedBriefs, removeSkill} from "../logic/skills";
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting} from "../logic/generateState";
 import {startGenerate, interruptGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
@@ -144,6 +157,10 @@ const selectVer = ref("");
 
 // ── 视图态：尚未产出文件时都用居中聚焦视图；一旦开始生成文件切到进度视图 ──
 const inFocusPhase = computed(() => genTask.files.length === 0);
+
+// 已选 skill（手牌）：输入框上方小卡条 + 卡牌质感开关
+const chosenSkills = computed(() => selectedBriefs());
+const hasSkills = computed(() => chosenSkills.value.length > 0);
 
 const activeDraft = computed(() => chatBlocks.length ? chatBlocks[chatBlocks.length - 1] : null);
 const activeError = computed(() => {
@@ -420,6 +437,57 @@ watch(() => genTask.phase, (p) => {
   transition: opacity 0.2s, border-color 0.2s;
 }
 .composer.disabled { opacity: 0.55; }
+
+/* 选了 skill 后输入框转为卡牌质感 */
+.composer-carded {
+  position: relative;
+  border: 1px solid rgba(245, 222, 179, 0.4);
+  background-image: linear-gradient(155deg, rgba(245, 222, 179, 0.07), rgba(0, 0, 0, 0.05));
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+}
+.composer-carded::before {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 13px;
+  border: 2px dashed rgba(245, 222, 179, 0.22);
+  pointer-events: none;
+}
+
+/* 已选 skill 手牌条 */
+.composer-skills {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cs-label {
+  font-size: 12px;
+  color: rgba(245, 222, 179, 0.6);
+  letter-spacing: 0.05em;
+}
+.cs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 11px;
+  border-radius: 9px;
+  background: rgba(245, 222, 179, 0.14);
+  border: 1px solid rgba(245, 222, 179, 0.3);
+  color: #f3e7d4;
+  font-size: 12.5px;
+}
+.cs-x {
+  border: none;
+  background: transparent;
+  color: rgba(255, 245, 235, 0.55);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  border-radius: 5px;
+}
+.cs-x:hover { color: #ff9a8a; }
 .composer-input {
   flex: 1;
   width: 100%;

@@ -17,12 +17,11 @@
     </div>
 
     <div class="center">
-      <span>{{ centerText }}</span>
+      <TopNav/>
     </div>
 
     <div class="right">
       <span v-if="authState.loaded && !authState.user" class="link" @click="login">登录</span>
-      <router-link class="link" to="/ide">IDE</router-link>
       <a class="link" href="https://minecraft-dev.pages.dev/" rel="noreferrer">文档</a>
       <a
         class="link qq-link"
@@ -46,6 +45,7 @@
 import {provide, ref, onMounted, computed} from "vue";
 import GlassCard from "./components/glassCard.vue";
 import SponsorModal from "./components/sponsorModal.vue";
+import TopNav from "./components/TopNav.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
 import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
