@@ -1,20 +1,14 @@
 // GET /api/skills —— 公开只读：实时拉社区 skill 仓库（superwfox/TAHAI-Skills）的
 // 顶层 README + 各子目录 brief.json，聚合成 { readme, skills[] }。
 //
+// 拉取核心（仓库/分支/UA/raw）复用 functions/_lib/skills.ts。
 // 中间件（functions/api/_middleware.ts）只对 /api/generate/、/api/chat、/api/stream
 // 强制登录+限流，所以本端点天然公开只读，无需鉴权。
 //
-// 防 GitHub 匿名限流（60/h）：
-//   - 列目录走 api.github.com（仅 1 次），README/brief.json 走 raw.githubusercontent.com（不计 api 限额）。
-//   - KV(TASKS) 缓存 10 分钟；另存 7 天「兜底」缓存。GitHub 失败/仓库不存在 → 回退兜底或空态，始终 200。
+// KV(TASKS) 缓存 10 分钟 + 7 天兜底；GitHub 失败/仓库不存在 → 回退兜底或空态，始终 200。
 
-interface Env {
-    TASKS: KVNamespace;
-    GITHUB_TOKEN?: string;
-}
+import { listRoot, rawText, type SkillEnv } from "../../_lib/skills";
 
-const REPO = "superwfox/TAHAI-Skills";
-const BRANCHES = ["master", "main"];     // README 写的是 master，404 回退 main
 const CACHE_KEY = "skills:index";
 const BACKUP_KEY = "skills:index:backup";
 const CACHE_TTL = 600;                    // 10 分钟新鲜缓存
@@ -25,36 +19,6 @@ function json(obj: any, status = 200): Response {
         status,
         headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=120" },
     });
-}
-
-function ghHeaders(env: Env): Record<string, string> {
-    const h: Record<string, string> = {
-        "User-Agent": "tahai-skills",      // api.github.com 要求 UA，否则 403
-        "Accept": "application/vnd.github+json",
-    };
-    if (env.GITHUB_TOKEN) h["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
-    return h;
-}
-
-// 取首个可用分支的顶层目录列表
-async function listRoot(env: Env): Promise<{ branch: string; entries: any[] } | null> {
-    for (const branch of BRANCHES) {
-        try {
-            const r = await fetch(`https://api.github.com/repos/${REPO}/contents?ref=${branch}`, { headers: ghHeaders(env) });
-            if (r.ok) {
-                const entries = await r.json();
-                if (Array.isArray(entries)) return { branch, entries };
-            }
-        } catch { /* 试下一个分支 */ }
-    }
-    return null;
-}
-
-async function rawText(branch: string, path: string): Promise<string | null> {
-    try {
-        const r = await fetch(`https://raw.githubusercontent.com/${REPO}/${branch}/${path}`);
-        return r.ok ? await r.text() : null;
-    } catch { return null; }
 }
 
 const BRIEF_FIELDS = [
@@ -69,7 +33,7 @@ function pickBrief(o: any, dir: string): any {
     return out;
 }
 
-async function buildIndex(env: Env): Promise<{ readme: string; skills: any[] }> {
+async function buildIndex(env: SkillEnv): Promise<{ readme: string; skills: any[] }> {
     const root = await listRoot(env);
     if (!root) return { readme: "", skills: [] };
     const { branch, entries } = root;
@@ -88,7 +52,7 @@ async function buildIndex(env: Env): Promise<{ readme: string; skills: any[] }> 
     return { readme: readme || "", skills: briefs.filter(Boolean) };
 }
 
-export const onRequestGet: PagesFunction<Env> = async (context) => {
+export const onRequestGet: PagesFunction<SkillEnv> = async (context) => {
     const { env } = context;
 
     // 1) 新鲜缓存命中

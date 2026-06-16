@@ -1,3 +1,5 @@
+import type { SkillBundle } from "./skills";
+
 /** 结构化文件摘要，用于跨文件上下文传递 */
 export interface FileSummary {
     path: string;
@@ -282,12 +284,53 @@ export interface PlannerGradeContext {
     chosenPath?: { title: string; summary: string; mermaid: string };
 }
 
+// ─── Skill 注入（能力参考）────────────────────────────────────
+// 用户挂载的 skill 作为「可照抄的能力参考」注入：Planner 看摘要把文件规划进蓝图，FileGen 看骨架照抄。
+
+/** 给 Planner 的能力摘要段（能力 + 宿主依赖符号 + 建议文件清单） */
+export function skillPlannerContext(bundles: SkillBundle[]): string {
+    if (!bundles?.length) return "";
+    const blocks = bundles.map((b) => {
+        const lines = [`【能力包：${b.name}】`];
+        if (b.capability) lines.push(`能力：${b.capability}`);
+        if (b.expectedGlobals && Object.keys(b.expectedGlobals).length) {
+            lines.push(`依赖宿主已有符号：${Object.keys(b.expectedGlobals).join("、")}`);
+        }
+        const gens = b.files.filter((f) => f.kind === "gen");
+        if (gens.length) {
+            lines.push("建议生成的类（命名/职责可参考；实现骨架会在逐文件生成时提供）：");
+            for (const f of gens) lines.push(`  - ${f.role || f.file}${f.fileGen ? `（${f.fileGen}）` : ""}`);
+        }
+        return lines.join("\n");
+    });
+    return "\n\n══ 已挂载能力包（用户主动选择，请在 files[] 中规划出实现这些能力所需的文件，并让相关业务文件依赖它们；实现细节会在逐文件生成时提供可照抄的骨架，此处只需把文件规划进蓝图） ══\n"
+        + blocks.join("\n\n");
+}
+
+/** 给 FileGen 的照抄参考段（各 md 全文：pom 坐标 / globals / main_wiring / 骨架代码） */
+export function skillFileGenContext(bundles: SkillBundle[]): string {
+    if (!bundles?.length) return "";
+    const blocks = bundles.map((b) => {
+        const head = `【能力包：${b.name}】${b.capability ? " — " + b.capability : ""}`;
+        const files = b.files.map((f) => {
+            const tag = f.kind === "gen" ? `gen/${f.fileGen || "?"}` : "ref";
+            return `── ${f.file}（${tag}）${f.role ? "：" + f.role : ""} ──\n${f.body}`;
+        }).join("\n\n");
+        return `${head}\n${files}`;
+    });
+    return "\n\n══ 已挂载能力包 · 可照抄实现参考 ══\n"
+        + "以下是用户挂载能力包的库坐标与骨架代码（pom 依赖 / 暴露符号 globals / Main 接线 main_wiring / Java 骨架）。\n"
+        + "若本文件属于或涉及这些能力，请照抄其库坐标与骨架，按本项目包名与业务调整；不要臆造文档未给出的其它库。与本文件无关的能力包可忽略。\n\n"
+        + blocks.join("\n\n────────\n\n");
+}
+
 export function plannerPrompt(
     userPrompt: string,
     coreType: string,
     version: string,
     clarifyRounds?: ClarifyRound[],
     gradeContext?: PlannerGradeContext,
+    skillContext?: string,
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
         ? "\n\n用户已确认的决策（必须严格遵守）：\n" + clarifyRounds.flatMap(r =>
@@ -384,7 +427,7 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 - **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的 ManagerGen 类（自行管理 File + YamlConfiguration.loadConfiguration / save），并由 Main.onDisable 中触发落盘
 - **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
 - **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
-- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}`,
+- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}${skillContext ?? ""}`,
         user: `${userPrompt}${clarifyBlock}`,
     };
 }
@@ -777,6 +820,7 @@ export function dispatchGen(
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     ancestorSummaries: FileSummary[],
     slice: BlueprintSlice,
+    skillContext?: string,
 ): {
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
@@ -784,7 +828,7 @@ export function dispatchGen(
     const base = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries);
     const spec = specializationBlock(file, slice, ctx);
     const gen = {
-        system: spec ? base.system + "\n\n" + spec : base.system,
+        system: (spec ? base.system + "\n\n" + spec : base.system) + (skillContext ?? ""),
         user: base.user,
     };
     const checkerSpec = checkerSpecializationBlock(file, slice);

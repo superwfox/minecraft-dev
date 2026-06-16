@@ -2,6 +2,7 @@ import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitF
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 import { byokHeaders } from "./byok";
+import { selected } from "./skills";
 
 const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -429,7 +430,7 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 ? "正在根据澄清结果生成项目规划..."
                 : `正在重新规划 (第${replanAttempt}次)...`);
 
-            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId, chosenPathId });
+            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId, chosenPathId, skillIds: [...selected] });
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;

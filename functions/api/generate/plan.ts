@@ -1,4 +1,5 @@
-import { plannerPrompt, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem, type PlannerGradeContext } from "../../_lib/prompts";
+import { plannerPrompt, skillPlannerContext, GENERATOR_TYPES, type GeneratorType, type MainBlueprint, type PlanFileItem, type PlannerGradeContext } from "../../_lib/prompts";
+import { getSkillBundles } from "../../_lib/skills";
 import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
@@ -9,6 +10,7 @@ const PLANNER_MODEL = "deepseek-v4-pro";
 interface Env {
     DEEPSEEK_API_KEY: string;
     TASKS: KVNamespace;
+    GITHUB_TOKEN?: string;
 }
 
 /**
@@ -200,7 +202,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (axes.length || chosenPath) gradeContext = { axes, chosenPath };
     }
 
-    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, gradeContext);
+    // 据 body.skillIds 拉取用户挂载的 skill（KV 缓存 30min），存入 state 供逐文件生成复用
+    const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
+    if (skillIds.length) {
+        state.skills = await getSkillBundles(context.env, skillIds);
+    }
+    const skillCtx = state.skills?.length ? skillPlannerContext(state.skills) : "";
+
+    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, gradeContext, skillCtx);
 
     const llm = await resolveLLM(context);
     const resp = await fetch(llm.url, {

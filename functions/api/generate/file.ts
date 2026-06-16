@@ -1,4 +1,4 @@
-import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType } from "../../_lib/prompts";
+import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
@@ -136,7 +136,8 @@ async function generateSingleFile(
         order: 0,
         generatorType: inferGeneratorType(className, filePath),
     };
-    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint));
+    const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
+    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx);
 
     const gen = dispatched.gen;
     const initialGen = await callAIStream(llm, gen.system, gen.user, writer, encoder);
@@ -232,7 +233,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     };
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
     const slice = computeSlice(target, blueprint);
-    const dispatched = dispatchGen(target, ctx, summaries, slice);
+    const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx);
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
