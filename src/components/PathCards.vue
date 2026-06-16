@@ -33,7 +33,7 @@
         >
           <svg class="pc-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet">
             <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
-                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" stroke-dasharray="0.01 11"/>
+                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
           </svg>
           <div class="pc-card-title">{{ c.title }}</div>
           <div class="pc-card-summary">{{ c.summary }}</div>

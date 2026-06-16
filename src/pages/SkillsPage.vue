@@ -28,7 +28,7 @@
         >
           <svg class="sk-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet">
             <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
-                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" stroke-dasharray="0.01 11"/>
+                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
           </svg>
 
           <div class="sk-card-top">{{ c.kind === 'readme' ? '技能库' : (c.brief!.author || 'skill') }}</div>
@@ -44,11 +44,7 @@
       </div>
     </div>
 
-    <div v-if="!skillsState.loading && skillsState.all.length === 0" class="sk-empty">
-      仓库暂未收录 skill（README 仍可查看）。社区共建中。
-    </div>
-
-    <div class="sk-hint">移动鼠标聚焦 · 点击卡片查看详情</div>
+    <div class="sk-hint">移动鼠标聚焦 · 按 Space 或点击查看详情</div>
 
     <!-- README 弹层 -->
     <Teleport to="body">
@@ -216,7 +212,13 @@ function openCard(c: SkCard) {
 }
 
 function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") { readmeOpen.value = false; detail.value = null; }
+    if (e.key === "Escape") { readmeOpen.value = false; detail.value = null; return; }
+    // 延续 mermaid 卡片操作逻辑：聚焦某卡后按 Space 查看详情（再按 / Esc 关闭）
+    if (e.key === " " || e.code === "Space") {
+        if (readmeOpen.value || detail.value) { e.preventDefault(); readmeOpen.value = false; detail.value = null; return; }
+        const c = cards.value.find((x) => x.id === activeId.value);
+        if (c) { e.preventDefault(); openCard(c); }
+    }
 }
 
 onMounted(() => {
