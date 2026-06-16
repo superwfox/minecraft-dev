@@ -61,7 +61,7 @@
       </button>
     </div>
 
-    <div class="sk-hint">向下拖动卡片加入手牌 · 点击 / Space 查看详情</div>
+    <div class="sk-hint" :class="{ raised: chosen.length }">向下拖动卡片加入手牌 · 点击 / Space 查看详情</div>
 
     <!-- README 弹层 -->
     <Teleport to="body">
@@ -492,11 +492,19 @@ onUnmounted(() => {
     font-size: 14px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     transition: transform 0.18s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.18s ease;
+    animation: skChipIn 0.42s cubic-bezier(.34, 1.56, .64, 1);
 }
 .sk-chip:hover { transform: translateY(-4px); box-shadow: 0 10px 22px rgba(0, 0, 0, 0.6); }
 .sk-chip:active { transform: translateY(-1px) scale(0.96); }
+@keyframes skChipIn {
+    0% { transform: scale(0.5) translateY(28px); opacity: 0; }
+    60% { transform: scale(1.08) translateY(-3px); opacity: 1; }
+    100% { transform: scale(1) translateY(0); opacity: 1; }
+}
 
-.sk-hint { position: fixed; bottom: 26px; left: 0; right: 0; text-align: center; font-size: 12px; color: rgba(255, 245, 235, 0.4); pointer-events: none; z-index: 501; }
+.sk-hint { position: fixed; bottom: 26px; left: 0; right: 0; text-align: center; font-size: 12px; color: rgba(255, 245, 235, 0.4); pointer-events: none; z-index: 501; transition: bottom 0.3s ease; }
+/* 有已选手牌时上移到收集区之上，避免与 chip 重叠 */
+.sk-hint.raised { bottom: calc(13vh + 22px); }
 
 /* 弹层 */
 .sk-overlay {
