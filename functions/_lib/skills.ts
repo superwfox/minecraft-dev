@@ -5,7 +5,7 @@
 // raw.githubusercontent.com（不计 api 限额）；bundle 结果再各自 KV 缓存。
 
 export const REPO = "superwfox/TAHAI-Skills";
-export const BRANCHES = ["master", "main"];   // README 写的是 master，404 回退 main
+export const BRANCHES = ["main", "master"];   // 仓库默认分支为 main，优先 main，master 兜底
 
 export interface SkillEnv {
     TASKS: KVNamespace;

@@ -7,7 +7,7 @@
 //
 // KV(TASKS) 缓存 10 分钟 + 7 天兜底；GitHub 失败/仓库不存在 → 回退兜底或空态，始终 200。
 
-import { listRoot, rawText, type SkillEnv } from "../../_lib/skills";
+import { BRANCHES, listRoot, rawText, type SkillEnv } from "../../_lib/skills";
 
 const CACHE_KEY = "skills:index";
 const BACKUP_KEY = "skills:index:backup";
@@ -34,32 +34,46 @@ function pickBrief(o: any, dir: string): any {
 }
 
 async function buildIndex(env: SkillEnv): Promise<{ readme: string; skills: any[] }> {
+    // README 走 raw（raw.githubusercontent.com 不受 api 的匿名 60/h 限流，CF 共享出口 IP 上也稳）：
+    // 依次试各分支，第一个拿到的即用，与「列目录」解耦——列目录被限流也不影响 README 展示。
+    let readme = "";
+    for (const b of BRANCHES) {
+        const t = await rawText(b, "README.md");
+        if (t != null) { readme = t; break; }
+    }
+
+    // skill 列表需要列目录（api.github.com，CF 共享 IP 上可能被匿名限流）：失败则 skills 为空，但 README 仍在。
+    // 一旦某次成功，结果会进 7 天兜底缓存，后续限流期间从兜底返回。
+    let skills: any[] = [];
     const root = await listRoot(env);
-    if (!root) return { readme: "", skills: [] };
-    const { branch, entries } = root;
-
-    const readmeEntry = entries.find((e: any) => e.type === "file" && /^readme\.md$/i.test(e.name));
-    const readmeP = readmeEntry ? rawText(branch, readmeEntry.name) : Promise.resolve(null);
-
-    const dirs = entries.filter((e: any) => e.type === "dir");
-    const briefPs = dirs.map(async (d: any) => {
-        const txt = await rawText(branch, `${d.name}/brief.json`);
-        if (!txt) return null;
-        try { return pickBrief(JSON.parse(txt), d.name); } catch { return null; }
-    });
-
-    const [readme, briefs] = await Promise.all([readmeP, Promise.all(briefPs)]);
-    return { readme: readme || "", skills: briefs.filter(Boolean) };
+    if (root) {
+        const { branch, entries } = root;
+        if (!readme) {
+            const re = entries.find((e: any) => e.type === "file" && /^readme\.md$/i.test(e.name));
+            if (re) readme = (await rawText(branch, re.name)) || "";
+        }
+        const dirs = entries.filter((e: any) => e.type === "dir");
+        const briefs = await Promise.all(dirs.map(async (d: any) => {
+            const txt = await rawText(branch, `${d.name}/brief.json`);
+            if (!txt) return null;
+            try { return pickBrief(JSON.parse(txt), d.name); } catch { return null; }
+        }));
+        skills = briefs.filter(Boolean);
+    }
+    return { readme, skills };
 }
 
 export const onRequestGet: PagesFunction<SkillEnv> = async (context) => {
     const { env } = context;
+    const fresh = new URL(context.request.url).searchParams.get("fresh") === "1";
 
-    // 1) 新鲜缓存命中
-    try {
-        const cached = await env.TASKS.get(CACHE_KEY);
-        if (cached) return json(JSON.parse(cached));
-    } catch { /* ignore */ }
+    // 1) 新鲜缓存命中（?fresh=1 跳过，便于部署后强制刷新验证）
+    if (!fresh) {
+        try {
+            const cached = await env.TASKS.get(CACHE_KEY);
+            if (cached) return json(JSON.parse(cached));
+        } catch { /* ignore */ }
+    }
 
     // 2) 实时构建
     try {
