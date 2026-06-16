@@ -50,7 +50,7 @@ const DEP_GROUP_WHITELIST = [
 
 export interface PomCheckResult { ok: boolean; reason?: string; }
 
-export function checkPom(content: string): PomCheckResult {
+export function checkPom(content: string, extraGroups: string[] = []): PomCheckResult {
     // 1. 禁 extensions（任意类加载）
     if (/<extensions\b[^>]*>(?!\s*<\/extensions>)/i.test(content)) {
         return { ok: false, reason: "pom 不允许 <extensions> 元素" };
@@ -82,7 +82,8 @@ export function checkPom(content: string): PomCheckResult {
         }
     }
 
-    // 4. <dependency> groupId 白名单
+    // 4. <dependency> groupId 白名单（基础白名单 ∪ 挂载 skill 声明的依赖）
+    const allowGroups = [...DEP_GROUP_WHITELIST, ...extraGroups];
     const deps = [...content.matchAll(/<dependency>([\s\S]*?)<\/dependency>/g)];
     for (const m of deps) {
         const block = m[1];
@@ -91,9 +92,26 @@ export function checkPom(content: string): PomCheckResult {
         const g = gMatch[1].trim();
         // 允许 ${...} 变量（一般是 project.groupId 引用，构建期 Maven 自己解析）
         if (g.startsWith("${")) continue;
-        const ok = DEP_GROUP_WHITELIST.some(w => g === w || g.startsWith(w + "."));
+        const ok = allowGroups.some(w => g === w || g.startsWith(w + "."));
         if (!ok) return { ok: false, reason: `pom 出现非白名单依赖 groupId: ${g}` };
     }
 
     return { ok: true };
+}
+
+/**
+ * 从挂载的 skill bundle 提取它们在 md frontmatter 的 pom 里声明的依赖 groupId。
+ * skill 经 PR 人工审批入库，其声明的依赖视为可信 → 该次构建放行（见 checkPom 的 extraGroups）。
+ */
+export function extractSkillGroups(skills: any[]): string[] {
+    const groups = new Set<string>();
+    for (const b of skills || []) {
+        for (const f of b?.files || []) {
+            const body = typeof f?.body === "string" ? f.body : "";
+            for (const m of body.matchAll(/<groupId>\s*([^<\s$][^<]*?)\s*<\/groupId>/g)) {
+                groups.add(m[1].trim());
+            }
+        }
+    }
+    return [...groups];
 }

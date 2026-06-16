@@ -1,6 +1,6 @@
 import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
-import { checkPom } from "../../_lib/pomGuard";
+import { checkPom, extractSkillGroups } from "../../_lib/pomGuard";
 
 interface Env {
     GITHUB_PAT: string;
@@ -109,7 +109,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // ── (b) pom.xml 安全 scrub：阻断恶意 pom 在 CI 内执行任意代码 ──
     const pomFile = state.generatedFiles.find((f: any) => f.path.endsWith("pom.xml"));
     if (pomFile) {
-        const r = checkPom(pomFile.content);
+        const r = checkPom(pomFile.content, extractSkillGroups(state.skills));
         if (!r.ok) {
             state.status = "error";
             state.error = r.reason;
