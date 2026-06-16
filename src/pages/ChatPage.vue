@@ -84,6 +84,13 @@
         <div class="composer-actions">
           <button class="icon-btn voice-btn" :class="{recording: isRecording}"
                   @click="toggleVoice" :disabled="sending" title="语音输入">◉</button>
+          <button class="icon-btn skill-toggle" :class="{ on: trayOpen }" @click="toggleTray" title="技能手牌">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7">
+              <rect x="3" y="5" width="12" height="16" rx="2" transform="rotate(-8 9 13)"/>
+              <rect x="9" y="4" width="12" height="16" rx="2" transform="rotate(8 15 12)"/>
+            </svg>
+            <span v-if="selected.length" class="skill-toggle-badge">{{ selected.length }}</span>
+          </button>
           <button class="icon-btn refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部">↻</button>
           <div class="composer-spacer"></div>
           <button class="send-btn" @click="send"
@@ -136,7 +143,7 @@ import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
 import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
-import {selectedBriefs, removeSkill} from "../logic/skills";
+import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../logic/skills";
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting} from "../logic/generateState";
 import {startGenerate, interruptGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
@@ -145,6 +152,7 @@ const centerText = inject<Ref<string>>("centerText")!;
 
 const inputText = ref("");
 const extraInput = ref("");
+const lastSubmitted = ref(""); // 记住上次提交的需求，ESC 中断后恢复回输入框
 const sending = ref(false);
 const composerEl = ref<HTMLTextAreaElement | null>(null);
 const showResetModal = ref(false);
@@ -257,6 +265,7 @@ function onIncomplete(original: string, hint: string) {
 async function send() {
     const text = inputText.value.trim();
     if (!text || composerDisabled.value) return;
+    lastSubmitted.value = text;
     inputText.value = "";
     sending.value = true;
     try {
@@ -297,6 +306,8 @@ async function doReset() {
     resetGenTask();
     inputText.value = "";
     extraInput.value = "";
+    lastSubmitted.value = "";
+    centerText.value = "";
     selectingBlock.value = null;
 }
 
@@ -322,6 +333,8 @@ function onKeydown(e: KeyboardEvent) {
     interruptGenerate();  // 中断 clarify / awaiting（若在确认中）
     sending.value = false;
     centerText.value = "已中断";
+    // 恢复中断前的需求输入，方便用户改了再发
+    if (!inputText.value && lastSubmitted.value) inputText.value = lastSubmitted.value;
 }
 onMounted(() => window.addEventListener("keydown", onKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
@@ -526,6 +539,23 @@ watch(() => genTask.phase, (p) => {
 }
 .icon-btn:hover:not(:disabled) { border-color: wheat; color: wheat; }
 .icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.skill-toggle { position: relative; }
+.skill-toggle.on { border-color: wheat; color: wheat; background: rgba(245, 222, 179, 0.14); }
+.skill-toggle-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: wheat;
+  color: #1c1812;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
 .voice-btn.recording {
   background: rgba(255, 80, 80, 0.3);
   border-color: #ff5050;

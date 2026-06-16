@@ -426,6 +426,7 @@ onUnmounted(() => {
 .sk-md :deep(p) { margin: 8px 0; }
 .sk-md :deep(ul), .sk-md :deep(ol) { margin: 8px 0 8px 22px; }
 .sk-md :deep(li) { margin: 3px 0; }
+.sk-md :deep(.md-oli) { margin: 4px 0; padding-left: 2px; }
 .sk-md :deep(code) { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 5px; font-family: "Monaco", monospace; font-size: 12px; }
 .sk-md :deep(pre) { background: rgba(0, 0, 0, 0.35); padding: 12px 14px; border-radius: 10px; overflow: auto; margin: 10px 0; }
 .sk-md :deep(pre code) { background: none; padding: 0; font-size: 12px; line-height: 1.5; }

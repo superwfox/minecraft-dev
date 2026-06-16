@@ -2,7 +2,7 @@
 // 本期只做浏览 + 选择 UI；skillHeaders() 预留给下一期把已选 skill 注入生成后端用，现返回空对象。
 // 与 byok.ts 同构（reactive 单例 + localStorage + *Headers()）。
 
-import { reactive } from "vue";
+import { reactive, ref } from "vue";
 
 export interface SkillStructureItem {
     kind: "gen" | "ref";
@@ -121,3 +121,7 @@ export function fetchSkills(force = false): Promise<void> {
 export function skillHeaders(): Record<string, string> {
     return {};
 }
+
+// chat 抽屉开关：SkillTray 渲染抽屉，ChatPage 的按钮 toggle
+export const trayOpen = ref(false);
+export function toggleTray() { trayOpen.value = !trayOpen.value; }

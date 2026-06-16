@@ -76,10 +76,12 @@ export function renderMarkdown(md: string): string {
             out.push(`<li>${inline(ul[1])}</li>`); i++; continue;
         }
 
-        const ol = t.match(/^\d+\.\s+(.*)$/);
+        // 有序列表：保留原始序号文本，避免浏览器 <ol> 在列表被其它块打断后从 1 重新编号（1.2.3 → 1.1.1）
+        const ol = t.match(/^(\d+)\.\s+(.*)$/);
         if (ol) {
-            if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
-            out.push(`<li>${inline(ol[1])}</li>`); i++; continue;
+            closeList();
+            out.push(`<div class="md-oli">${ol[1]}. ${inline(ol[2])}</div>`);
+            i++; continue;
         }
 
         closeList();

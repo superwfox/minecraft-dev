@@ -45,11 +45,14 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
 
 <style scoped>
 .topnav {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 1px;
-    min-width: 0;
     text-shadow: none;
 }
 

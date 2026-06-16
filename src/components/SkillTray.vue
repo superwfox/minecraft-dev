@@ -1,21 +1,12 @@
 <template>
   <div class="tray-root">
-    <!-- 左侧悬浮按钮 -->
-    <button class="tray-fab" :class="{ on: open }" @click="open = !open" title="技能手牌">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7">
-        <rect x="3" y="5" width="12" height="16" rx="2" transform="rotate(-8 9 13)"/>
-        <rect x="9" y="4" width="12" height="16" rx="2" transform="rotate(8 15 12)"/>
-      </svg>
-      <span v-if="selected.length" class="tray-badge">{{ selected.length }}</span>
-    </button>
-
-    <div v-if="open" class="tray-scrim" @click="open = false"></div>
+    <div v-if="trayOpen" class="tray-scrim" @click="trayOpen = false"></div>
 
     <transition name="tray-slide">
-      <aside v-if="open" class="tray">
+      <aside v-if="trayOpen" class="tray">
         <div class="tray-head">
           <span class="tray-title">技能手牌</span>
-          <button class="tray-x" @click="open = false">✕</button>
+          <button class="tray-x" @click="trayOpen = false">✕</button>
         </div>
 
         <!-- 已选区（可拖拽排序） -->
@@ -61,7 +52,7 @@
         </div>
 
         <div class="tray-foot">
-          <router-link to="/skills" class="tray-link" @click="open = false">前往技能库浏览 →</router-link>
+          <router-link to="/skills" class="tray-link" @click="trayOpen = false">前往技能库浏览 →</router-link>
         </div>
       </aside>
     </transition>
@@ -71,12 +62,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import {
-    skillsState, selected, fetchSkills,
+    skillsState, fetchSkills, trayOpen,
     isSelected, toggleSkill, removeSkill, moveSkill, selectedBriefs,
 } from "../logic/skills";
 import type { SkillBrief } from "../logic/skills";
 
-const open = ref(false);
 const dragIndex = ref(-1);
 
 // selectedBriefs() 随 selected / skillsState.all 变化重算
