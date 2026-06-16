@@ -53,18 +53,32 @@ export async function createSkillPR(
     const baseSha = ref?.object?.sha;
     if (!baseSha) throw new Error("无法获取 main 分支 sha");
 
-    // 2) tree（inline content，path 前缀加 skillId/）
-    const tree = files.map((f) => ({
+    // 列出仓库里该 skill 目录的现有文件 → 新版没有的标记删除，做到「整包覆盖」而非叠加
+    let existing: string[] = [];
+    try {
+        const full = await ghJson(env, `/git/trees/${baseSha}?recursive=1`, "GET");
+        existing = (full.tree || [])
+            .filter((t: any) => t.type === "blob" && typeof t.path === "string" && t.path.startsWith(`${skillId}/`))
+            .map((t: any) => t.path);
+    } catch { /* 该 skill 尚不存在 → 视为新增 */ }
+    const isUpdate = existing.length > 0;
+    const newPaths = new Set(files.map((f) => `${skillId}/${f.path}`));
+
+    // 2) tree（inline content + 删除旧版多余文件）
+    const tree: any[] = files.map((f) => ({
         path: `${skillId}/${f.path}`,
         mode: "100644",
         type: "blob",
         content: f.content,
     }));
+    for (const p of existing) {
+        if (!newPaths.has(p)) tree.push({ path: p, mode: "100644", type: "blob", sha: null });
+    }
     const newTree = await ghJson(env, `/git/trees`, "POST", { base_tree: baseSha, tree });
 
     // 3) commit
     const commit = await ghJson(env, `/git/commits`, "POST", {
-        message: `skill: ${skillId} (via TAHAI upload by @${author.login})`,
+        message: `skill: ${isUpdate ? "update" : "add"} ${skillId} (via TAHAI upload by @${author.login})`,
         tree: newTree.sha,
         parents: [baseSha],
     });
@@ -75,14 +89,14 @@ export async function createSkillPR(
 
     // 5) PR（@mention 贡献者）
     const body = [
-        `经 TAHAI 上传入口自动生成的 skill 提交。`,
+        `经 TAHAI 上传入口自动生成的 skill ${isUpdate ? "更新（整包覆盖现有版本）" : "新增"}。`,
         ``,
         `提交者：@${author.login}（uid: ${author.uid}）`,
         note ? `\n备注：${note}\n` : ``,
         `> @${author.login} 此 PR 合并 / 关闭 / 评论时你都会收到 GitHub 通知。`,
     ].join("\n");
     const pr = await ghJson(env, `/pulls`, "POST", {
-        title: `skill: ${skillId} by @${author.login}`,
+        title: `skill: ${isUpdate ? "更新" : "新增"} ${skillId} by @${author.login}`,
         head: branch,
         base: BASE_BRANCH,
         body,
