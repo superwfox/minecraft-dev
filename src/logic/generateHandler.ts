@@ -253,15 +253,24 @@ async function streamFileGeneration(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
-/** SSE streaming bucket generation — 一次跑一个桶，桶内并发 */
+/** SSE streaming bucket generation — 一次跑一个桶，桶内并发。
+ *  带超时：某次 LLM 调用 hang 住 / Worker 被强杀导致 SSE 流无声中断时，避免前端无限等待。 */
+const BUCKET_TIMEOUT_MS = 300000; // 5 分钟
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
-    const resp = await fetch("/api/generate/bucket", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
-        body: JSON.stringify({ taskId, bucketIndex }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    return readSSE(resp);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), BUCKET_TIMEOUT_MS);
+    try {
+        const resp = await fetch("/api/generate/bucket", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...byokHeaders() },
+            body: JSON.stringify({ taskId, bucketIndex }),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        return await readSSE(resp);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /** SSE streaming clarify round */
@@ -457,9 +466,23 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
 
             for (const bucketIndex of sortedBucketIds) {
                 if (needReplan) break;
-                const bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
+                // 桶级重试：某次 LLM 调用 hang / Worker 超时导致流中断无 result 时，重试一次
+                // （后端按 fileStatuses 跳过已完成文件，只补剩余，更不易再撞 CPU/时长上限）。
+                let bucketResult: any = null;
+                for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
+                    try {
+                        bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
+                    } catch (be: any) {
+                        const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
+                        genTask.logs.push(`× 桶 #${bucketIndex} 中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
+                        bucketResult = null;
+                    }
+                }
                 if (!bucketResult) {
-                    throw new Error(`桶 #${bucketIndex} 无返回`);
+                    // 重试仍无返回 → 退回重新规划（外层 MAX_REPLAN_ATTEMPTS 兜底），而不是静默卡死
+                    genTask.logs.push(`× 桶 #${bucketIndex} 多次无返回，退回重新规划`);
+                    needReplan = true;
+                    break;
                 }
                 if (bucketResult.replan) {
                     needReplan = true;

@@ -293,6 +293,8 @@ export function skillPlannerContext(bundles: SkillBundle[]): string {
     const blocks = bundles.map((b) => {
         const lines = [`【能力包：${b.name}】`];
         if (b.capability) lines.push(`能力：${b.capability}`);
+        if (b.deny) lines.push(`⛔ 禁止事项（规划时不得安排、不要为这些另造文件）：\n${b.deny}`);
+        if (b.usage) lines.push(`用法要点：\n${b.usage}`);
         if (b.expectedGlobals && Object.keys(b.expectedGlobals).length) {
             lines.push(`依赖宿主已有符号：${Object.keys(b.expectedGlobals).join("、")}`);
         }
@@ -311,12 +313,15 @@ export function skillPlannerContext(bundles: SkillBundle[]): string {
 export function skillFileGenContext(bundles: SkillBundle[]): string {
     if (!bundles?.length) return "";
     const blocks = bundles.map((b) => {
-        const head = `【能力包：${b.name}】${b.capability ? " — " + b.capability : ""}`;
+        const parts = [`【能力包：${b.name}】${b.capability ? " — " + b.capability : ""}`];
+        if (b.deny) parts.push(`⛔ 绝对禁止（违反即视为错误，必须严格遵守）：\n${b.deny}`);
+        if (b.usage) parts.push(`【用法教学】\n${b.usage}`);
         const files = b.files.map((f) => {
             const tag = f.kind === "gen" ? `gen/${f.fileGen || "?"}` : "ref";
             return `── ${f.file}（${tag}）${f.role ? "：" + f.role : ""} ──\n${f.body}`;
         }).join("\n\n");
-        return `${head}\n${files}`;
+        parts.push(files);
+        return parts.join("\n\n");
     });
     return "\n\n══ 已挂载能力包 · 可照抄实现参考 ══\n"
         + "以下是用户挂载能力包的库坐标与骨架代码（pom 依赖 / 暴露符号 globals / Main 接线 main_wiring / Java 骨架）。\n"

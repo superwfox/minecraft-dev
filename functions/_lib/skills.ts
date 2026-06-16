@@ -59,6 +59,8 @@ export interface SkillBundle {
     capability?: string;
     expectedGlobals?: Record<string, string>;
     files: SkillBundleFile[];
+    usage?: string;          // 根目录 usage.md：整体怎么用（教学）
+    deny?: string;           // 根目录 deny.md：什么绝对不准做（禁忌）
 }
 
 const BUNDLE_TTL = 1800;     // 30 分钟
@@ -88,12 +90,20 @@ async function fetchOneBundle(id: string): Promise<SkillBundle | null> {
         return f;
     }))).filter((x): x is SkillBundleFile => !!x);
 
+    // 根目录可选的教学 / 禁忌文件（不在 structure 里，单独拉）
+    const [usage, deny] = await Promise.all([
+        rawText(branch, `${id}/usage.md`),
+        rawText(branch, `${id}/deny.md`),
+    ]);
+
     return {
         id: brief.id || id,
         name: brief.name || id,
         capability: brief.capability,
         expectedGlobals: brief.expectedGlobals,
         files,
+        usage: usage ?? undefined,
+        deny: deny ?? undefined,
     };
 }
 
