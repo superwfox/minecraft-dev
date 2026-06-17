@@ -260,7 +260,7 @@ export function parseClassFile(buf: ArrayBuffer): DictClass | null {
 }
 
 // 把每个类的 members 扩展为"自己 + 父类 + 接口"的完整方法集
-export function expandInheritance(classes: DictClass[]): DictClass[] {
+export async function expandInheritance(classes: DictClass[]): Promise<DictClass[]> {
     const byFqn = new Map<string, DictClass>();
     for (const c of classes) byFqn.set(c.fqn, c);
 
@@ -301,10 +301,13 @@ export function expandInheritance(classes: DictClass[]): DictClass[] {
         return merged;
     }
 
-    return classes.map(c => ({
-        ...c,
-        members: collect(c.fqn, 0, new Set()),
-    }));
+    const result: DictClass[] = [];
+    for (let i = 0; i < classes.length; i++) {
+        const c = classes[i];
+        result.push({ ...c, members: collect(c.fqn, 0, new Set()) });
+        if (i % 80 === 0) await new Promise<void>((r) => setTimeout(r)); // 让出主线程
+    }
+    return result;
 }
 
 function chooseParamName(type: string, idx: number): string {
@@ -373,7 +376,11 @@ async function parseJarBuffer(buf: ArrayBuffer, onClass?: (i: number, total: num
             const parsed = parseClassFile(ab);
             if (parsed && parsed.members.length > 0) out.push(parsed);
         } catch { /* skip broken classes */ }
-        if (onClass && i % 50 === 0) onClass(i, classEntries.length);
+        // 每 40 个让出主线程，避免几千个同步 parse 把 IDE 渲染/交互卡死
+        if (i % 40 === 0) {
+            if (onClass) onClass(i, classEntries.length);
+            await new Promise<void>((r) => setTimeout(r));
+        }
     }
     if (onClass) onClass(classEntries.length, classEntries.length);
     return out;
@@ -432,7 +439,7 @@ export async function loadFromPom(
     const deps = filterDepsForCompletion(parsePom(pomText));
     if (!deps.length) return [];
     const raw = await loadDeps(deps, onStatus);
-    return expandInheritance(raw);
+    return await expandInheritance(raw);
 }
 
 export async function clearJarCache() {
