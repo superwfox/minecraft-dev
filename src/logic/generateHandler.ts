@@ -464,40 +464,46 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
             const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
             let needReplan = false;
 
-            for (const bucketIndex of sortedBucketIds) {
+            let allBucketsDone = false;
+            outer: for (const bucketIndex of sortedBucketIds) {
                 if (needReplan) break;
-                // 桶级重试：某次 LLM 调用 hang / Worker 超时导致流中断无 result 时，重试一次
-                // （后端按 fileStatuses 跳过已完成文件，只补剩余，更不易再撞 CPU/时长上限）。
-                let bucketResult: any = null;
-                for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
-                    try {
-                        bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
-                    } catch (be: any) {
-                        const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
-                        genTask.logs.push(`× 桶 #${bucketIndex} 中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
-                        bucketResult = null;
+                // 桶分批推进：每次请求只生成一批（concurrency 个）文件，循环调用同一桶直到 bucketDone，
+                // 避免一个 CF Worker 请求跑完整桶时长/CPU 超限被杀（流中断 → 无返回）。
+                // fileStatuses 持久化保证不重复生成已完成文件。
+                let bucketDone = false;
+                let guard = 0;
+                while (!bucketDone) {
+                    if (guard++ > 80) { // 安全阀，防意外死循环
+                        genTask.logs.push(`× 桶 #${bucketIndex} 批次过多，终止生成`);
+                        needReplan = true; break;
                     }
-                }
-                if (!bucketResult) {
-                    // 重试仍无返回 → 退回重新规划（外层 MAX_REPLAN_ATTEMPTS 兜底），而不是静默卡死
-                    genTask.logs.push(`× 桶 #${bucketIndex} 多次无返回，退回重新规划`);
-                    needReplan = true;
-                    break;
-                }
-                if (bucketResult.replan) {
-                    needReplan = true;
-                    break;
-                }
-                // 把已完成的内容回填到 files
-                for (const c of bucketResult.completed || []) {
-                    const f = genTask.files.find(x => x.path === c.path);
-                    if (f) {
-                        f.content = c.content;
-                        f.status = "done";
+                    // 单批重试一次：批小，重试更不易再撞限制
+                    let bucketResult: any = null;
+                    for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
+                        try {
+                            bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
+                        } catch (be: any) {
+                            const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
+                            genTask.logs.push(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
+                            bucketResult = null;
+                        }
                     }
+                    if (!bucketResult) {
+                        genTask.logs.push(`× 桶 #${bucketIndex} 批次多次无返回，退回重新规划`);
+                        needReplan = true; break;
+                    }
+                    if (bucketResult.replan) { needReplan = true; break; }
+                    // 把本批完成的内容回填到 files
+                    for (const c of bucketResult.completed || []) {
+                        const f = genTask.files.find(x => x.path === c.path);
+                        if (f) { f.content = c.content; f.status = "done"; }
+                    }
+                    bucketDone = !!bucketResult.bucketDone;
+                    if (bucketResult.done) { allBucketsDone = true; break outer; }
                 }
-                if (bucketResult.done) break;
+                if (needReplan) break;
             }
+            void allBucketsDone;
 
             if (needReplan) {
                 if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {

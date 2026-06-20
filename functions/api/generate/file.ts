@@ -325,22 +325,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 content = stripFences(rwRes.content);
             }
 
-            // If rework exhausted without passing, signal replan needed
+            // rework 耗尽仍未通过：reChecker 是 LLM 审查、会误判，不再触发 replan
+            // （否则重新规划又会撞同样的审查规则，导致整个任务白白失败）。
+            // 接受当前最后一版，记 warn 继续；真正的对错交给后续编译 + 编译错误修复兜底。
             if (!passed && reworkCount >= MAX_REWORK) {
-                const failMsg = `× ${target.path} 经过 ${MAX_REWORK} 次修正仍未通过审查，需要重新规划`;
-                await writer.write(sseEvent(encoder, { type: "log", msg: failMsg }));
-                state.logs.push(failMsg);
-                state.status = "error";
-                state.error = failMsg;
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
-
-                await writer.write(sseEvent(encoder, {
-                    type: "result", done: false, replan: true,
-                    path: target.path, reason: failMsg,
-                }));
-                await writer.write(encoder.encode("data: [DONE]\n\n"));
-                await writer.close();
-                return;
+                const warnMsg = `! ${target.path} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
+                await writer.write(sseEvent(encoder, { type: "log", msg: warnMsg }));
+                state.logs.push(warnMsg);
             }
 
             // Summary extraction for the original file

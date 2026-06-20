@@ -284,10 +284,13 @@ async function generateAndCheckFile(
     }
 
     if (!passed && reworkCount >= MAX_REWORK) {
-        const failMsg = `× ${filePath} 经过 ${MAX_REWORK} 次修正仍未通过审查，需要重新规划`;
-        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: failMsg }));
-        state.logs.push(failMsg);
-        return { path: filePath, content, apiSummary: null, reworkCount, failed: true, replan: true, reason: failMsg, newFiles };
+        // reChecker 是 LLM 审查、会误判（例如把合法的 public static 门面字段当成单例违规）。
+        // 耗尽 rework 后【不再触发 replan】——否则重新规划又会产出同样的文件、撞同样的审查规则，
+        // 陷入「循环生成→重新规划→再失败」直到整个任务白白失败。
+        // 改为接受当前最后一版，记 warn 继续；真正的对错交给后续编译 + 编译错误修复（ground truth）兜底。
+        const warnMsg = `! ${filePath} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
+        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: warnMsg }));
+        state.logs.push(warnMsg);
     }
 
     // Summary extraction
@@ -309,7 +312,7 @@ async function generateAndCheckFile(
     await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: doneMsg }));
     await writer.write(sseEvent(encoder, { type: "file_done", path: filePath, content }));
 
-    return { path: filePath, content, apiSummary, reworkCount, failed: false, newFiles };
+    return { path: filePath, content, apiSummary, reworkCount, failed: !passed, newFiles };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -367,17 +370,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.logs.push(`▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）`);
             await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）` }));
 
-            // 跳过已完成的（容许重试）
-            const targets = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
+            // 本次只处理一批（concurrency 个）文件：避免在一个 CF Worker 请求里跑完整桶，
+            // 导致执行时长 / CPU / subrequest 超限被 CF 强杀（SSE 流静默中断 → 前端「无返回」）。
+            // state.fileStatuses 已持久化，前端会循环调用同一桶，直到收到 bucketDone:true。
+            const pending = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
+            const targets = pending.slice(0, Math.max(1, concurrency));
             // 共享上下文：本次桶内不互相依赖，但快照已生成的全局摘要供 dispatchGen 注入
             const baseSummaries = extractSummaries(state.generatedFiles);
 
-            // 空桶直接结束（理论上不会出现，作为兜底）
-            if (targets.length === 0) {
+            // 桶已全部完成（无 pending）→ 标记并前进
+            if (pending.length === 0) {
                 state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
                 await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
                 await writer.write(sseEvent(encoder, {
-                    type: "result", bucketIndex,
+                    type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
                     completed: [], newFiles: [], errors: [],
                     bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
@@ -462,14 +468,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     }
                 }
             }
-            state.currentBucket = bucketIndex + 1;
+            // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶
+            const bucketDone = pending.length <= targets.length;
+            if (bucketDone) state.currentBucket = bucketIndex + 1;
             state.currentFileIndex = state.generatedFiles.length;
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
             await writer.write(sseEvent(encoder, {
                 type: "result",
                 bucketIndex,
-                done: state.currentBucket >= buckets.length,
+                bucketDone,
+                done: bucketDone && state.currentBucket >= buckets.length,
                 completed: results.map(r => ({ path: r.path, content: r.content, reworkCount: r.reworkCount })),
                 newFiles: results.flatMap(r => r.newFiles.map(nf => ({ path: nf.path, role: nf.role, content: nf.content }))),
                 bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
