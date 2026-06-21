@@ -161,13 +161,16 @@ export function plannerClarifyPrompt(
 - hint 中列出 2-4 条具体、简短的补充问题，引导用户完善需求
 - 只要能识别出至少一个明确功能点（如"一个出生点"、"记录玩家击杀数"），就正常产出 todos，不要用 needMoreInput
 
-强制规则（必须在某一轮产出，已在历史中出现过的不要重复）：
-- 必须包含 id="ui-interaction"：玩家如何触发与获得反馈？
+提问总原则（精简优先，宁缺毋滥）：
+- 玩家能直接触发、语义已清楚的简单操作（给物品/传送/广播/即时效果/执行一条命令等），**不要**为走流程而提问其反馈方式或存储方式——默认「聊天命令 + 文本反馈、无需持久化」直接做。
+- 只问「确认后会显著改变实现」的决策点。若某澄清项即便确认也只带来微小功能、却会引入持久化 / 管理器等重类（大幅抬高复杂度、易生成失败），**不要问**，默认用最轻方式（内存 / PDC / 直接 config）。
+
+条件规则（满足条件才问；已在历史出现过的不重复）：
+- id="ui-interaction" —— **仅当**需求涉及「需要可视化选择 / 列表 / 分页 / 图形界面」时才问；纯文本提示就够的简单命令不要问，默认文本反馈。
   options 固定为：["聊天命令 + SendMessage 文本反馈", "聊天命令 + Inventory GUI 反馈"]
-  （其他方案难以保证最终质量，只能通过 allowCustom 让用户输入）
-- 必须包含 id="persistence"：options 固定为 ["文本存储", "二进制存储"]
-- 如果上一轮 persistence 答案为"文本存储"，本轮必须追问 id="text-format"，
-  options 固定为 ["CSV", "TXT", "YAML"]
+- id="persistence" —— **仅当**需求确实需要「跨服务器重启保留的数据」（如玩家记录 / 余额 / 积分 / 可增删的配置数据）时才问；无状态操作、或仅运行时内存状态，**绝不问** persistence，也不要因此引入任何存储类。
+  options 固定为 ["文本存储", "二进制存储"]
+- id="text-format" —— 仅当 persistence 已问且答「文本存储」时追问，options 固定为 ["CSV", "TXT", "YAML"]
 
 按需包含（根据用户需求语义判断是否需要）：
 - id="growth-curve" — 当需求涉及价格/经验/等级/冷却/数值成长时必须包含
@@ -259,6 +262,7 @@ export function graderPrompt(
 
 【最简实现 + Paper 专项（最高优先）】下游用低端模型生成代码，路径与图必须导向最简可行实现：
 - 持久化只用 YAML 配置文件 或 PDC（PersistentDataContainer）；**绝不出现 SQL / JDBC / SQLite / MySQL / 数据库 / D1** 等词。
+- 微小功能不要为它引入持久化或独立管理器类；少量数据（单玩家 / 几个值）优先 PDC / 内存，路径与流程图中**不要出现 DataManager 这类重类**——无谓重类抬高复杂度、易生成失败而收益极小。
 - 外部依赖能省则省；只认 Vault / PlaceholderAPI / WorldGuard 这类硬集成。
 - 全程 Paper/Bukkit 语义（事件 / 命令 / 调度任务 / Inventory GUI / config.yml / PDC），不要 Web/后端词汇。
 
@@ -373,7 +377,7 @@ export function plannerPrompt(
 
     // 据分级结果点亮的深度轴，追加 plan 必须交代的章节（实现仍取最简）
     const AXIS_REQ: Record<string, string> = {
-        persistent: "【持久化】只用 YAML 配置文件 或 PDC（PersistentDataContainer），禁止 SQL/JDBC/数据库；须写明：存什么、读写时机、由 Main.onDisable 落盘。",
+        persistent: "【持久化】只用 YAML 配置文件 或 PDC（PersistentDataContainer），禁止 SQL/JDBC/数据库；须写明：存什么、读写时机、由 Main.onDisable 落盘。**状态极少（单玩家数据 / 几个值）时优先用 PDC 或直接 getConfig()，不要为此新建独立 ManagerGen / DataManager 重类**。",
         task: "【调度任务】须写明：周期(periodTicks)或一次性、主线程约束、由 Main 启动并在 onDisable cancel。",
         state_shared: "【共享状态】须写明：这份可变状态唯一写入方是谁、其他类只读、读取一致性如何保证（避免多处并发写）。",
         external: "【外部硬集成】须在 plugin.yml 声明 depend/softdepend，写明缺失该插件时的降级行为；只用 Vault/PlaceholderAPI/WorldGuard 这类。",
@@ -457,7 +461,7 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 - **事件监听类（ListenerGen）**：由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
 - **Inventory GUI**：若涉及自定义 GUI，必须列出两条 ListenerGen 文件——一条是 GUI 持有类（implements InventoryHolder，提供构造 Inventory 的方法），一条是 InventoryClickEvent 监听类。两条都标 tag="gui"，pairPath 互相指向对方
 - **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml（ConfigGen），并由 Main.onEnable 调用 saveDefaultConfig
-- **YAML 数据持久化**：用户选择文本/YAML 存储时，规划须包含一个独立的 ManagerGen 类（自行管理 File + YamlConfiguration.loadConfiguration / save），并由 Main.onDisable 中触发落盘
+- **数据持久化**：**仅当**需要集中管理「较多结构化数据」（多条记录 / 需增删查的集合）时，才规划独立 ManagerGen 类（管理 File + YamlConfiguration，Main.onDisable 落盘）；**少量数据（单玩家数据 / 几个值）优先用 PDC 或直接 getConfig()/saveConfig()，不要为此引入 ManagerGen 重类**——无谓的重类会抬高复杂度、易生成失败而功能收益极小
 - **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
 - **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
 - **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}${skillContext ?? ""}`,
