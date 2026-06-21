@@ -70,6 +70,20 @@
       <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
     </div>
 
+    <!-- 继续完善：生成完成后直接追加需求（增量补充现有项目）-->
+    <div class="glass2 gen-card" v-if="genTask.phase === 'done'">
+      <div class="gen-card-title">▪ 继续完善</div>
+      <div class="gen-append">
+        <textarea v-model="appendText" class="gen-append-input" rows="3"
+                  placeholder="描述要追加 / 修改的功能，AI 将在当前项目上增量实现并重新编译（如：再加一条 /heal 命令）"
+                  @keydown.enter.exact.prevent="submitAppend"></textarea>
+        <div class="gen-append-foot">
+          <span class="gen-append-hint">增量基于当前生成版本 · Enter 提交</span>
+          <button class="gen-append-btn" :disabled="!appendText.trim()" @click="submitAppend">追加并重建</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 日志卡片 -->
     <div class="glass2 gen-card" v-if="genTask.logs.length">
       <div class="gen-card-title">▪ 日志</div>
@@ -84,10 +98,19 @@
 import {ref, computed, watch, nextTick} from "vue";
 import {genTask} from "../logic/generateState";
 import type {GeneratorType, GenFile} from "../logic/generateState";
-import {getDownloadUrl} from "../logic/generateHandler";
+import {getDownloadUrl, appendFeature} from "../logic/generateHandler";
 
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
+
+// 继续完善：追加需求 → 增量补充
+const appendText = ref("");
+function submitAppend() {
+    const t = appendText.value.trim();
+    if (!t) return;
+    appendText.value = "";
+    appendFeature(t);
+}
 
 const generatorLabels: Record<GeneratorType, string> = {
     MainGen:        "主类",
@@ -379,6 +402,52 @@ watch(() => genTask.streamingContent, async () => {
   color: #999;
   font-size: 14px;
 }
+
+.gen-append {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gen-append-input {
+  width: 100%;
+  resize: none;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(245, 222, 179, 0.18);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #f3e7d4;
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.2s;
+}
+.gen-append-input:focus { border-color: rgba(245, 222, 179, 0.5); }
+.gen-append-input::placeholder { color: rgba(255, 255, 255, 0.3); }
+.gen-append-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gen-append-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+}
+.gen-append-btn {
+  flex-shrink: 0;
+  padding: 8px 20px;
+  border-radius: 10px;
+  border: none;
+  background: wheat;
+  color: #1c1812;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.gen-append-btn:hover:not(:disabled) { opacity: 0.85; }
+.gen-append-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .gen-logs {
   display: flex;

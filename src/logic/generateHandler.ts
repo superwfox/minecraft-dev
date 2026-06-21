@@ -3,6 +3,7 @@ import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 import { byokHeaders } from "./byok";
 import { selected } from "./skills";
+import { parseResponse } from "../ide/composables/useIDEChat";
 
 const MAX_FIX_ATTEMPTS = 2;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -637,5 +638,131 @@ export async function startBuildFromIDE(
         genTask.phase = "error";
         genTask.error = e?.message || String(e);
         genTask.logs.push("× " + genTask.error);
+    }
+}
+
+// ── 增量补充：生成完成后，在现有项目上加功能 / 改需求（单次 LLM + 编译兜底）──
+const APPEND_SYSTEM = `你是在【现有 Minecraft Paper/Bukkit 插件项目】上做【增量加功能 / 改需求】的助手。
+用户会给出当前项目的全部文件内容与一条追加需求。你只输出需要【新建或修改】的文件，不要输出无关文件。
+
+【输出格式】严格遵守，不要任何解释/标题，直接输出文件块：
+FILE create src/main/java/包名/Xxx.java
+\`\`\`java
+完整文件内容
+\`\`\`
+（已存在的文件用 FILE edit <原路径> + 代码块）
+- content 永远是完整文件，绝不输出 diff 或片段。
+- 可同时改多个文件（如：新增命令类 + 编辑 Main 注册 + 编辑 plugin.yml + 必要时编辑 pom.xml）。
+
+【规则】
+- 严格沿用现有包名、代码风格、命名；不要顺手重构与追加需求无关的文件。
+- 新命令必须在 plugin.yml 的 commands 节点声明，并在 Main.onEnable 注册 Executor/TabCompleter；新监听在 Main 注册 registerEvents。
+- 颜色码：yml 用 §，Java 用 ChatColor；不强转主类（用 Bukkit.getPluginManager().getPlugin(名称)）。
+- 持久化只用 YAML / PDC，禁止 SQL/数据库；最简实现。
+- 若需引入第三方库，必须同时 edit pom.xml 加依赖（compile + maven-shade）。`;
+
+export async function appendFeature(appendText: string) {
+    const text = appendText.trim();
+    if (!text) return;
+    if (genTask.phase !== "done" || !genTask.files.length) return;
+
+    try {
+        genTask.error = "";
+        setPhase("generating", `▸ 增量需求：${text.slice(0, 50)}`);
+        genTask.streamingPhase = "generating";
+        genTask.streamingFile = "增量分析中";
+        genTask.streamingContent = "";
+
+        // 拼现有项目上下文（清单 + 各文件全文）
+        const fileList = genTask.files.map(f => `- ${f.path}${f.role ? `  // ${f.role}` : ""}`).join("\n");
+        const fileBodies = genTask.files
+            .filter(f => f.content)
+            .map(f => {
+                const ext = f.path.split(".").pop() || "";
+                return `FILE ${f.path}\n\`\`\`${ext}\n${f.content}\n\`\`\``;
+            }).join("\n\n");
+        const user = `【当前项目文件清单】\n${fileList}\n\n【当前所有文件内容】\n${fileBodies}\n\n【追加需求】\n${text}`;
+
+        const resp = await fetch("/api/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...byokHeaders() },
+            body: JSON.stringify({
+                model: "deepseek-v4-pro",
+                taskId: genTask.taskId || undefined,
+                messages: [
+                    { role: "system", content: APPEND_SYSTEM },
+                    { role: "user", content: user },
+                ],
+                stream: true,
+            }),
+        });
+        if (resp.status === 402) { showSponsorModal.value = true; throw new Error("本月额度已用尽"); }
+        if (resp.status === 401) { login(); throw new Error("请先登录后再使用"); }
+        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.body) throw new Error("无响应流");
+
+        // 读 DeepSeek 原生 SSE（透传），收集 content
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let full = "";
+        outer: while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) {
+                const t = line.trim();
+                if (!t.startsWith("data:")) continue;
+                const payload = t.slice(5).trim();
+                if (payload === "[DONE]") break outer;
+                try {
+                    const j = JSON.parse(payload);
+                    const chunk = j?.choices?.[0]?.delta?.content ?? "";
+                    if (chunk) { full += chunk; genTask.streamingContent = full; }
+                } catch { /* skip */ }
+            }
+        }
+        genTask.streamingPhase = "";
+        genTask.streamingContent = "";
+        fetchMe(); // 刷新顶栏额度
+
+        // 解析 FILE 块，应用到 genTask.files
+        const existing = new Set(genTask.files.map(f => f.path));
+        const parsed = parseResponse(full, existing);
+        if (!parsed.files.length) {
+            genTask.logs.push("! 追加需求未产出文件改动" + (parsed.reply ? `：${parsed.reply.slice(0, 80)}` : ""));
+            setPhase("done", "● 无改动");
+            return;
+        }
+        for (const fa of parsed.files) {
+            const exist = genTask.files.find(f => f.path === fa.path);
+            if (exist) {
+                exist.content = fa.content;
+                exist.status = "done";
+                genTask.logs.push(`✎ 修改 ${fa.path}`);
+            } else {
+                genTask.files.push({
+                    path: fa.path,
+                    role: "追加：" + text.slice(0, 16),
+                    content: fa.content,
+                    status: "done",
+                });
+                genTask.logs.push(`＋ 新增 ${fa.path}`);
+            }
+        }
+
+        // 重新编译（startBuildFromIDE 内部驱动 uploading/building/done/error）
+        await startBuildFromIDE(
+            genTask.files.filter(f => f.content).map(f => ({ path: f.path, content: f.content! })),
+            { javaVersion: genTask.javaVersion, projectName: genTask.projectName, packageName: genTask.packageName },
+        );
+    } catch (e: any) {
+        genTask.streamingPhase = "";
+        genTask.streamingContent = "";
+        genTask.phase = "error";
+        genTask.error = e?.message || String(e);
+        genTask.logs.push("× 追加失败：" + genTask.error);
     }
 }

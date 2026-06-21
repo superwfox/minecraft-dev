@@ -90,7 +90,7 @@ function buildPrompt(userText: string): string {
     return lines.join("\n");
 }
 
-function parseResponse(raw: string, existingPaths: Set<string>): {
+export function parseResponse(raw: string, existingPaths: Set<string>): {
     intent: "chat" | "create" | "edit";
     reply: string;
     files: IDEFileAction[];
