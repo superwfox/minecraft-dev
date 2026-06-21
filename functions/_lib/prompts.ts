@@ -133,8 +133,8 @@ export function plannerClarifyPrompt(
 ): { system: string; user: string } {
     const history = priorRounds.length
         ? "\n\n已完成的澄清轮次：\n" + priorRounds.map((r, i) =>
-            `第 ${i + 1} 轮：\n${r.todos.map(t => `  Q[${t.id}] ${t.question} → 用户选择：${JSON.stringify(r.answers[t.id])}`).join("\n")}`
-        ).join("\n")
+        `第 ${i + 1} 轮：\n${r.todos.map(t => `  Q[${t.id}] ${t.question} → 用户选择：${JSON.stringify(r.answers[t.id])}`).join("\n")}`
+    ).join("\n")
         : "";
 
     return {
@@ -164,6 +164,7 @@ export function plannerClarifyPrompt(
 提问总原则（精简优先，宁缺毋滥）：
 - 玩家能直接触发、语义已清楚的简单操作（给物品/传送/广播/即时效果/执行一条命令等），**不要**为走流程而提问其反馈方式或存储方式——默认「聊天命令 + 文本反馈、无需持久化」直接做。
 - 只问「确认后会显著改变实现」的决策点。若某澄清项即便确认也只带来微小功能、却会引入持久化 / 管理器等重类（大幅抬高复杂度、易生成失败），**不要问**，默认用最轻方式（内存 / PDC / 直接 config）。
+- 【行为语义消歧·高优先】用户常用「动作/结果」描述需求（如「右键吃东西」「打怪掉钱」「破坏方块给经验」），但同一句话往往对应多个不同的底层事件或实现路径，选错监听事件＝整份代码跑偏，这类歧义比「要不要持久化」更致命，**只要出现且会改变实现就必须问**。但提问只能用玩家能直观理解的「行为差别」来描述，**绝不向用户暴露 PlayerInteractEvent / Consume / BlockBreak 这类事件名或 API**。仅是措辞不同、底层实现完全一致的，不问。
 
 条件规则（满足条件才问；已在历史出现过的不重复）：
 - id="ui-interaction" —— **仅当**需求涉及「需要可视化选择 / 列表 / 分页 / 图形界面」时才问；纯文本提示就够的简单命令不要问，默认文本反馈。
@@ -171,6 +172,19 @@ export function plannerClarifyPrompt(
 - id="persistence" —— **仅当**需求确实需要「跨服务器重启保留的数据」（如玩家记录 / 余额 / 积分 / 可增删的配置数据）时才问；无状态操作、或仅运行时内存状态，**绝不问** persistence，也不要因此引入任何存储类。
   options 固定为 ["文本存储", "二进制存储"]
 - id="text-format" —— 仅当 persistence 已问且答「文本存储」时追问，options 固定为 ["CSV", "TXT", "YAML"]
+
+行为语义消歧（满足条件才问；同上：历史已问过的不重复；这类优先在前几轮问，因为答案会决定后面要不要问持久化/作用域/数值）：
+- id="trigger-event" —— **仅当**用户的触发描述对应多个底层事件、且选不同事件会导致不同实现时才问。本 id 的 options **不固定**、且不受下方「3~5 项」下限约束（真实分叉几个就给几个，最少 2 个，不要凑数）：针对具体歧义生成用玩家能懂的「行为差别」选项，措辞要精确到实现侧能据此唯一确定用哪个事件；严禁出现事件类名，allowCustom=true，chart=null。典型参考：
+    · 「右键/使用某物」 → 「右手一按就触发（哪怕没吃成/用成）」 vs 「真正吃完/用完那一下才触发」
+    · 「打/攻击生物」 → 「左键碰一下就算」 vs 「真正造成伤害才算」 vs 「把目标打死才算」
+    · 「挖/破坏方块」 → 「开始挖的瞬间」 vs 「方块真正被挖断」
+    · 「进服/加入」 → 「登录握手阶段（可拦截/白名单/踢人）」 vs 「已进世界、人物生成完毕（可发欢迎语/给物品）」
+- id="trigger-mode" —— **仅当**需求含「禁止/不让玩家做某事」或「当玩家做某事时…」、且分不清要阻止动作还是仅事后响应时才问。
+  options 固定为：["阻止这个行为发生", "允许行为发生、只额外触发效果"]
+- id="target-match" —— **仅当**需求针对「特定物品 / 某把特定武器 / 特定方块」判断、且判断依据不明时才问。
+  options 固定为：["按种类判断（如所有钻石剑都算）", "只认带特定名字或特殊标记的自定义物品/方块"]
+- id="effect-duration" —— **仅当**需求授予持续性能力/状态（飞行/加速/无敌/发光等）、且生效时长不明时才问。
+  options 固定为：["一次性永久获得", "限定时长后自动失效", "满足某条件时持续生效、条件消失即取消"]
 
 按需包含（根据用户需求语义判断是否需要）：
 - id="growth-curve" — 当需求涉及价格/经验/等级/冷却/数值成长时必须包含
@@ -210,8 +224,8 @@ export function graderPrompt(
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
         ? "\n\n用户已确认的决策（分级与画图必须据此）：\n" + clarifyRounds.flatMap(r =>
-            r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
-        ).join("\n")
+        r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
+    ).join("\n")
         : "";
     const correctionBlock = correction?.trim()
         ? `\n\n【用户对上一版理解的修正，必须采纳重画】：${correction.trim()}`
@@ -371,8 +385,8 @@ export function plannerPrompt(
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
         ? "\n\n用户已确认的决策（必须严格遵守）：\n" + clarifyRounds.flatMap(r =>
-            r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
-        ).join("\n")
+        r.todos.map(t => `- ${t.question} → ${JSON.stringify(r.answers[t.id])}`)
+    ).join("\n")
         : "";
 
     // 据分级结果点亮的深度轴，追加 plan 必须交代的章节（实现仍取最简）
@@ -386,7 +400,7 @@ export function plannerPrompt(
     const axes = gradeContext?.axes ?? [];
     const axisBlock = axes.length
         ? "\n\n据复杂度分级，本需求点亮了以下轴，plan 必须覆盖对应内容（写进相关文件的 role），但实现一律取最简：\n"
-            + axes.map(a => "- " + (AXIS_REQ[a] || a)).join("\n")
+        + axes.map(a => "- " + (AXIS_REQ[a] || a)).join("\n")
         : "";
     const pathBlock = gradeContext?.chosenPath
         ? `\n\n用户已选定的实现路径，plan 必须严格按此方案，且覆盖其流程图中每个元素：\n标题：${gradeContext.chosenPath.title}\n说明：${gradeContext.chosenPath.summary}\n流程图(mermaid)：\n${gradeContext.chosenPath.mermaid}`
@@ -533,7 +547,7 @@ export function reCheckerPrompt(
 ): { system: string; user: string } {
     const crossFileBlock = generatedSummaries?.length
         ? "\n\n项目中已生成文件的可用 API：" + formatSummaries(generatedSummaries) +
-          "\n\n除上述 API 外，还需检查：当前文件调用的项目内方法是否在上述 API 列表中存在。如果调用了未列出的项目内方法，视为错误。"
+        "\n\n除上述 API 外，还需检查：当前文件调用的项目内方法是否在上述 API 列表中存在。如果调用了未列出的项目内方法，视为错误。"
         : "";
 
     return {
@@ -644,8 +658,8 @@ function specializationBlock(
             const e = slice.commandEntry;
             const meta = e
                 ? `命令名=/${e.name}` +
-                  (e.aliases?.length ? `；aliases=${e.aliases.join(",")}` : "") +
-                  (e.permission ? `；permission=${e.permission}` : "")
+                (e.aliases?.length ? `；aliases=${e.aliases.join(",")}` : "") +
+                (e.permission ? `；permission=${e.permission}` : "")
                 : "（无蓝图条目，按 role 推断命令名）";
             return [
                 "═══ CommandGen 专项规则 ═══",
@@ -694,9 +708,9 @@ function specializationBlock(
             const t = slice.taskEntry;
             const meta = t
                 ? `schedule=${t.schedule}` +
-                  (t.periodTicks != null ? `, periodTicks=${t.periodTicks}` : "") +
-                  (t.delayTicks != null ? `, delayTicks=${t.delayTicks}` : "") +
-                  (t.async ? ", async=true" : "")
+                (t.periodTicks != null ? `, periodTicks=${t.periodTicks}` : "") +
+                (t.delayTicks != null ? `, delayTicks=${t.delayTicks}` : "") +
+                (t.async ? ", async=true" : "")
                 : "（无蓝图条目）";
             return [
                 "═══ TaskGen 专项规则 ═══",
