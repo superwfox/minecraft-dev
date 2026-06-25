@@ -1,6 +1,12 @@
 <template>
   <div v-if="visible" class="bp-search" :style="{left: x + 'px', top: y + 'px'}" @mousedown.stop @wheel.stop @contextmenu.prevent>
-    <div class="bps-head">{{ title }}</div>
+    <div class="bps-head">
+      <span class="bps-title">{{ title }}</span>
+      <span v-if="hasToggle" class="bps-ctx" :class="{off: !ctxOn}" @mousedown.stop @click="toggleCtx"
+            :title="ctxOn ? '当前只显示类型相容的候选,点切换为全部' : '当前显示全部节点(忽略类型相容),点切回相容'">
+        {{ ctxOn ? "仅相容" : "全部" }}
+      </span>
+    </div>
     <input ref="inp" v-model="q" class="bps-input" placeholder="搜索节点…"
            @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
            @keydown.enter.prevent="pick(filtered[active])" @keydown.esc.prevent="$emit('cancel')"/>
@@ -21,18 +27,26 @@ import { ref, computed, watch, nextTick } from "vue";
 import type { NodeDef } from "../model";
 import { categoryColor, typeColor } from "../colors";
 
-const props = defineProps<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; title: string }>();
+const props = defineProps<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; title: string; allCandidates?: NodeDef[] }>();
 const emit = defineEmits<{ (e: "select", d: NodeDef): void; (e: "cancel"): void }>();
 
 const q = ref("");
 const active = ref(0);
 const inp = ref<HTMLInputElement | null>(null);
 
+// 上下文敏感开关:仅相容(默认)↔ 全部(忽略类型过滤),记忆到 localStorage
+const CTX_KEY = "bp-ctx-sensitive";
+const ctxOn = ref(localStorage.getItem(CTX_KEY) !== "0");
+const hasToggle = computed(() => !!props.allCandidates && props.allCandidates.length > 0);
+function toggleCtx() { ctxOn.value = !ctxOn.value; localStorage.setItem(CTX_KEY, ctxOn.value ? "1" : "0"); }
+const baseList = computed(() => (hasToggle.value && !ctxOn.value) ? props.allCandidates! : props.candidates);
+
 const filtered = computed(() => {
     const s = q.value.trim().toLowerCase();
+    const src = baseList.value;
     const list = s
-        ? props.candidates.filter(d => d.label.toLowerCase().includes(s) || d.type.toLowerCase().includes(s) || d.category.includes(s))
-        : props.candidates;
+        ? src.filter(d => d.label.toLowerCase().includes(s) || d.type.toLowerCase().includes(s) || d.category.toLowerCase().includes(s))
+        : src;
     return list.slice(0, 80);
 });
 
@@ -60,7 +74,14 @@ function color(d: NodeDef) { return d.special === "member" ? typeColor(d.categor
   box-shadow: inset 1px 1px 0 rgba(255,255,255,0.08), inset -1px -1px 0 rgba(0,0,0,0.5), 0 14px 40px rgba(0,0,0,0.6);
   overflow: hidden;
 }
-.bps-head { padding: 7px 10px; font-size: 11px; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.bps-head { display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 10px; font-size: 11px; color: rgba(255,255,255,0.5); border-bottom: 1px solid rgba(255,255,255,0.06); }
+.bps-title { flex: 1; text-transform: uppercase; letter-spacing: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bps-ctx {
+  flex-shrink: 0; cursor: pointer; font-size: 10px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(137,221,255,0.16); border: 1px solid rgba(137,221,255,0.3); color: #89ddff;
+}
+.bps-ctx.off { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.14); color: rgba(255,255,255,0.55); }
+.bps-ctx:hover { filter: brightness(1.2); }
 .bps-input {
   width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4);
   border: none; border-bottom: 1px solid rgba(255,255,255,0.08);

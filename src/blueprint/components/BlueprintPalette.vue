@@ -22,20 +22,8 @@
       </div>
     </div>
 
-    <!-- 图列表 + 变量(「不同文件的构造」)──────────── -->
+    <!-- 变量(get/set)──────────────────────────── -->
     <div class="bp-sec bottom">
-      <div class="sec-title">
-        图<span class="sec-add" @click="addGraph">+</span>
-      </div>
-      <div class="graph-list">
-        <div v-for="g in graphs" :key="g.id" class="graph-row" :class="{active: g.id === bp.state.currentGraphId}"
-             @click="bp.selectGraph(g.id)">
-          <span class="g-icon">◇</span>
-          <span class="g-name">{{ g.name }}</span>
-          <span class="g-type">{{ g.graphType === 'event' ? '事件' : '函数' }}</span>
-        </div>
-      </div>
-
       <div class="sec-title">
         变量<span class="sec-add" @click="adding = !adding">+</span>
       </div>
@@ -70,7 +58,6 @@ import { useBlueprint } from "../useBlueprint";
 defineEmits<{ (e: "pick", defType: string): void; (e: "pickVar", name: string): void }>();
 const bp = useBlueprint();
 
-const graphs = computed(() => bp.state.doc?.graphs || []);
 const grouped = computed(() => {
     const all = allCuratedDefs();
     return CATEGORIES.map(name => ({ name, defs: all.filter(d => d.category === name) }))
@@ -88,11 +75,6 @@ function onDragDef(ev: DragEvent, type: string) {
 function onDragVar(ev: DragEvent, name: string) {
     ev.dataTransfer?.setData("bp/var", name);
     ev.dataTransfer && (ev.dataTransfer.effectAllowed = "copy");
-}
-
-function addGraph() {
-    const name = prompt("图名称(事件处理 / 函数)", "新建图");
-    if (name) bp.addGraph(name, "function");
 }
 
 // 变量新增

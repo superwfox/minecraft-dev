@@ -107,6 +107,38 @@ function createVarNode(varName: string, mode: "get" | "set", pos: NodePos): Grap
     return node;
 }
 
+// 把某张图整体复制进当前图(拖图复用):节点全换新 id、相对落点偏移、连线随之重映射
+function instantiateGraph(srcId: string, at: NodePos) {
+    const cur = currentGraph.value;
+    const src = state.doc?.graphs.find(g => g.id === srcId);
+    if (!cur || !src || !src.nodes.length) return;
+    const minX = Math.min(...src.nodes.map(n => n.pos.x));
+    const minY = Math.min(...src.nodes.map(n => n.pos.y));
+    const idMap = new Map<string, string>();
+    const newSel: string[] = [];
+    for (const n of src.nodes) {
+        const nid = newId();
+        idMap.set(n.id, nid);
+        cur.nodes.push({
+            id: nid,
+            defType: n.defType,
+            pos: { x: Math.round(at.x + (n.pos.x - minX)), y: Math.round(at.y + (n.pos.y - minY)) },
+            literals: n.literals ? { ...n.literals } : undefined,
+            varRef: n.varRef ? { ...n.varRef } : undefined,
+            inlineDef: n.inlineDef,
+            title: n.title,
+        });
+        newSel.push(nid);
+    }
+    for (const e of src.edges) {
+        const fn = idMap.get(e.from.node), tn = idMap.get(e.to.node);
+        if (!fn || !tn) continue;
+        cur.edges.push({ id: newId(), from: { node: fn, pin: e.from.pin }, to: { node: tn, pin: e.to.pin }, pinKind: e.pinKind });
+    }
+    state.selection = newSel;
+    markDirty();
+}
+
 function removeNode(id: string) {
     const g = currentGraph.value;
     if (!g) return;
@@ -211,7 +243,7 @@ export function useBlueprint() {
     return {
         state, currentGraph, variables,
         loadForTask,
-        addGraph, selectGraph, removeGraph, renameGraph,
+        addGraph, selectGraph, removeGraph, renameGraph, instantiateGraph,
         createNode, createVarNode, removeNode, moveNode, setLiteral, defOf,
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,

@@ -15,7 +15,7 @@
     <Transition name="toast"><div v-if="toast.visible" class="bp-toast">{{ toast.msg }}</div></Transition>
 
     <NodeSearchPopup :visible="search.visible" :x="search.x" :y="search.y"
-                     :candidates="search.candidates" :title="search.title"
+                     :candidates="search.candidates" :all-candidates="search.allCandidates" :title="search.title"
                      @select="onSearchSelect" @cancel="closePopups"/>
     <VarChoicePopup :visible="varPop.visible" :x="varPop.x" :y="varPop.y" :var-name="varPop.varName"
                     @choose="onVarChoose" @cancel="closePopups"/>
@@ -216,7 +216,7 @@ function onWinUp(ev: MouseEvent) {
         // 松手在空白 → 上下文搜索
         const src: DragSource = { pinKind: connectSrc.pin.pinKind, direction: connectSrc.pin.direction, dataType: connectSrc.pin.dataType };
         const loc = toLocal(ev.clientX, ev.clientY);
-        openSearch(loc.x, loc.y, candidatesForPin(src), "连接到…", toGraph(ev.clientX, ev.clientY), "connect");
+        openSearch(loc.x, loc.y, candidatesForPin(src), "连接到…", toGraph(ev.clientX, ev.clientY), "connect", allCreateCandidates());
         stopEdgePan();
         bp.setViewport({ panX: panX.value, panY: panY.value, scale: scale.value });
         rmWin();
@@ -260,6 +260,7 @@ function onContextMenu(ev: MouseEvent) {
 function onDrop(ev: DragEvent) {
     const defType = ev.dataTransfer?.getData("bp/def");
     const varName = ev.dataTransfer?.getData("bp/var");
+    const graphId = ev.dataTransfer?.getData("bp/graph");
     const g = toGraph(ev.clientX, ev.clientY);
     if (defType) {
         const d = curatedDef(defType);
@@ -267,17 +268,19 @@ function onDrop(ev: DragEvent) {
     } else if (varName) {
         const loc = toLocal(ev.clientX, ev.clientY);
         varPop.visible = true; varPop.x = loc.x; varPop.y = loc.y; varPop.varName = varName; varPop.dropPos = g;
+    } else if (graphId) {
+        bp.instantiateGraph(graphId, g);
     }
 }
 
 // ── 搜索 / 变量 弹层 ─────────────────────────────────────────
-const search = reactive<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; title: string; dropPos: NodePos; mode: "create" | "connect" }>(
-    { visible: false, x: 0, y: 0, candidates: [], title: "", dropPos: { x: 0, y: 0 }, mode: "create" });
+const search = reactive<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; allCandidates: NodeDef[] | undefined; title: string; dropPos: NodePos; mode: "create" | "connect" }>(
+    { visible: false, x: 0, y: 0, candidates: [], allCandidates: undefined, title: "", dropPos: { x: 0, y: 0 }, mode: "create" });
 const varPop = reactive<{ visible: boolean; x: number; y: number; varName: string; dropPos: NodePos }>(
     { visible: false, x: 0, y: 0, varName: "", dropPos: { x: 0, y: 0 } });
 
-function openSearch(x: number, y: number, candidates: NodeDef[], title: string, dropPos: NodePos, m: "create" | "connect") {
-    search.visible = true; search.x = x; search.y = y; search.candidates = candidates; search.title = title; search.dropPos = dropPos; search.mode = m;
+function openSearch(x: number, y: number, candidates: NodeDef[], title: string, dropPos: NodePos, m: "create" | "connect", allCandidates?: NodeDef[]) {
+    search.visible = true; search.x = x; search.y = y; search.candidates = candidates; search.allCandidates = allCandidates; search.title = title; search.dropPos = dropPos; search.mode = m;
 }
 function onSearchSelect(def: NodeDef) {
     const node = bp.createNode(def, search.dropPos);

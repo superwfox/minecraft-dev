@@ -14,6 +14,7 @@
     <div class="bp-main">
       <BlueprintPalette @pick="onPick" @pick-var="onPickVar"/>
       <BlueprintCanvas ref="canvasRef"/>
+      <BlueprintGraphTray/>
     </div>
   </div>
 </template>
@@ -23,6 +24,7 @@ import { ref, computed, watch, onMounted } from "vue";
 import { useBlueprint } from "../useBlueprint";
 import BlueprintPalette from "./BlueprintPalette.vue";
 import BlueprintCanvas from "./BlueprintCanvas.vue";
+import BlueprintGraphTray from "./BlueprintGraphTray.vue";
 
 const props = defineProps<{ taskId: string }>();
 defineEmits<{ (e: "back"): void }>();
@@ -59,5 +61,5 @@ function onPickVar(name: string) { canvasRef.value?.varAtCenter(name); }
 .gn-text { font-size: 13px; color: rgba(255,255,255,0.9); font-weight: 500; }
 .gn-tag { font-size: 10px; color: rgba(255,255,255,0.35); padding: 2px 8px; border-radius: 10px; background: rgba(137,221,255,0.1); border: 1px solid rgba(137,221,255,0.18); }
 .bp-meta { margin-left: auto; font-size: 11px; font-family: "Monaco", monospace; color: rgba(255,255,255,0.4); }
-.bp-main { flex: 1; display: flex; min-height: 0; }
+.bp-main { flex: 1; display: flex; min-height: 0; position: relative; }
 </style>
