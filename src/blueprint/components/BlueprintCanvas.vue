@@ -253,7 +253,7 @@ function onWheel(ev: WheelEvent) {
 // ── 右键建节点 ───────────────────────────────────────────────
 function onContextMenu(ev: MouseEvent) {
     const loc = toLocal(ev.clientX, ev.clientY);
-    openSearch(loc.x, loc.y, allCreateCandidates(), "新建节点", toGraph(ev.clientX, ev.clientY), "create");
+    openSearch(loc.x, loc.y, allCreateCandidates(), "新建节点 · 输入可搜 Paper 方法", toGraph(ev.clientX, ev.clientY), "create");
 }
 
 // ── 拖放(左侧面板)─────────────────────────────────────────────

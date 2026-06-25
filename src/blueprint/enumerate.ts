@@ -2,7 +2,7 @@
 // 「拖线松开搜索」与右键建节点共用;也是后续 AI「下一卡预测」的复用层。
 
 import type { NodeDef, PinDef } from "./model";
-import { allCuratedDefs, memberDefsForType } from "./registry";
+import { allCuratedDefs, memberDefsForType, allMemberDefs } from "./registry";
 import { isCompatible } from "./types";
 
 export interface DragSource {
@@ -53,7 +53,8 @@ export function matchPin(def: NodeDef, src: DragSource): string | null {
     return best ? best.id : null;
 }
 
-// 右键建节点:全策展集(成员节点需类型上下文,不在此列)
+// 右键建节点:策展集(结构入口,置顶)+ jar 派生真实方法(搜索框过滤可达)。
+// 无搜索词时弹层只取前若干条 → 策展在前;输入关键词即可搜到真实 Paper 方法。
 export function allCreateCandidates(): NodeDef[] {
-    return allCuratedDefs();
+    return [...allCuratedDefs(), ...allMemberDefs()];
 }

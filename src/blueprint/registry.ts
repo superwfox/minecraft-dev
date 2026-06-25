@@ -109,6 +109,21 @@ export function memberDefsForType(typeName: string): NodeDef[] {
     return defs;
 }
 
+// 全部已加载类的成员节点 —— 供右键搜索可达真实 Paper 方法(搜索框过滤,不铺全量)
+let allMemberCache: NodeDef[] | null = null;
+let allMemberRef: any = null;
+export function allMemberDefs(): NodeDef[] {
+    const st = getDynamicDictStatus();
+    if (st.classes === allMemberRef && allMemberCache) return allMemberCache;
+    allMemberRef = st.classes;
+    const out: NodeDef[] = [];
+    for (const name of st.byName.keys()) {
+        for (const d of memberDefsForType(name)) out.push(d);
+    }
+    allMemberCache = out;
+    return out;
+}
+
 // ── 变量 get/set 定义(动态合成)──────────────────────────────
 export function varDef(varName: string, mode: "get" | "set", vars: Variable[]): NodeDef {
     const v = vars.find(x => x.name === varName);

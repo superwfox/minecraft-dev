@@ -7,7 +7,7 @@
     <div class="bps-list">
       <div v-for="(d, i) in filtered" :key="d.type" class="bps-item" :class="{active: i === active}"
            @mouseenter="active = i" @click="pick(d)">
-        <span class="bps-dot" :style="{background: color(d.category)}"></span>
+        <span class="bps-dot" :style="{background: color(d)}"></span>
         <span class="bps-label">{{ d.label }}</span>
         <span class="bps-cat">{{ d.category }}</span>
       </div>
@@ -19,7 +19,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from "vue";
 import type { NodeDef } from "../model";
-import { categoryColor } from "../colors";
+import { categoryColor, typeColor } from "../colors";
 
 const props = defineProps<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; title: string }>();
 const emit = defineEmits<{ (e: "select", d: NodeDef): void; (e: "cancel"): void }>();
@@ -47,7 +47,8 @@ function move(d: number) {
     active.value = (active.value + d + n) % n;
 }
 function pick(d?: NodeDef) { if (d) emit("select", d); }
-function color(c: string) { return categoryColor(c); }
+// 成员节点(jar 派生真实方法)按其所属类型着色;策展节点按类别色
+function color(d: NodeDef) { return d.special === "member" ? typeColor(d.category) : categoryColor(d.category); }
 </script>
 
 <style scoped>
