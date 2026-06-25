@@ -1,5 +1,5 @@
 <template>
-  <div class="bp-node" :class="{selected, pure: def.kind === 'pure'}"
+  <div class="bp-node" :class="{selected, pure: def.kind === 'pure', dim: nodeDimmed}"
        :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: lay.height + 'px'}"
        @mousedown.stop="onBodyDown">
     <!-- 头部:可拖动移动 -->
@@ -23,7 +23,7 @@
 
       <!-- 输入针脚行 -->
       <div v-for="row in lay.inputs" :key="'i'+row.pin.id" class="bp-row in" :style="{top: (row.y - HEADER_H) + 'px'}">
-        <span class="pin" :class="pinShape(row.pin)" :style="pinStyle(row.pin, 'in')"
+        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin)}]" :style="pinStyle(row.pin, 'in')"
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
         <span class="pin-name">{{ row.pin.name }}</span>
@@ -35,7 +35,7 @@
       <!-- 输出针脚行 -->
       <div v-for="row in lay.outputs" :key="'o'+row.pin.id" class="bp-row out" :style="{top: (row.y - HEADER_H) + 'px'}">
         <span v-if="def.special !== 'literal'" class="pin-name">{{ row.pin.name }}</span>
-        <span class="pin" :class="pinShape(row.pin)" :style="pinStyle(row.pin, 'out')"
+        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin)}]" :style="pinStyle(row.pin, 'out')"
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
       </div>
@@ -48,9 +48,13 @@ import { computed } from "vue";
 import type { GraphNode, NodeDef, PinDef } from "../model";
 import { NODE_W, HEADER_H, layoutOf } from "../layout";
 import { typeColor, EXEC_COLOR, categoryColor } from "../colors";
+import { pinsCompatible } from "../types";
 import { useBlueprint } from "../useBlueprint";
 
-const props = defineProps<{ node: GraphNode; def: NodeDef; selected: boolean }>();
+const props = defineProps<{
+    node: GraphNode; def: NodeDef; selected: boolean;
+    connectingPin?: PinDef | null; connectingNodeId?: string;
+}>();
 const emit = defineEmits<{
     (e: "pindown", p: { nodeId: string; pin: PinDef; ev: MouseEvent }): void;
     (e: "pinup", p: { nodeId: string; pin: PinDef; ev: MouseEvent }): void;
@@ -69,6 +73,17 @@ function hex(c: string, a: number): string {
     const r = parseInt(m.slice(0, 2), 16), g = parseInt(m.slice(2, 4), 16), b = parseInt(m.slice(4, 6), 16);
     return `rgba(${r},${g},${b},${a})`;
 }
+
+// 拖线进行中:本节点(非源)是否有任一可连针脚 / 单个针脚是否可连
+const isSource = computed(() => !!props.connectingNodeId && props.connectingNodeId === props.node.id);
+function pinUsable(p: PinDef): boolean {
+    if (!props.connectingPin || isSource.value) return true;
+    return pinsCompatible(props.connectingPin, p);
+}
+const nodeDimmed = computed(() => {
+    if (!props.connectingPin || isSource.value) return false;
+    return !props.def.pins.some(p => pinsCompatible(props.connectingPin!, p));
+});
 
 function pinShape(p: PinDef) { return p.pinKind === "exec" ? "exec" : "data"; }
 function pinColor(p: PinDef) { return p.pinKind === "exec" ? EXEC_COLOR : typeColor(p.dataType); }
@@ -113,6 +128,7 @@ function onBodyDown(ev: MouseEvent) { emit("bodydown", { nodeId: props.node.id, 
               0 0 0 2px wheat, 0 8px 22px rgba(0,0,0,0.5);
 }
 .bp-node.pure { background: rgba(26, 28, 24, 0.96); }
+.bp-node.dim { opacity: 0.32; filter: grayscale(0.7); transition: opacity 0.12s, filter 0.12s; }
 
 .bp-head {
   display: flex; align-items: center; gap: 6px;
@@ -132,16 +148,20 @@ function onBodyDown(ev: MouseEvent) { emit("bodydown", { nodeId: props.node.id, 
 .bp-row.in { left: 10px; right: 10px; justify-content: flex-start; }
 .bp-row.out { left: 10px; right: 10px; justify-content: flex-end; }
 
-.pin { width: 11px; height: 11px; flex-shrink: 0; cursor: crosshair; box-sizing: border-box; }
+.pin { position: relative; width: 11px; height: 11px; flex-shrink: 0; cursor: crosshair; box-sizing: border-box; }
 .pin.data { border-radius: 2px; border: 2px solid; }
 .pin.exec {
   width: 0; height: 0; background: none !important;
   border-top: 6px solid transparent; border-bottom: 6px solid transparent;
   border-left: 9px solid; border-radius: 0;
 }
+/* 放大命中区:鼠标在端点 ±8px 内都算命中(命中盒 27px,约原来 2.5 倍),显著放宽连线判定 */
+.pin::before { content: ""; position: absolute; inset: -8px; border-radius: 5px; }
 .bp-row.in .pin { position: absolute; left: -16px; }
 .bp-row.out .pin { position: absolute; right: -16px; }
 .pin:hover { filter: brightness(1.4); transform: scale(1.15); }
+.pin.dimpin { opacity: 0.2; }
+.pin.dimpin:hover { opacity: 0.55; }
 
 .pin-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255,255,255,0.78); max-width: 110px; }
 .bp-row.out .pin-name { text-align: right; }

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="visible" class="bp-search" :style="{left: x + 'px', top: y + 'px'}" @mousedown.stop @contextmenu.prevent>
+  <div v-if="visible" class="bp-search" :style="{left: x + 'px', top: y + 'px'}" @mousedown.stop @wheel.stop @contextmenu.prevent>
     <div class="bps-head">{{ title }}</div>
     <input ref="inp" v-model="q" class="bps-input" placeholder="搜索节点…"
            @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"

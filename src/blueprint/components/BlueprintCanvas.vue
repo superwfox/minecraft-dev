@@ -6,11 +6,13 @@
       <BlueprintEdges :temp="tempEdge"/>
       <BlueprintNode v-for="n in nodes" :key="n.id"
                      :node="n" :def="bp.defOf(n)" :selected="sel.has(n.id)"
+                     :connecting-pin="connectingPin" :connecting-node-id="connectingPin ? connectSrc.nodeId : ''"
                      @pindown="onPinDown" @pinup="onPinUp"
                      @headdown="onHeadDown" @bodydown="onBodyDown" @remove="bp.removeNode"/>
     </div>
 
     <div v-if="!nodes.length" class="bp-hint">右键空白处新建节点 · 从左侧拖入节点/变量</div>
+    <Transition name="toast"><div v-if="toast.visible" class="bp-toast">{{ toast.msg }}</div></Transition>
 
     <NodeSearchPopup :visible="search.visible" :x="search.x" :y="search.y"
                      :candidates="search.candidates" :title="search.title"
@@ -85,6 +87,17 @@ const tempEdge = computed(() => {
     const c = connectSrc.pin.pinKind === "exec" ? EXEC_COLOR : typeColor(connectSrc.pin.dataType);
     return { from: connectSrc.anchor, to: tempTo.value, color: c };
 });
+// 拖线进行中的源针脚 —— 供节点做可连性暗淡
+const connectingPin = computed(() => mode.value === "connect" ? connectSrc.pin : null);
+
+// 不兼容提示 toast
+const toast = reactive<{ visible: boolean; msg: string }>({ visible: false, msg: "" });
+let toastTimer: any = null;
+function showToast(msg: string) {
+    toast.msg = msg; toast.visible = true;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.visible = false; }, 1600);
+}
 
 function addWin() { window.addEventListener("mousemove", onWinMove); window.addEventListener("mouseup", onWinUp); }
 function rmWin() { window.removeEventListener("mousemove", onWinMove); window.removeEventListener("mouseup", onWinUp); }
@@ -135,30 +148,66 @@ function onPinDown(p: { nodeId: string; pin: PinDef; ev: MouseEvent }) {
 function onPinUp(p: { nodeId: string; pin: PinDef; ev: MouseEvent }) {
     // 松手落在某针脚上 —— 无论当前是连线/移动/平移手势,都在此收尾(pin 的 .stop 会吞掉 window mouseup)
     if (mode.value === "connect" && connectSrc.pin) {
-        bp.connect(connectSrc.nodeId, connectSrc.pin.id, p.nodeId, p.pin.id);
+        const ok = bp.connect(connectSrc.nodeId, connectSrc.pin.id, p.nodeId, p.pin.id);
         connectConsumed = true;
+        if (!ok) showToast("类型不兼容，无法接入");
     } else if (mode.value === "pan") {
         bp.setViewport({ panX: panX.value, panY: panY.value, scale: scale.value });
     }
     endGesture();
 }
 
-function onWinMove(ev: MouseEvent) {
-    if (mode.value === "pan") {
-        panX.value = panStart.px + (ev.clientX - panStart.x);
-        panY.value = panStart.py + (ev.clientY - panStart.y);
-        if (Math.abs(ev.clientX - panStart.x) + Math.abs(ev.clientY - panStart.y) > 3) panStart.moved = true;
-    } else if (mode.value === "move" && moveData) {
-        const g = toGraph(ev.clientX, ev.clientY);
+// move / connect 的拖动落地(供 onWinMove 与 edge-pan 帧循环复用)
+function applyDrag(cx: number, cy: number) {
+    if (mode.value === "move" && moveData) {
+        const g = toGraph(cx, cy);
         const dx = g.x - moveData.start.x, dy = g.y - moveData.start.y;
         for (const id of moveData.ids) {
             const o = moveData.orig.get(id);
             if (o) bp.moveNode(id, { x: Math.round(o.x + dx), y: Math.round(o.y + dy) });
         }
     } else if (mode.value === "connect") {
-        tempTo.value = toGraph(ev.clientX, ev.clientY);
+        tempTo.value = toGraph(cx, cy);
     }
 }
+
+const lastClient = { x: 0, y: 0 };
+function onWinMove(ev: MouseEvent) {
+    lastClient.x = ev.clientX; lastClient.y = ev.clientY;
+    if (mode.value === "pan") {
+        panX.value = panStart.px + (ev.clientX - panStart.x);
+        panY.value = panStart.py + (ev.clientY - panStart.y);
+        if (Math.abs(ev.clientX - panStart.x) + Math.abs(ev.clientY - panStart.y) > 3) panStart.moved = true;
+    } else {
+        applyDrag(ev.clientX, ev.clientY);
+        updateEdgePan(ev.clientX, ev.clientY);
+    }
+}
+
+// ── 拖到边缘自动平移视图 ─────────────────────────────────────
+let edgeRAF = 0;
+const edgeVec = { x: 0, y: 0 };
+function updateEdgePan(cx: number, cy: number) {
+    const r = rect();
+    const M = 56; // 触发边距
+    let vx = 0, vy = 0;
+    if (cx < r.left + M) vx = -(M - (cx - r.left));
+    else if (cx > r.right - M) vx = M - (r.right - cx);
+    if (cy < r.top + M) vy = -(M - (cy - r.top));
+    else if (cy > r.bottom - M) vy = M - (r.bottom - cy);
+    const sp = 0.22;
+    edgeVec.x = Math.max(-16, Math.min(16, vx * sp));
+    edgeVec.y = Math.max(-16, Math.min(16, vy * sp));
+    if ((edgeVec.x || edgeVec.y) && !edgeRAF) edgeRAF = requestAnimationFrame(edgeTick);
+    else if (!edgeVec.x && !edgeVec.y && edgeRAF) { cancelAnimationFrame(edgeRAF); edgeRAF = 0; }
+}
+function edgeTick() {
+    if (mode.value !== "move" && mode.value !== "connect") { edgeRAF = 0; return; }
+    panX.value -= edgeVec.x; panY.value -= edgeVec.y;
+    applyDrag(lastClient.x, lastClient.y); // 内容随之移动,拖动对象保持在指针下
+    edgeRAF = requestAnimationFrame(edgeTick);
+}
+function stopEdgePan() { if (edgeRAF) { cancelAnimationFrame(edgeRAF); edgeRAF = 0; } edgeVec.x = 0; edgeVec.y = 0; }
 function onWinUp(ev: MouseEvent) {
     if (mode.value === "pan") {
         if (!panStart.moved) bp.setSelection([]); // 空白点击:清选
@@ -168,6 +217,8 @@ function onWinUp(ev: MouseEvent) {
         const src: DragSource = { pinKind: connectSrc.pin.pinKind, direction: connectSrc.pin.direction, dataType: connectSrc.pin.dataType };
         const loc = toLocal(ev.clientX, ev.clientY);
         openSearch(loc.x, loc.y, candidatesForPin(src), "连接到…", toGraph(ev.clientX, ev.clientY), "connect");
+        stopEdgePan();
+        bp.setViewport({ panX: panX.value, panY: panY.value, scale: scale.value });
         rmWin();
         mode.value = "idle";
         return; // 保留 connectSrc 供 popup 完成接线
@@ -175,7 +226,11 @@ function onWinUp(ev: MouseEvent) {
     endGesture();
 }
 function endGesture() {
+    stopEdgePan();
     rmWin();
+    if (mode.value === "move" || mode.value === "connect") {
+        bp.setViewport({ panX: panX.value, panY: panY.value, scale: scale.value }); // edge-pan 可能改了视图
+    }
     mode.value = "idle";
     moveData = null;
     tempTo.value = null;
@@ -230,6 +285,7 @@ function onSearchSelect(def: NodeDef) {
         const src: DragSource = { pinKind: connectSrc.pin.pinKind, direction: connectSrc.pin.direction, dataType: connectSrc.pin.dataType };
         const pid = matchPin(def, src);
         if (pid) bp.connect(connectSrc.nodeId, connectSrc.pin.id, node.id, pid);
+        else showToast("该节点没有可接入的针脚");
     }
     closePopups();
 }
@@ -269,7 +325,7 @@ function onKey(ev: KeyboardEvent) {
     }
 }
 onMounted(() => window.addEventListener("keydown", onKey));
-onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); rmWin(); });
+onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); rmWin(); stopEdgePan(); });
 </script>
 
 <style scoped>
@@ -288,4 +344,13 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); rmWin(); }
   font-size: 12px; color: rgba(255,255,255,0.3); pointer-events: none;
   padding: 6px 14px; border-radius: 20px; background: rgba(0,0,0,0.3);
 }
+.bp-toast {
+  position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; color: #ffcaca; pointer-events: none; z-index: 60;
+  padding: 8px 16px; border-radius: 8px;
+  background: rgba(40,12,12,0.92); border: 1px solid rgba(255,120,120,0.4);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+}
+.toast-enter-active, .toast-leave-active { transition: opacity 0.2s, transform 0.2s; }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 8px); }
 </style>
