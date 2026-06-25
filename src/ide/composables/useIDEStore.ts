@@ -19,6 +19,7 @@ export type IDESeedFile = {
 };
 
 export type ViewMode = "category" | "folder";
+export type IDEMode = "code" | "blueprint";
 
 // build 关键元数据：KV 任务 1h 过期后，IDE 仍能凭这些 + IndexedDB 文件重建构建。
 // 存 localStorage（永久），按 taskId 隔离。
@@ -97,6 +98,7 @@ const state = reactive<{
     loading: boolean;
     sidebarWidth: number;
     viewMode: ViewMode;
+    ideMode: IDEMode;
 }>({
     taskId: "",
     files: [],
@@ -108,6 +110,7 @@ const state = reactive<{
     loading: false,
     sidebarWidth: 280,
     viewMode: "category",
+    ideMode: "code",
 });
 
 async function loadFromTask(taskId: string, seed: IDESeedFile[] = []) {
@@ -198,6 +201,10 @@ function setViewMode(m: ViewMode) {
     state.viewMode = m;
 }
 
+function setIdeMode(m: IDEMode) {
+    state.ideMode = m;
+}
+
 async function upsertFile(file: IDESeedFile) {
     const existing = state.files.find(f => f.path === file.path);
     if (existing) {
@@ -282,6 +289,7 @@ export function useIDEStore() {
         setCursor,
         setSidebarWidth,
         setViewMode,
+        setIdeMode,
         upsertFile,
         saveMeta,
         loadMeta,

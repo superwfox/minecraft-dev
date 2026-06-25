@@ -17,7 +17,7 @@
           {{ pomLabel }}
         </span>
       </div>
-      <div class="toolbar-right">
+      <div class="toolbar-right" v-if="!blueprint">
         <button class="tb-btn" :disabled="!dirtyCount" @click="onSave" title="保存全部 (⌘S)">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
             <path d="M11 2H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V5l-3-3Zm0 2.5L13.5 7H10V4.5h1ZM4 4h5v3a1 1 0 0 0 1 1h3v4H4V4Zm2 6h6v1H6v-1Zm0-2h6v1H6V8Z"/>
@@ -33,52 +33,61 @@
       </div>
     </div>
 
-    <!-- 主体：侧栏 + 编辑区 -->
+    <!-- 主体：代码舞台 ⇄ 蓝图舞台（整体塌缩动画切换）-->
     <div class="ide-body">
-      <div class="ide-sidebar" :style="{width: state.sidebarWidth + 'px'}">
-        <FileTree :files="state.files"
-                  :current-path="state.currentPath"
-                  :collapsed-folders="state.collapsedFolders"
-                  :collapsed-categories="state.collapsedCategories"
-                  :view-mode="state.viewMode"
-                  @select="openFile"
-                  @toggle-folder="toggleFolder"
-                  @toggle-category="toggleCategory"
-                  @change-view="setViewMode"/>
-      </div>
+      <Transition name="collapse">
+        <div v-if="!blueprint" class="code-stage">
+          <div class="ide-sidebar" :style="{width: state.sidebarWidth + 'px'}">
+            <FileTree :files="state.files"
+                      :current-path="state.currentPath"
+                      :collapsed-folders="state.collapsedFolders"
+                      :collapsed-categories="state.collapsedCategories"
+                      :view-mode="state.viewMode"
+                      @select="openFile"
+                      @toggle-folder="toggleFolder"
+                      @toggle-category="toggleCategory"
+                      @change-view="setViewMode"
+                      @enter-blueprint="enterBlueprint"/>
+          </div>
 
-      <div class="ide-resizer" @mousedown="startResize"></div>
+          <div class="ide-resizer" @mousedown="startResize"></div>
 
-      <div class="ide-editor-col">
-        <TabBar :tabs="state.openTabs"
-                :current-path="state.currentPath"
-                :dirty-map="dirtyMap"
-                @select="openFile"
-                @close="closeTab"/>
-        <EditorPanel v-if="currentFile"
-                     :path="currentFile.path"
-                     :role="currentFile.role"
-                     :model-value="currentFile.content"
-                     :bottom-gutter="editorBottomGutter"
-                     @update:model-value="onContentChange"
-                     @cursor="setCursor"/>
-        <div v-else class="empty-editor">
-          <div class="empty-art">⌘</div>
-          <div class="empty-text">从左侧选择一个文件开始编辑</div>
-          <div class="empty-hint">⌘P 快速打开 · ⌘S 保存</div>
+          <div class="ide-editor-col">
+            <TabBar :tabs="state.openTabs"
+                    :current-path="state.currentPath"
+                    :dirty-map="dirtyMap"
+                    @select="openFile"
+                    @close="closeTab"/>
+            <EditorPanel v-if="currentFile"
+                         :path="currentFile.path"
+                         :role="currentFile.role"
+                         :model-value="currentFile.content"
+                         :bottom-gutter="editorBottomGutter"
+                         @update:model-value="onContentChange"
+                         @cursor="setCursor"/>
+            <div v-else class="empty-editor">
+              <div class="empty-art">⌘</div>
+              <div class="empty-text">从左侧选择一个文件开始编辑</div>
+              <div class="empty-hint">⌘P 快速打开 · ⌘S 保存</div>
+            </div>
+          </div>
+
+          <!-- 底部 AI 聊天 dock -->
+          <BottomChatDock :state="dockState"
+                          :messages="chat.state.messages"
+                          :streaming="chat.state.streaming"
+                          :streaming-text="chat.state.streamingText"
+                          :context-hint="dockContextHint"
+                          @send="onDockSend"
+                          @open-file="openFile"
+                          @request-open="dockState = 'open'"
+                          @close="dockState = 'dormant'"/>
         </div>
-      </div>
+      </Transition>
 
-      <!-- 底部 AI 聊天 dock -->
-      <BottomChatDock :state="dockState"
-                      :messages="chat.state.messages"
-                      :streaming="chat.state.streaming"
-                      :streaming-text="chat.state.streamingText"
-                      :context-hint="dockContextHint"
-                      @send="onDockSend"
-                      @open-file="openFile"
-                      @request-open="dockState = 'open'"
-                      @close="dockState = 'dormant'"/>
+      <Transition name="bpenter">
+        <BlueprintView v-if="blueprint" class="bp-stage" :task-id="state.taskId" @back="exitBlueprint"/>
+      </Transition>
     </div>
 
     <!-- 状态栏 -->
@@ -109,6 +118,7 @@ import FileTree from "../components/FileTree.vue";
 import EditorPanel from "../components/EditorPanel.vue";
 import TabBar from "../components/TabBar.vue";
 import BottomChatDock from "../components/BottomChatDock.vue";
+import BlueprintView from "../../blueprint/components/BlueprintView.vue";
 import {useIDEStore, type IDESeedFile} from "../composables/useIDEStore";
 import {useIDEChat} from "../composables/useIDEChat";
 import {loadFromPom, type LoadStatus} from "../composables/useJarSymbols";
@@ -120,7 +130,11 @@ const route = useRoute();
 const router = useRouter();
 const {state, currentFile, dirtyCount, loadFromTask, saveAll, updateContent,
        openFile, closeTab, toggleFolder, toggleCategory, setCursor, setSidebarWidth, setViewMode,
-       upsertFile, saveMeta, loadMeta} = useIDEStore();
+       setIdeMode, upsertFile, saveMeta, loadMeta} = useIDEStore();
+
+const blueprint = computed(() => state.ideMode === "blueprint");
+function enterBlueprint() { setIdeMode("blueprint"); }
+function exitBlueprint() { setIdeMode("code"); }
 
 const dirtyMap = computed(() => {
     const m: Record<string, boolean> = {};
@@ -400,6 +414,20 @@ function stopResize() {
   min-height: 0;
   position: relative;
 }
+.code-stage { position: absolute; inset: 0; display: flex; min-height: 0; }
+.bp-stage { position: absolute; inset: 0; display: flex; min-height: 0; }
+
+/* 进入蓝图：代码舞台塌缩成左上角小长方形并淡出 */
+.collapse-leave-active { transition: transform 0.38s cubic-bezier(0.5,0,0.2,1), opacity 0.34s ease; transform-origin: top left; z-index: 3; }
+.collapse-leave-to { transform: scale(0.1); opacity: 0; }
+.collapse-enter-active { transition: transform 0.42s cubic-bezier(0.32,0.72,0.24,1) 0.1s, opacity 0.4s ease 0.1s; transform-origin: top left; z-index: 3; }
+.collapse-enter-from { transform: scale(0.1); opacity: 0; }
+/* 蓝图舞台：紧随其后从左滑入 */
+.bpenter-enter-active { transition: opacity 0.44s ease 0.14s, transform 0.44s cubic-bezier(0.32,0.72,0.24,1) 0.14s; }
+.bpenter-enter-from { opacity: 0; transform: translateX(-30px) scale(0.98); }
+.bpenter-leave-active { transition: opacity 0.2s ease; }
+.bpenter-leave-to { opacity: 0; }
+
 .ide-sidebar { flex-shrink: 0; min-width: 180px; max-width: 600px; display: flex; overflow: hidden; }
 .ide-resizer {
   flex: 0 0 4px; background: transparent; cursor: col-resize;

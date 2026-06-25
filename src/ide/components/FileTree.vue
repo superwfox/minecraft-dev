@@ -14,6 +14,13 @@
             <path d="M1.5 4.5a1.5 1.5 0 0 1 1.5-1.5h3.379a1.5 1.5 0 0 1 1.06.44L8.5 4.5h5a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-8Z"/>
           </svg>
         </span>
+        <span class="vt-btn bp" @click="$emit('enterBlueprint')" title="可视化蓝图">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4">
+            <rect x="1.5" y="2.5" width="5" height="4" rx="1"/>
+            <rect x="9.5" y="9.5" width="5" height="4" rx="1"/>
+            <path d="M6.5 4.5H9a1.5 1.5 0 0 1 1.5 1.5v3.5"/>
+          </svg>
+        </span>
       </div>
     </div>
     <div class="tree-search">
@@ -90,6 +97,7 @@ const emit = defineEmits<{
     (e: "toggleFolder", path: string): void;
     (e: "toggleCategory", key: string): void;
     (e: "changeView", mode: ViewMode): void;
+    (e: "enterBlueprint"): void;
 }>();
 
 const filter = ref("");
@@ -276,6 +284,7 @@ function onClick(node: FlatNode) {
   background: rgba(245,222,179,0.18);
   color: wheat;
 }
+.vt-btn.bp:hover { color: #89ddff; background: rgba(137,221,255,0.16); }
 
 .tree-search {
   display: flex;
