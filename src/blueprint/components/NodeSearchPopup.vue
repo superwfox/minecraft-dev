@@ -43,10 +43,14 @@ function toggleCtx() { ctxOn.value = !ctxOn.value; localStorage.setItem(CTX_KEY,
 const baseList = computed(() => (hasToggle.value && !ctxOn.value) ? props.allCandidates! : props.candidates);
 
 const filtered = computed(() => {
-    const s = q.value.trim().toLowerCase();
+    // 关键词分词:按空格 split,每个词都要命中(AND)。如 "player send" → 同时含 player 与 send
+    const tokens = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const src = baseList.value;
-    const list = s
-        ? src.filter(d => d.label.toLowerCase().includes(s) || d.type.toLowerCase().includes(s) || d.category.toLowerCase().includes(s))
+    const list = tokens.length
+        ? src.filter(d => {
+            const hay = (d.label + " " + d.type + " " + d.category).toLowerCase();
+            return tokens.every(t => hay.includes(t));
+        })
         : src;
     return list.slice(0, 80);
 });

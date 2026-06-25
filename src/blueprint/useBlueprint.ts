@@ -107,6 +107,25 @@ function createVarNode(varName: string, mode: "get" | "set", pos: NodePos): Grap
     return node;
 }
 
+// 函数引用节点:把一张图折叠成单个节点(本期 = 调用入口,exec-in/out;参数传递待 function entry/return 体系)
+function buildGraphRefDef(graphId: string): NodeDef {
+    const g = state.doc?.graphs.find(x => x.id === graphId);
+    const label = g ? g.name : "函数(已删除)";
+    return {
+        type: `graphref:${graphId}`, category: "函数", label, kind: "impure", special: "function",
+        desc: "调用图：" + label,
+        pins: [
+            { id: "exec", name: "▷", direction: "in", pinKind: "exec" },
+            { id: "then", name: "▷", direction: "out", pinKind: "exec" },
+        ],
+    };
+}
+function createGraphRefNode(graphId: string, pos: NodePos): GraphNode {
+    const node: GraphNode = { id: newId(), defType: `graphref:${graphId}`, graphRef: graphId, pos: { ...pos } };
+    pushNode(node);
+    return node;
+}
+
 // 把某张图整体复制进当前图(拖图复用):节点全换新 id、相对落点偏移、连线随之重映射
 function instantiateGraph(srcId: string, at: NodePos) {
     const cur = currentGraph.value;
@@ -165,6 +184,7 @@ function setLiteral(nodeId: string, pinId: string, value: string) {
 }
 
 function defOf(node: GraphNode): NodeDef {
+    if (node.graphRef) return buildGraphRefDef(node.graphRef);
     return resolveDef(node, variables.value);
 }
 
@@ -247,7 +267,7 @@ export function useBlueprint() {
         state, currentGraph, variables,
         loadForTask,
         addGraph, selectGraph, removeGraph, renameGraph, instantiateGraph,
-        createNode, createVarNode, removeNode, moveNode, setLiteral, defOf,
+        createNode, createVarNode, createGraphRefNode, removeNode, moveNode, setLiteral, defOf,
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,
         setViewport, setSelection,

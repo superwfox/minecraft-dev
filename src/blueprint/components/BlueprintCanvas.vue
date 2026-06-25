@@ -301,7 +301,7 @@ function onDrop(ev: DragEvent) {
         const loc = toLocal(ev.clientX, ev.clientY);
         varPop.visible = true; varPop.x = loc.x; varPop.y = loc.y; varPop.varName = varName; varPop.dropPos = g;
     } else if (graphId) {
-        bp.instantiateGraph(graphId, g);
+        bp.createGraphRefNode(graphId, g); // 图折叠为单个函数节点(非展开复制)
     }
 }
 

@@ -13,7 +13,8 @@ export type NodeSpecial =
     | "lifecycle"
     | "action"
     | "literal"
-    | "member";
+    | "member"
+    | "function";
 
 export interface PinDef {
     id: string;
@@ -43,6 +44,7 @@ export interface GraphNode {
     pos: NodePos;
     literals?: Record<string, string>; // pinId → 字面量(未连接的 data-in)
     varRef?: { name: string; mode: "get" | "set" };
+    graphRef?: string; // 函数引用节点:指向某张图(折叠为单节点)
     // member/变量节点把定义快照内联,保证 jar 未加载/重载后仍能渲染
     inlineDef?: NodeDef;
     title?: string;

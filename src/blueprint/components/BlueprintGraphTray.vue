@@ -16,7 +16,7 @@
                @keydown.enter="commitGraph" @keydown.esc="adding = false"/>
         <button class="tn-btn" @click="commitGraph">建</button>
       </div>
-      <div class="tray-hint">把卡片拖到画布 → 该图整体复用进当前图</div>
+      <div class="tray-hint">把卡片拖到画布 → 折叠成一个函数节点供调用</div>
 
       <div class="tray-list">
         <div v-for="g in graphs" :key="g.id" class="graph-card"

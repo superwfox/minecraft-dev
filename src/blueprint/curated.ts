@@ -20,6 +20,7 @@ export const CATEGORY_COLOR: Record<string, string> = {
     "动作": "#a3be8c",
     "转换": "#ff9b6a",
     "变量": "#89ddff",
+    "函数": "#69d6a0",
 };
 
 export const CURATED: NodeDef[] = [
