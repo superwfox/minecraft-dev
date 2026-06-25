@@ -9,7 +9,12 @@
     <div class="tray-panel">
       <div class="tray-head">
         <span>图库</span>
-        <span class="tray-add" @click="addGraph">+ 新建图</span>
+        <span class="tray-add" @click="toggleAdd">{{ adding ? "取消" : "+ 新建图" }}</span>
+      </div>
+      <div v-if="adding" class="tray-newrow">
+        <input ref="addInp" v-model="newName" class="tn-in" placeholder="图名称(事件 / 函数)"
+               @keydown.enter="commitGraph" @keydown.esc="adding = false"/>
+        <button class="tn-btn" @click="commitGraph">建</button>
       </div>
       <div class="tray-hint">把卡片拖到画布 → 该图整体复用进当前图</div>
 
@@ -31,20 +36,31 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, nextTick } from "vue";
 import { useBlueprint } from "../useBlueprint";
 
 const bp = useBlueprint();
 const open = ref(false);
 const graphs = computed(() => bp.state.doc?.graphs || []);
 
+const adding = ref(false);
+const newName = ref("");
+const addInp = ref<HTMLInputElement | null>(null);
+async function toggleAdd() {
+    adding.value = !adding.value;
+    if (adding.value) { await nextTick(); addInp.value?.focus(); }
+}
+function commitGraph() {
+    const n = newName.value.trim();
+    if (!n) return;
+    bp.addGraph(n, "function");
+    newName.value = "";
+    adding.value = false;
+}
+
 function onDrag(ev: DragEvent, id: string) {
     ev.dataTransfer?.setData("bp/graph", id);
     ev.dataTransfer && (ev.dataTransfer.effectAllowed = "copy");
-}
-function addGraph() {
-    const name = prompt("图名称(事件处理 / 函数)", "新建图");
-    if (name) bp.addGraph(name, "function");
 }
 </script>
 
@@ -80,6 +96,18 @@ function addGraph() {
 .tray-add { cursor: pointer; color: #89ddff; text-transform: none; letter-spacing: 0; }
 .tray-add:hover { filter: brightness(1.2); }
 .tray-hint { padding: 8px 12px; font-size: 11px; color: rgba(255,255,255,0.32); line-height: 1.4; }
+.tray-newrow { display: flex; gap: 6px; padding: 8px 12px 4px; }
+.tn-in {
+  flex: 1; min-width: 0; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 4px; color: wheat; font-size: 12px; padding: 6px 8px; outline: none; font-family: inherit;
+}
+.tn-in:focus { border-color: rgba(137,221,255,0.5); }
+.tn-btn {
+  flex-shrink: 0; background: rgba(137,221,255,0.2); border: 1px solid rgba(0,0,0,0.4);
+  border-radius: 4px; color: #fff; font-size: 12px; padding: 0 12px; cursor: pointer; font-family: inherit;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.12), inset -1px -1px 0 rgba(0,0,0,0.4);
+}
+.tn-btn:hover { filter: brightness(1.2); }
 
 .tray-list { flex: 1; overflow-y: auto; padding: 4px 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .graph-card {

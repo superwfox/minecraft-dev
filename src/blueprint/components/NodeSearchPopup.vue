@@ -2,9 +2,10 @@
   <div v-if="visible" class="bp-search" :style="{left: x + 'px', top: y + 'px'}" @mousedown.stop @wheel.stop @contextmenu.prevent>
     <div class="bps-head">
       <span class="bps-title">{{ title }}</span>
-      <span v-if="hasToggle" class="bps-ctx" :class="{off: !ctxOn}" @mousedown.stop @click="toggleCtx"
+      <span v-if="hasToggle" class="bps-ctx" @mousedown.stop @click="toggleCtx"
             :title="ctxOn ? '当前只显示类型相容的候选,点切换为全部' : '当前显示全部节点(忽略类型相容),点切回相容'">
-        {{ ctxOn ? "仅相容" : "全部" }}
+        <span class="ctx-label">{{ ctxOn ? "仅相容" : "全部" }}</span>
+        <span class="ctx-sw" :class="{on: ctxOn}"><span class="ctx-knob"></span></span>
       </span>
     </div>
     <input ref="inp" v-model="q" class="bps-input" placeholder="搜索节点…"
@@ -76,12 +77,21 @@ function color(d: NodeDef) { return d.special === "member" ? typeColor(d.categor
 }
 .bps-head { display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 10px; font-size: 11px; color: rgba(255,255,255,0.5); border-bottom: 1px solid rgba(255,255,255,0.06); }
 .bps-title { flex: 1; text-transform: uppercase; letter-spacing: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bps-ctx {
-  flex-shrink: 0; cursor: pointer; font-size: 10px; padding: 2px 8px; border-radius: 10px;
-  background: rgba(137,221,255,0.16); border: 1px solid rgba(137,221,255,0.3); color: #89ddff;
+.bps-ctx { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.ctx-label { font-size: 10px; color: rgba(255,255,255,0.55); min-width: 32px; text-align: right; }
+.ctx-sw {
+  position: relative; width: 30px; height: 16px; border-radius: 9px;
+  background: rgba(255,255,255,0.1); border: 1px solid rgba(0,0,0,0.5);
+  box-shadow: inset 1px 1px 1px rgba(0,0,0,0.35); transition: background 0.15s;
 }
-.bps-ctx.off { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.14); color: rgba(255,255,255,0.55); }
-.bps-ctx:hover { filter: brightness(1.2); }
+.ctx-sw.on { background: rgba(137,221,255,0.4); }
+.ctx-knob {
+  position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 2px;
+  background: #cfd6dd; box-shadow: inset 1px 1px 0 rgba(255,255,255,0.5), 0 1px 2px rgba(0,0,0,0.45);
+  transition: transform 0.15s, background 0.15s;
+}
+.ctx-sw.on .ctx-knob { transform: translateX(14px); background: #89ddff; }
+.bps-ctx:hover .ctx-sw { filter: brightness(1.15); }
 .bps-input {
   width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4);
   border: none; border-bottom: 1px solid rgba(255,255,255,0.08);

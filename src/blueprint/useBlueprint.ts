@@ -112,11 +112,14 @@ function instantiateGraph(srcId: string, at: NodePos) {
     const cur = currentGraph.value;
     const src = state.doc?.graphs.find(g => g.id === srcId);
     if (!cur || !src || !src.nodes.length) return;
-    const minX = Math.min(...src.nodes.map(n => n.pos.x));
-    const minY = Math.min(...src.nodes.map(n => n.pos.y));
+    // 关键:用快照遍历。源图可能就是当前图(拖自己),否则边遍历边 push 同一数组会死循环
+    const srcNodes = src.nodes.slice();
+    const srcEdges = src.edges.slice();
+    const minX = Math.min(...srcNodes.map(n => n.pos.x));
+    const minY = Math.min(...srcNodes.map(n => n.pos.y));
     const idMap = new Map<string, string>();
     const newSel: string[] = [];
-    for (const n of src.nodes) {
+    for (const n of srcNodes) {
         const nid = newId();
         idMap.set(n.id, nid);
         cur.nodes.push({
@@ -130,7 +133,7 @@ function instantiateGraph(srcId: string, at: NodePos) {
         });
         newSel.push(nid);
     }
-    for (const e of src.edges) {
+    for (const e of srcEdges) {
         const fn = idMap.get(e.from.node), tn = idMap.get(e.to.node);
         if (!fn || !tn) continue;
         cur.edges.push({ id: newId(), from: { node: fn, pin: e.from.pin }, to: { node: tn, pin: e.to.pin }, pinKind: e.pinKind });

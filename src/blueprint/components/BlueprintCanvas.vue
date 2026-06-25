@@ -239,7 +239,8 @@ function endGesture() {
 
 // ── 缩放 ─────────────────────────────────────────────────────
 function onWheel(ev: WheelEvent) {
-    const factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
+    // 与 deltaY 成比例的平滑缩放,系数小 → 不过敏(触控板/滚轮都温和)
+    const factor = Math.exp(-ev.deltaY * 0.0012);
     const ns = Math.min(2.5, Math.max(0.3, scale.value * factor));
     const r = rect();
     const lx = ev.clientX - r.left, ly = ev.clientY - r.top;
