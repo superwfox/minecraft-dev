@@ -24,7 +24,9 @@
              draggable="true" @dragstart="onDrag($event, g.id)" @click="bp.selectGraph(g.id)">
           <div class="gc-top">
             <span class="gc-dot"></span>
-            <span class="gc-name">{{ g.name }}</span>
+            <input v-if="editingId === g.id" v-model="editName" class="gc-edit"
+                   @click.stop @mousedown.stop @keydown.enter="commitRename(g.id)" @keydown.esc="editingId = ''" @blur="commitRename(g.id)"/>
+            <span v-else class="gc-name" @dblclick.stop="startRename(g)" title="双击重命名">{{ g.name }}</span>
             <span v-if="graphs.length > 1" class="gc-del" @click.stop="bp.removeGraph(g.id)">×</span>
           </div>
           <div class="gc-meta">{{ g.nodes.length }} 节点 · {{ g.edges.length }} 连线 · {{ g.graphType === 'event' ? '事件' : '函数' }}</div>
@@ -61,6 +63,22 @@ function commitGraph() {
 function onDrag(ev: DragEvent, id: string) {
     ev.dataTransfer?.setData("bp/graph", id);
     ev.dataTransfer && (ev.dataTransfer.effectAllowed = "copy");
+}
+
+// 重命名(双击图名)
+const editingId = ref("");
+const editName = ref("");
+async function startRename(g: { id: string; name: string }) {
+    editingId.value = g.id;
+    editName.value = g.name;
+    await nextTick();
+    (document.querySelector(".gc-edit") as HTMLInputElement)?.focus();
+}
+function commitRename(id: string) {
+    if (editingId.value !== id) return;
+    const n = editName.value.trim();
+    if (n) bp.renameGraph(id, n);
+    editingId.value = "";
 }
 </script>
 
@@ -122,6 +140,7 @@ function onDrag(ev: DragEvent, id: string) {
 .gc-top { display: flex; align-items: center; gap: 7px; }
 .gc-dot { width: 9px; height: 9px; border-radius: 2px; background: #89ddff; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4); flex-shrink: 0; }
 .gc-name { flex: 1; font-size: 13px; color: rgba(255,255,255,0.9); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gc-edit { flex: 1; min-width: 0; background: rgba(0,0,0,0.5); border: 1px solid rgba(137,221,255,0.5); border-radius: 3px; color: wheat; font-size: 13px; padding: 2px 5px; outline: none; font-family: inherit; }
 .gc-del { color: rgba(255,255,255,0.3); cursor: pointer; font-size: 14px; }
 .gc-del:hover { color: #ff7a7a; }
 .gc-meta { font-size: 10px; color: rgba(255,255,255,0.4); font-family: monospace; margin-top: 5px; }

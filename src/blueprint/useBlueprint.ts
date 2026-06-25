@@ -4,7 +4,7 @@
 import { reactive, computed } from "vue";
 import type {
     BlueprintDoc, BlueprintGraph, GraphNode, GraphEdge,
-    NodeDef, NodePos, Variable, GraphType, Viewport,
+    NodeDef, PinDef, NodePos, Variable, GraphType, Viewport,
 } from "./model";
 import { newId } from "./model";
 import { loadDoc, saveDoc } from "./persist";
@@ -107,19 +107,67 @@ function createVarNode(varName: string, mode: "get" | "set", pos: NodePos): Grap
     return node;
 }
 
-// 函数引用节点:把一张图折叠成单个节点(本期 = 调用入口,exec-in/out;参数传递待 function entry/return 体系)
+// 函数引用节点:把一张图折叠成单个节点。针脚 = exec + 图的输入(fn-in 声明)+ 输出(fn-out 声明)+ 图用到的变量
 function buildGraphRefDef(graphId: string): NodeDef {
     const g = state.doc?.graphs.find(x => x.id === graphId);
     const label = g ? g.name : "函数(已删除)";
-    return {
-        type: `graphref:${graphId}`, category: "函数", label, kind: "impure", special: "function",
-        desc: "调用图：" + label,
-        pins: [
-            { id: "exec", name: "▷", direction: "in", pinKind: "exec" },
-            { id: "then", name: "▷", direction: "out", pinKind: "exec" },
-        ],
-    };
+    const pins: PinDef[] = [
+        { id: "exec", name: "▷", direction: "in", pinKind: "exec" },
+        { id: "then", name: "▷", direction: "out", pinKind: "exec" },
+    ];
+    if (g) {
+        for (const inp of g.inputs || []) pins.push({ id: `in:${inp.id}`, name: inp.name, direction: "in", pinKind: "data", dataType: inp.type });
+        for (const out of g.outputs || []) pins.push({ id: `out:${out.id}`, name: out.name, direction: "out", pinKind: "data", dataType: out.type });
+        const used = new Set<string>();
+        for (const n of g.nodes) if (n.varRef) used.add(n.varRef.name);
+        for (const vn of used) {
+            const v = state.doc!.variables.find(x => x.name === vn);
+            pins.push({ id: `var:${vn}`, name: `⚙ ${vn}`, direction: "in", pinKind: "data", dataType: v?.dataType || "Object" });
+        }
+    }
+    return { type: `graphref:${graphId}`, category: "函数", label, kind: "impure", special: "function", desc: "调用图：" + label, pins };
 }
+
+// 函数入口/出口节点:针脚随当前图的 inputs/outputs 动态生成
+function buildFnInDef(): NodeDef {
+    const g = currentGraph.value;
+    const pins: PinDef[] = [{ id: "then", name: "▷", direction: "out", pinKind: "exec" }];
+    for (const inp of g?.inputs || []) pins.push({ id: `p:${inp.id}`, name: inp.name, direction: "out", pinKind: "data", dataType: inp.type });
+    return { type: "fn:in", category: "流程", label: "函数入口", kind: "impure", special: "fn-in", desc: "函数参数", pins };
+}
+function buildFnOutDef(): NodeDef {
+    const g = currentGraph.value;
+    const pins: PinDef[] = [{ id: "exec", name: "▷", direction: "in", pinKind: "exec" }];
+    for (const out of g?.outputs || []) pins.push({ id: `p:${out.id}`, name: out.name, direction: "in", pinKind: "data", dataType: out.type });
+    return { type: "fn:out", category: "流程", label: "函数出口", kind: "impure", special: "fn-out", desc: "函数返回", pins };
+}
+
+// 图参数 / 返回 增删(由 fn-in / fn-out 节点驱动)
+function addGraphInput(name: string, type: string) {
+    const g = currentGraph.value; if (!g || !name) return;
+    if (!g.inputs) g.inputs = [];
+    g.inputs.push({ id: newId(), name, type: type || "Object" });
+    markDirty();
+}
+function addGraphOutput(name: string, type: string) {
+    const g = currentGraph.value; if (!g || !name) return;
+    if (!g.outputs) g.outputs = [];
+    g.outputs.push({ id: newId(), name, type: type || "Object" });
+    markDirty();
+}
+function removeGraphInput(id: string) {
+    const g = currentGraph.value; if (!g?.inputs) return;
+    g.inputs = g.inputs.filter(p => p.id !== id);
+    g.edges = g.edges.filter(e => e.from.pin !== `p:${id}` && e.to.pin !== `p:${id}`);
+    markDirty();
+}
+function removeGraphOutput(id: string) {
+    const g = currentGraph.value; if (!g?.outputs) return;
+    g.outputs = g.outputs.filter(p => p.id !== id);
+    g.edges = g.edges.filter(e => e.from.pin !== `p:${id}` && e.to.pin !== `p:${id}`);
+    markDirty();
+}
+
 function createGraphRefNode(graphId: string, pos: NodePos): GraphNode {
     const node: GraphNode = { id: newId(), defType: `graphref:${graphId}`, graphRef: graphId, pos: { ...pos } };
     pushNode(node);
@@ -170,6 +218,40 @@ function removeNode(id: string) {
     markDirty();
 }
 
+// 复制选中节点 + 其内部连线(供 Ctrl/Cmd C-V)
+function copyNodes(ids: string[]): { nodes: GraphNode[]; edges: GraphEdge[] } | null {
+    const g = currentGraph.value;
+    if (!g || !ids.length) return null;
+    const set = new Set(ids);
+    const nodes = g.nodes.filter(n => set.has(n.id)).map(n => JSON.parse(JSON.stringify(n)));
+    const edges = g.edges.filter(e => set.has(e.from.node) && set.has(e.to.node)).map(e => JSON.parse(JSON.stringify(e)));
+    return { nodes, edges };
+}
+function pasteNodes(payload: { nodes: GraphNode[]; edges: GraphEdge[] } | null, at: NodePos) {
+    const g = currentGraph.value;
+    if (!g || !payload?.nodes?.length) return;
+    const minX = Math.min(...payload.nodes.map(n => n.pos.x));
+    const minY = Math.min(...payload.nodes.map(n => n.pos.y));
+    const idMap = new Map<string, string>();
+    const newSel: string[] = [];
+    for (const n of payload.nodes) {
+        const nid = newId();
+        idMap.set(n.id, nid);
+        const copy: GraphNode = JSON.parse(JSON.stringify(n));
+        copy.id = nid;
+        copy.pos = { x: Math.round(at.x + (n.pos.x - minX)), y: Math.round(at.y + (n.pos.y - minY)) };
+        g.nodes.push(copy);
+        newSel.push(nid);
+    }
+    for (const e of payload.edges) {
+        const fn = idMap.get(e.from.node), tn = idMap.get(e.to.node);
+        if (!fn || !tn) continue;
+        g.edges.push({ id: newId(), from: { node: fn, pin: e.from.pin }, to: { node: tn, pin: e.to.pin }, pinKind: e.pinKind });
+    }
+    state.selection = newSel;
+    markDirty();
+}
+
 function moveNode(id: string, pos: NodePos) {
     const n = currentGraph.value?.nodes.find(x => x.id === id);
     if (n) { n.pos = { ...pos }; markDirty(); }
@@ -184,6 +266,8 @@ function setLiteral(nodeId: string, pinId: string, value: string) {
 }
 
 function defOf(node: GraphNode): NodeDef {
+    if (node.defType === "fn:in") return buildFnInDef();
+    if (node.defType === "fn:out") return buildFnOutDef();
     if (node.graphRef) return buildGraphRefDef(node.graphRef);
     return resolveDef(node, variables.value);
 }
@@ -270,6 +354,8 @@ export function useBlueprint() {
         createNode, createVarNode, createGraphRefNode, removeNode, moveNode, setLiteral, defOf,
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,
+        addGraphInput, addGraphOutput, removeGraphInput, removeGraphOutput,
+        copyNodes, pasteNodes,
         setViewport, setSelection,
     };
 }

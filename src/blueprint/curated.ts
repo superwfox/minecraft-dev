@@ -126,6 +126,10 @@ export const CURATED: NodeDef[] = [
         desc: "Bukkit.getOnlinePlayers", pins: [dt("players", "玩家集合", "out", "Collection")],
     },
 
+    // ── 函数入口 / 出口(学 UE,归「流程」;声明参数 / 返回,针脚随声明动态生成)──
+    { type: "fn:in", category: "流程", label: "函数入口(参数)", kind: "impure", special: "fn-in", desc: "在函数图里声明参数;每个参数成为本图的一个输入", pins: [ex("then", "▷", "out")] },
+    { type: "fn:out", category: "流程", label: "函数出口(返回)", kind: "impure", special: "fn-out", desc: "在函数图里声明返回值;每个返回成为本图的一个输出", pins: [ex("exec", "▷", "in")] },
+
     // ── cast(类型窄化,bluemap §3.4;自动生成留后续)──────────────
     { type: "cast.toPlayer", category: "转换", label: "实体 → 玩家", kind: "pure", special: "cast", pins: [dt("value", "实体", "in", "Entity"), dt("as", "玩家", "out", "Player"), dt("ok", "成功?", "out", "boolean")] },
     { type: "cast.toLiving", category: "转换", label: "实体 → 生物", kind: "pure", special: "cast", pins: [dt("value", "实体", "in", "Entity"), dt("as", "生物", "out", "LivingEntity"), dt("ok", "成功?", "out", "boolean")] },

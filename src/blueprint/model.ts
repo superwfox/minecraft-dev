@@ -14,7 +14,9 @@ export type NodeSpecial =
     | "action"
     | "literal"
     | "member"
-    | "function";
+    | "function"
+    | "fn-in"
+    | "fn-out";
 
 export interface PinDef {
     id: string;
@@ -68,12 +70,16 @@ export interface Variable {
 }
 
 export type GraphType = "event" | "function";
+// 函数图的参数 / 返回项(由 fn-in / fn-out 节点声明,决定函数引用节点的针脚)
+export interface GraphParam { id: string; name: string; type: string; }
 export interface BlueprintGraph {
     id: string;
     name: string;
     graphType: GraphType;
     nodes: GraphNode[];
     edges: GraphEdge[];
+    inputs?: GraphParam[];
+    outputs?: GraphParam[];
 }
 
 export interface Viewport { scale: number; panX: number; panY: number; }

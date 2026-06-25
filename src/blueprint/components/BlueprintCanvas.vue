@@ -1,6 +1,6 @@
 <template>
   <div ref="canvasEl" class="bp-canvas" :class="{panning: spaceDown}" :style="gridStyle"
-       @mousedown="onCanvasDown" @wheel.prevent="onWheel"
+       @mousedown="onCanvasDown" @mousemove="trackMouse" @wheel.prevent="onWheel"
        @contextmenu.prevent="onContextMenu" @dragover.prevent @drop="onDrop">
     <div class="bp-viewport" :style="vpStyle">
       <BlueprintEdges :temp="tempEdge"/>
@@ -10,7 +10,8 @@
                      :node="n" :def="bp.defOf(n)" :selected="sel.has(n.id)"
                      :connecting-pin="connectingPin" :connecting-node-id="connectingPin ? connectSrc.nodeId : ''"
                      @pindown="onPinDown" @pinup="onPinUp"
-                     @headdown="onHeadDown" @bodydown="onBodyDown" @remove="bp.removeNode"/>
+                     @headdown="onHeadDown" @bodydown="onBodyDown" @remove="bp.removeNode"
+                     @fnadd="onFnAdd" @fnremove="onFnRemove"/>
     </div>
 
     <div v-if="!nodes.length" class="bp-hint">右键新建节点 · 左侧拖入节点/变量 · 空白拖拽框选 · 按住空格拖拽平移</div>
@@ -184,6 +185,19 @@ function applyDrag(cx: number, cy: number) {
 }
 
 const lastClient = { x: 0, y: 0 };
+function trackMouse(ev: MouseEvent) { lastClient.x = ev.clientX; lastClient.y = ev.clientY; }
+
+// 函数入口/出口节点声明参数/返回 → 改当前图的 inputs/outputs
+function onFnAdd(p: { nodeId: string; kind: "in" | "out"; name: string; type: string }) {
+    if (p.kind === "in") bp.addGraphInput(p.name, p.type); else bp.addGraphOutput(p.name, p.type);
+}
+function onFnRemove(p: { nodeId: string; kind: "in" | "out"; paramId: string }) {
+    if (p.kind === "in") bp.removeGraphInput(p.paramId); else bp.removeGraphOutput(p.paramId);
+}
+
+// 剪贴板(内存,会话内)
+let clipboard: { nodes: any[]; edges: any[] } | null = null;
+
 function onWinMove(ev: MouseEvent) {
     lastClient.x = ev.clientX; lastClient.y = ev.clientY;
     if (mode.value === "pan") {
@@ -354,6 +368,15 @@ function onKey(ev: KeyboardEvent) {
     const tag = (ev.target as HTMLElement)?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (ev.code === "Space") { spaceDown.value = true; ev.preventDefault(); return; }
+    const cmd = ev.metaKey || ev.ctrlKey;
+    if (cmd && (ev.key === "c" || ev.key === "C")) {
+        if (bp.state.selection.length) clipboard = bp.copyNodes(bp.state.selection);
+        return;
+    }
+    if (cmd && (ev.key === "v" || ev.key === "V")) {
+        if (clipboard) { ev.preventDefault(); bp.pasteNodes(clipboard, toGraph(lastClient.x, lastClient.y)); }
+        return;
+    }
     if (ev.key === "Delete" || ev.key === "Backspace") {
         if (bp.state.selection.length) { ev.preventDefault(); for (const id of [...bp.state.selection]) bp.removeNode(id); }
     } else if (ev.key === "Escape") {

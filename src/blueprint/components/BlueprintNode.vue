@@ -1,6 +1,6 @@
 <template>
   <div class="bp-node" :class="{selected, pure: def.kind === 'pure', dim: nodeDimmed}"
-       :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: lay.height + 'px'}"
+       :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: (lay.height + fnExtra) + 'px'}"
        @mousedown.stop="onBodyDown">
     <!-- 头部:可拖动移动 -->
     <div class="bp-head" :style="{background: headBg, borderColor: headColor}" @mousedown.stop="onHeadDown">
@@ -27,6 +27,7 @@
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
         <span class="pin-name">{{ row.pin.name }}</span>
+        <span v-if="isParamPin(row.pin)" class="param-x" @mousedown.stop @click.stop="removeParam(row.pin)">✕</span>
         <input v-if="showInlineLit(row.pin)" class="bp-lit inline" :value="litVal(row.pin)"
                :placeholder="row.pin.dataType" @mousedown.stop
                @input="onLit(row.pin.id, ($event.target as HTMLInputElement).value)"/>
@@ -34,17 +35,30 @@
 
       <!-- 输出针脚行 -->
       <div v-for="row in lay.outputs" :key="'o'+row.pin.id" class="bp-row out" :style="{top: (row.y - HEADER_H) + 'px'}">
+        <span v-if="isParamPin(row.pin)" class="param-x" @mousedown.stop @click.stop="removeParam(row.pin)">✕</span>
         <span v-if="def.special !== 'literal'" class="pin-name">{{ row.pin.name }}</span>
         <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin)}]" :style="pinStyle(row.pin, 'out')"
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
       </div>
     </div>
+
+    <!-- 函数入口/出口:参数声明 -->
+    <div v-if="isFn" class="fn-foot">
+      <div v-if="pAdding" class="fn-form">
+        <input v-model="pName" class="fn-name" placeholder="名称" @mousedown.stop @keydown.enter="commitParam" @keydown.esc="pAdding = false"/>
+        <select v-model="pType" class="fn-type" @mousedown.stop>
+          <option v-for="t in PTYPES" :key="t" :value="t">{{ t }}</option>
+        </select>
+        <button class="fn-ok" @mousedown.stop @click="commitParam">加</button>
+      </div>
+      <div v-else class="fn-add" @mousedown.stop @click="pAdding = true">+ {{ def.special === 'fn-in' ? '参数' : '返回' }}</div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { GraphNode, NodeDef, PinDef } from "../model";
 import { NODE_W, HEADER_H, layoutOf } from "../layout";
 import { typeColor, EXEC_COLOR, categoryColor } from "../colors";
@@ -61,10 +75,29 @@ const emit = defineEmits<{
     (e: "headdown", p: { nodeId: string; ev: MouseEvent }): void;
     (e: "bodydown", p: { nodeId: string; ev: MouseEvent }): void;
     (e: "remove", id: string): void;
+    (e: "fnadd", p: { nodeId: string; kind: "in" | "out"; name: string; type: string }): void;
+    (e: "fnremove", p: { nodeId: string; kind: "in" | "out"; paramId: string }): void;
 }>();
 
 const bp = useBlueprint();
 const lay = computed(() => layoutOf(props.def));
+
+// 函数入口/出口节点:参数声明 UI
+const isFn = computed(() => props.def.special === "fn-in" || props.def.special === "fn-out");
+const fnKind = computed<"in" | "out">(() => props.def.special === "fn-in" ? "in" : "out");
+const fnExtra = computed(() => isFn.value ? (pAdding.value ? 50 : 36) : 0);
+const PTYPES = ["String", "int", "double", "boolean", "Player", "Entity", "Location", "ItemStack", "Object"];
+const pAdding = ref(false);
+const pName = ref("");
+const pType = ref("String");
+function isParamPin(p: PinDef) { return isFn.value && p.id.startsWith("p:"); }
+function removeParam(p: PinDef) { emit("fnremove", { nodeId: props.node.id, kind: fnKind.value, paramId: p.id.slice(2) }); }
+function commitParam() {
+    const n = pName.value.trim();
+    if (!n) return;
+    emit("fnadd", { nodeId: props.node.id, kind: fnKind.value, name: n, type: pType.value });
+    pName.value = ""; pAdding.value = false;
+}
 const headColor = computed(() => categoryColor(props.def.category));
 const headBg = computed(() => `linear-gradient(180deg, ${hex(headColor.value, 0.32)}, ${hex(headColor.value, 0.14)})`);
 
@@ -165,6 +198,20 @@ function onBodyDown(ev: MouseEvent) { emit("bodydown", { nodeId: props.node.id, 
 
 .pin-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255,255,255,0.78); max-width: 110px; }
 .bp-row.out .pin-name { text-align: right; }
+
+.param-x { color: rgba(255,255,255,0.3); cursor: pointer; font-size: 10px; flex-shrink: 0; }
+.param-x:hover { color: #ff7a7a; }
+
+.fn-foot { margin-top: auto; padding: 6px 10px 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+.fn-add {
+  text-align: center; font-size: 11px; color: #89ddff; cursor: pointer;
+  padding: 4px; border: 1px dashed rgba(137,221,255,0.35); border-radius: 4px;
+}
+.fn-add:hover { background: rgba(137,221,255,0.08); }
+.fn-form { display: flex; gap: 4px; }
+.fn-name { flex: 1; min-width: 0; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; color: wheat; font-size: 11px; padding: 3px 5px; outline: none; }
+.fn-type { width: 64px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; color: rgba(255,255,255,0.85); font-size: 11px; outline: none; }
+.fn-ok { background: rgba(137,221,255,0.2); border: 1px solid rgba(0,0,0,0.4); border-radius: 3px; color: #fff; font-size: 11px; padding: 0 8px; cursor: pointer; }
 
 .bp-litrow { padding: 8px; }
 .bp-lit {
