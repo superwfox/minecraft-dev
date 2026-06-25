@@ -10,7 +10,7 @@
     </div>
     <input ref="inp" v-model="q" class="bps-input" placeholder="搜索节点…"
            @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
-           @keydown.enter.prevent="pick(filtered[active])" @keydown.esc.prevent="$emit('cancel')"/>
+           @keydown.enter="onEnter" @keydown.esc.prevent="$emit('cancel')"/>
     <div class="bps-list">
       <div v-for="(d, i) in filtered" :key="d.type" class="bps-item" :class="{active: i === active}"
            @mouseenter="active = i" @click="pick(d)">
@@ -61,6 +61,12 @@ function move(d: number) {
     if (!n) return;
     active.value = (active.value + d + n) % n;
 }
+// 输入法组合中(中文候选词未确认)按 Enter 不选定,避免误触
+function onEnter(e: KeyboardEvent) {
+    if (e.isComposing || (e as any).keyCode === 229) return;
+    e.preventDefault();
+    pick(filtered.value[active.value]);
+}
 function pick(d?: NodeDef) { if (d) emit("select", d); }
 // 成员节点(jar 派生真实方法)按其所属类型着色;策展节点按类别色
 function color(d: NodeDef) { return d.special === "member" ? typeColor(d.category) : categoryColor(d.category); }
@@ -80,7 +86,7 @@ function color(d: NodeDef) { return d.special === "member" ? typeColor(d.categor
 .bps-ctx { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
 .ctx-label { font-size: 10px; color: rgba(255,255,255,0.55); min-width: 32px; text-align: right; }
 .ctx-sw {
-  position: relative; width: 30px; height: 16px; border-radius: 9px;
+  position: relative; width: 32px; height: 16px; border-radius: 4px;
   background: rgba(255,255,255,0.1); border: 1px solid rgba(0,0,0,0.5);
   box-shadow: inset 1px 1px 1px rgba(0,0,0,0.35); transition: background 0.15s;
 }
@@ -90,7 +96,7 @@ function color(d: NodeDef) { return d.special === "member" ? typeColor(d.categor
   background: #cfd6dd; box-shadow: inset 1px 1px 0 rgba(255,255,255,0.5), 0 1px 2px rgba(0,0,0,0.45);
   transition: transform 0.15s, background 0.15s;
 }
-.ctx-sw.on .ctx-knob { transform: translateX(14px); background: #89ddff; }
+.ctx-sw.on .ctx-knob { transform: translateX(16px); background: #89ddff; }
 .bps-ctx:hover .ctx-sw { filter: brightness(1.15); }
 .bps-input {
   width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4);
@@ -101,7 +107,7 @@ function color(d: NodeDef) { return d.special === "member" ? typeColor(d.categor
 .bps-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
 .bps-item.active { background: rgba(245,222,179,0.12); }
 .bps-dot { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4); }
-.bps-label { flex: 1; color: rgba(255,255,255,0.88); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bps-cat { font-size: 10px; color: rgba(255,255,255,0.35); }
+.bps-label { flex: 1; min-width: 0; color: rgba(255,255,255,0.88); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bps-cat { flex-shrink: 0; max-width: 96px; font-size: 10px; color: rgba(255,255,255,0.35); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bps-empty { padding: 12px; text-align: center; font-size: 12px; color: rgba(255,255,255,0.3); font-style: italic; }
 </style>

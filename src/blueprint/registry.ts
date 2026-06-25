@@ -109,7 +109,13 @@ export function memberDefsForType(typeName: string): NodeDef[] {
     return defs;
 }
 
-// 全部已加载类的成员节点 —— 供右键搜索可达真实 Paper 方法(搜索框过滤,不铺全量)
+// 事件类:org.bukkit.event.* / io.papermc...event.* 下、类名以 Event 结尾(排除基类 Event 本身)
+function isEventClass(cls: { fqn: string; name: string }): boolean {
+    return cls.fqn.includes(".event.") && cls.name.endsWith("Event") && cls.name !== "Event";
+}
+const SKIP_EVENT_GETTERS = new Set(["getHandlers", "getHandlerList", "getEventName"]);
+
+// 全部已加载类的成员节点(供右键搜索可达真实 Paper 方法)。跳过事件类——事件以「事件根」呈现,不把其方法平铺成噪音。
 let allMemberCache: NodeDef[] | null = null;
 let allMemberRef: any = null;
 export function allMemberDefs(): NodeDef[] {
@@ -117,10 +123,45 @@ export function allMemberDefs(): NodeDef[] {
     if (st.classes === allMemberRef && allMemberCache) return allMemberCache;
     allMemberRef = st.classes;
     const out: NodeDef[] = [];
-    for (const name of st.byName.keys()) {
-        for (const d of memberDefsForType(name)) out.push(d);
+    for (const cls of st.byName.values()) {
+        if (isEventClass(cls)) continue;
+        for (const d of memberDefsForType(cls.name)) out.push(d);
     }
     allMemberCache = out;
+    return out;
+}
+
+// 事件根节点 —— 从 jar 事件类派生:exec-out「▷」+ 各 getter 作为 data-out(监听器入口形态)
+let eventRootCache: NodeDef[] | null = null;
+let eventRootRef: any = null;
+export function eventRootDefs(): NodeDef[] {
+    const st = getDynamicDictStatus();
+    if (st.classes === eventRootRef && eventRootCache) return eventRootCache;
+    eventRootRef = st.classes;
+    const out: NodeDef[] = [];
+    for (const cls of st.byName.values()) {
+        if (!isEventClass(cls)) continue;
+        const pins: PinDef[] = [{ id: "then", name: "▷", direction: "out", pinKind: "exec" }];
+        const seen = new Set<string>();
+        for (const m of cls.members) {
+            if (m.kind !== "method") continue;
+            const parsed = parseSig(m.signature);
+            if (!parsed || parsed.params.length > 0) continue;        // getter 必须无参
+            if (!/^(get|is)[A-Z]/.test(parsed.name)) continue;        // 只取 getXxx / isXxx
+            if (SKIP_EVENT_GETTERS.has(parsed.name)) continue;
+            if (simpleType(parsed.ret) === "void") continue;
+            const base = parsed.name.replace(/^(get|is)/, "");
+            const id = base.charAt(0).toLowerCase() + base.slice(1);
+            if (seen.has(id)) continue;
+            seen.add(id);
+            pins.push({ id, name: id, direction: "out", pinKind: "data", dataType: parsed.ret });
+        }
+        out.push({
+            type: `event:${cls.name}`, category: "事件", label: cls.name,
+            kind: "impure", special: "event-root", pins, desc: cls.fqn,
+        });
+    }
+    eventRootCache = out;
     return out;
 }
 

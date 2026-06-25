@@ -59,6 +59,21 @@ export const CURATED: NodeDef[] = [
         desc: "AsyncPlayerChatEvent",
         pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("message", "消息", "out", "String")],
     },
+    {
+        type: "event.entityDamageByEntity", category: "事件", label: "实体攻击实体", kind: "impure", special: "event-root",
+        desc: "EntityDamageByEntityEvent",
+        pins: [ex("then", "▷", "out"), dt("damager", "攻击者", "out", "Entity"), dt("entity", "受害者", "out", "Entity"), dt("damage", "伤害", "out", "double")],
+    },
+    {
+        type: "event.playerMove", category: "事件", label: "玩家移动", kind: "impure", special: "event-root",
+        desc: "PlayerMoveEvent",
+        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("from", "起点", "out", "Location"), dt("to", "终点", "out", "Location")],
+    },
+    {
+        type: "event.inventoryClick", category: "事件", label: "点击物品栏", kind: "impure", special: "event-root",
+        desc: "InventoryClickEvent",
+        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("slot", "槽位", "out", "int"), dt("current", "点击物品", "out", "ItemStack")],
+    },
     { type: "life.onEnable", category: "事件", label: "插件启用", kind: "impure", special: "lifecycle", desc: "onEnable()", pins: [ex("then", "▷", "out")] },
     { type: "life.onDisable", category: "事件", label: "插件禁用", kind: "impure", special: "lifecycle", desc: "onDisable()", pins: [ex("then", "▷", "out")] },
 

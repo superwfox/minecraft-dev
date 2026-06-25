@@ -8,7 +8,7 @@ import type {
 } from "./model";
 import { newId } from "./model";
 import { loadDoc, saveDoc } from "./persist";
-import { resolveDef } from "./registry";
+import { resolveDef, curatedDef } from "./registry";
 import { pinsCompatible } from "./types";
 import { LITERAL_DEFAULTS } from "./curated";
 
@@ -88,8 +88,8 @@ function pushNode(n: GraphNode) {
 
 function createNode(def: NodeDef, pos: NodePos): GraphNode {
     const node: GraphNode = { id: newId(), defType: def.type, pos: { ...pos } };
-    // 成员节点把定义内联,保证 jar 未加载/重载仍能渲染
-    if (def.special === "member") node.inlineDef = def;
+    // 非策展定义(jar 成员节点 / 事件根等)把定义内联,保证 jar 未加载/重载仍能渲染
+    if (!curatedDef(def.type)) node.inlineDef = def;
     const lit = LITERAL_DEFAULTS[def.type];
     if (lit) node.literals = { [lit.pin]: lit.value };
     pushNode(node);

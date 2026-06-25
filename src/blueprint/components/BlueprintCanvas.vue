@@ -1,9 +1,11 @@
 <template>
-  <div ref="canvasEl" class="bp-canvas" :style="gridStyle"
+  <div ref="canvasEl" class="bp-canvas" :class="{panning: spaceDown}" :style="gridStyle"
        @mousedown="onCanvasDown" @wheel.prevent="onWheel"
        @contextmenu.prevent="onContextMenu" @dragover.prevent @drop="onDrop">
     <div class="bp-viewport" :style="vpStyle">
       <BlueprintEdges :temp="tempEdge"/>
+      <div v-if="selBox.visible" class="bp-selbox"
+           :style="{left: selBox.x + 'px', top: selBox.y + 'px', width: selBox.w + 'px', height: selBox.h + 'px'}"></div>
       <BlueprintNode v-for="n in nodes" :key="n.id"
                      :node="n" :def="bp.defOf(n)" :selected="sel.has(n.id)"
                      :connecting-pin="connectingPin" :connecting-node-id="connectingPin ? connectSrc.nodeId : ''"
@@ -11,7 +13,7 @@
                      @headdown="onHeadDown" @bodydown="onBodyDown" @remove="bp.removeNode"/>
     </div>
 
-    <div v-if="!nodes.length" class="bp-hint">右键空白处新建节点 · 从左侧拖入节点/变量</div>
+    <div v-if="!nodes.length" class="bp-hint">右键新建节点 · 左侧拖入节点/变量 · 空白拖拽框选 · 按住空格拖拽平移</div>
     <Transition name="toast"><div v-if="toast.visible" class="bp-toast">{{ toast.msg }}</div></Transition>
 
     <NodeSearchPopup :visible="search.visible" :x="search.x" :y="search.y"
@@ -26,7 +28,7 @@
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import type { NodeDef, NodePos, PinDef } from "../model";
 import { useBlueprint } from "../useBlueprint";
-import { pinAnchor } from "../layout";
+import { pinAnchor, layoutOf, NODE_W } from "../layout";
 import { typeColor, EXEC_COLOR } from "../colors";
 import { candidatesForPin, allCreateCandidates, matchPin, type DragSource } from "../enumerate";
 import { curatedDef } from "../registry";
@@ -74,8 +76,11 @@ function toLocal(clientX: number, clientY: number) {
 }
 
 // ── 手势状态机 ───────────────────────────────────────────────
-type Mode = "idle" | "pan" | "move" | "connect";
+type Mode = "idle" | "pan" | "move" | "connect" | "select";
 const mode = ref<Mode>("idle");
+const spaceDown = ref(false); // 按住空格 → 拖拽平移;否则空白拖拽 = 框选
+const selBox = reactive({ visible: false, x: 0, y: 0, w: 0, h: 0 }); // 框选矩形(图空间)
+let selStart: NodePos = { x: 0, y: 0 };
 let panStart = { x: 0, y: 0, px: 0, py: 0, moved: false };
 let moveData: { ids: string[]; start: NodePos; orig: Map<string, NodePos> } | null = null;
 const connectSrc = reactive<{ nodeId: string; pin: PinDef | null; anchor: NodePos | null }>({ nodeId: "", pin: null, anchor: null });
@@ -105,9 +110,16 @@ function rmWin() { window.removeEventListener("mousemove", onWinMove); window.re
 function onCanvasDown(ev: MouseEvent) {
     if (ev.button === 2) return; // 右键交给 contextmenu
     closePopups();
-    // 空白处:左键/中键拖动平移
-    panStart = { x: ev.clientX, y: ev.clientY, px: panX.value, py: panY.value, moved: false };
-    mode.value = "pan";
+    // 中键 或 按住空格 → 平移;否则左键空白拖拽 = 框选
+    if (ev.button === 1 || spaceDown.value) {
+        panStart = { x: ev.clientX, y: ev.clientY, px: panX.value, py: panY.value, moved: false };
+        mode.value = "pan";
+        addWin();
+        return;
+    }
+    selStart = toGraph(ev.clientX, ev.clientY);
+    selBox.x = selStart.x; selBox.y = selStart.y; selBox.w = 0; selBox.h = 0; selBox.visible = true;
+    mode.value = "select";
     addWin();
 }
 
@@ -178,10 +190,25 @@ function onWinMove(ev: MouseEvent) {
         panX.value = panStart.px + (ev.clientX - panStart.x);
         panY.value = panStart.py + (ev.clientY - panStart.y);
         if (Math.abs(ev.clientX - panStart.x) + Math.abs(ev.clientY - panStart.y) > 3) panStart.moved = true;
+    } else if (mode.value === "select") {
+        const g = toGraph(ev.clientX, ev.clientY);
+        selBox.x = Math.min(selStart.x, g.x); selBox.y = Math.min(selStart.y, g.y);
+        selBox.w = Math.abs(g.x - selStart.x); selBox.h = Math.abs(g.y - selStart.y);
     } else {
         applyDrag(ev.clientX, ev.clientY);
         updateEdgePan(ev.clientX, ev.clientY);
     }
+}
+
+function finalizeSelect() {
+    const x0 = selBox.x, y0 = selBox.y, x1 = selBox.x + selBox.w, y1 = selBox.y + selBox.h;
+    const ids: string[] = [];
+    for (const n of nodes.value) {
+        const h = layoutOf(bp.defOf(n)).height;
+        if (n.pos.x < x1 && n.pos.x + NODE_W > x0 && n.pos.y < y1 && n.pos.y + h > y0) ids.push(n.id);
+    }
+    bp.setSelection(ids);
+    selBox.visible = false;
 }
 
 // ── 拖到边缘自动平移视图 ─────────────────────────────────────
@@ -212,6 +239,10 @@ function onWinUp(ev: MouseEvent) {
     if (mode.value === "pan") {
         if (!panStart.moved) bp.setSelection([]); // 空白点击:清选
         bp.setViewport({ panX: panX.value, panY: panY.value, scale: scale.value });
+    } else if (mode.value === "select") {
+        if (selBox.w < 3 && selBox.h < 3) bp.setSelection([]); // 轻点空白:清选
+        else finalizeSelect();
+        selBox.visible = false;
     } else if (mode.value === "connect" && !connectConsumed && connectSrc.pin) {
         // 松手在空白 → 上下文搜索
         const src: DragSource = { pinKind: connectSrc.pin.pinKind, direction: connectSrc.pin.direction, dataType: connectSrc.pin.dataType };
@@ -322,14 +353,20 @@ defineExpose({ addDefAtCenter, varAtCenter });
 function onKey(ev: KeyboardEvent) {
     const tag = (ev.target as HTMLElement)?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (ev.code === "Space") { spaceDown.value = true; ev.preventDefault(); return; }
     if (ev.key === "Delete" || ev.key === "Backspace") {
         if (bp.state.selection.length) { ev.preventDefault(); for (const id of [...bp.state.selection]) bp.removeNode(id); }
     } else if (ev.key === "Escape") {
         closePopups();
     }
 }
-onMounted(() => window.addEventListener("keydown", onKey));
-onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); rmWin(); stopEdgePan(); });
+function onKeyUp(ev: KeyboardEvent) { if (ev.code === "Space") spaceDown.value = false; }
+function onBlur() { spaceDown.value = false; }
+onMounted(() => { window.addEventListener("keydown", onKey); window.addEventListener("keyup", onKeyUp); window.addEventListener("blur", onBlur); });
+onBeforeUnmount(() => {
+    window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onKeyUp); window.removeEventListener("blur", onBlur);
+    rmWin(); stopEdgePan();
+});
 </script>
 
 <style scoped>
@@ -339,10 +376,16 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); rmWin(); s
   background-image:
     linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px);
-  cursor: grab;
+  cursor: default;
 }
-.bp-canvas:active { cursor: grabbing; }
+.bp-canvas.panning { cursor: grab; }
+.bp-canvas.panning:active { cursor: grabbing; }
 .bp-viewport { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+.bp-selbox {
+  position: absolute; pointer-events: none;
+  background: rgba(137,221,255,0.1); border: 1px solid rgba(137,221,255,0.6);
+  border-radius: 2px;
+}
 .bp-hint {
   position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
   font-size: 12px; color: rgba(255,255,255,0.3); pointer-events: none;
