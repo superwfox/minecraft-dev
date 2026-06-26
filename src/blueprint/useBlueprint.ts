@@ -11,6 +11,8 @@ import { loadDoc, saveDoc } from "./persist";
 import { resolveDef, curatedDef } from "./registry";
 import { pinsCompatible } from "./types";
 import { LITERAL_DEFAULTS } from "./curated";
+import { autoLayout } from "./autolayout";
+import type { ParseResult } from "./parse";
 
 const state = reactive<{
     taskId: string;
@@ -209,6 +211,24 @@ function instantiateGraph(srcId: string, at: NodePos) {
     markDirty();
 }
 
+// 码→图:把解析结果导入当前 doc(追加图、合并变量、对每张新图首次自动布局)
+function importParsed(res: ParseResult): { added: number; warnings: number } {
+    if (!state.doc || !res.graphs.length) return { added: 0, warnings: 0 };
+    // 合并变量(按名去重,已存在的不覆盖)
+    for (const v of res.variables) {
+        if (!state.doc.variables.some(x => x.name === v.name)) state.doc.variables.push(v);
+    }
+    for (const g of res.graphs) {
+        state.doc.graphs.push(g);
+        state.currentGraphId = g.id; // 让 defOf 的 fn:in/out 按本图(而非首图)解析针脚
+        autoLayout(g, defOf);
+    }
+    state.currentGraphId = res.graphs[0].id;
+    state.selection = [];
+    markDirty();
+    return { added: res.graphs.length, warnings: res.warnings.length };
+}
+
 function removeNode(id: string) {
     const g = currentGraph.value;
     if (!g) return;
@@ -355,7 +375,7 @@ export function useBlueprint() {
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,
         addGraphInput, addGraphOutput, removeGraphInput, removeGraphOutput,
-        copyNodes, pasteNodes,
+        copyNodes, pasteNodes, importParsed,
         setViewport, setSelection,
     };
 }

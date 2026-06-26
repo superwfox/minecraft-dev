@@ -9,12 +9,16 @@
         <span class="gn-text">{{ bp.currentGraph.value?.name || "蓝图" }}</span>
         <span class="gn-tag">可视化蓝图 · 预览</span>
       </div>
+      <button class="bp-codebtn" :class="{on: showCode}" @click="showCode = !showCode">
+        <span class="cb-ico">&lt;/&gt;</span> 代码
+      </button>
       <div class="bp-meta">{{ nodeCount }} 节点 · {{ edgeCount }} 连线</div>
     </div>
     <div class="bp-main">
       <BlueprintPalette @pick="onPick" @pick-var="onPickVar"/>
       <BlueprintCanvas ref="canvasRef"/>
       <BlueprintGraphTray/>
+      <BlueprintCodePanel :open="showCode" @close="showCode = false"/>
     </div>
   </div>
 </template>
@@ -25,12 +29,14 @@ import { useBlueprint } from "../useBlueprint";
 import BlueprintPalette from "./BlueprintPalette.vue";
 import BlueprintCanvas from "./BlueprintCanvas.vue";
 import BlueprintGraphTray from "./BlueprintGraphTray.vue";
+import BlueprintCodePanel from "./BlueprintCodePanel.vue";
 
 const props = defineProps<{ taskId: string }>();
 defineEmits<{ (e: "back"): void }>();
 
 const bp = useBlueprint();
 const canvasRef = ref<InstanceType<typeof BlueprintCanvas> | null>(null);
+const showCode = ref(false);
 
 const nodeCount = computed(() => bp.currentGraph.value?.nodes.length || 0);
 const edgeCount = computed(() => bp.currentGraph.value?.edges.length || 0);
@@ -60,6 +66,14 @@ function onPickVar(name: string) { canvasRef.value?.varAtCenter(name); }
 .gn-dot { width: 9px; height: 9px; border-radius: 2px; background: #89ddff; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4); }
 .gn-text { font-size: 13px; color: rgba(255,255,255,0.9); font-weight: 500; }
 .gn-tag { font-size: 10px; color: rgba(255,255,255,0.35); padding: 2px 8px; border-radius: 10px; background: rgba(137,221,255,0.1); border: 1px solid rgba(137,221,255,0.18); }
-.bp-meta { margin-left: auto; font-size: 11px; font-family: "Monaco", monospace; color: rgba(255,255,255,0.4); }
+.bp-codebtn {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.82); font-size: 12px; padding: 5px 12px; border-radius: 7px; cursor: pointer; font-family: inherit;
+}
+.bp-codebtn:hover { background: rgba(255,255,255,0.1); }
+.bp-codebtn.on { background: rgba(137,221,255,0.16); border-color: rgba(137,221,255,0.4); color: #cdeeff; }
+.cb-ico { font-family: "Monaco", monospace; font-size: 11px; opacity: 0.8; }
+.bp-meta { margin-left: 14px; font-size: 11px; font-family: "Monaco", monospace; color: rgba(255,255,255,0.4); }
 .bp-main { flex: 1; display: flex; min-height: 0; position: relative; }
 </style>

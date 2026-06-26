@@ -1,6 +1,6 @@
 <template>
   <div class="bp-node" :class="{selected, pure: def.kind === 'pure', dim: nodeDimmed}"
-       :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: (lay.height + fnExtra) + 'px'}"
+       :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: (lay.height + fnExtra + escExtra) + 'px'}"
        @mousedown.stop="onBodyDown">
     <!-- 头部:可拖动移动 -->
     <div class="bp-head" :style="{background: headBg, borderColor: headColor}" @mousedown.stop="onHeadDown">
@@ -54,6 +54,11 @@
       </div>
       <div v-else class="fn-add" @mousedown.stop @click="pAdding = true">+ {{ def.special === 'fn-in' ? '参数' : '返回' }}</div>
     </div>
+
+    <!-- 逃逸节点:承载无法映射的原始代码(bluemap §4.3) -->
+    <div v-if="def.special === 'escape'" class="esc-foot">
+      <pre class="esc-code">{{ rawCode }}</pre>
+    </div>
   </div>
 </template>
 
@@ -98,6 +103,13 @@ function commitParam() {
     emit("fnadd", { nodeId: props.node.id, kind: fnKind.value, name: n, type: pType.value });
     pName.value = ""; pAdding.value = false;
 }
+// 逃逸节点:展示原始代码
+const rawCode = computed(() => props.node.literals?.__raw || props.def.desc || "");
+const escExtra = computed(() => {
+    if (props.def.special !== "escape") return 0;
+    const lines = rawCode.value.split("\n").length;
+    return Math.min(140, lines * 15 + 20);
+});
 const headColor = computed(() => categoryColor(props.def.category));
 const headBg = computed(() => `linear-gradient(180deg, ${hex(headColor.value, 0.32)}, ${hex(headColor.value, 0.14)})`);
 
@@ -212,6 +224,13 @@ function onBodyDown(ev: MouseEvent) { emit("bodydown", { nodeId: props.node.id, 
 .fn-name { flex: 1; min-width: 0; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; color: wheat; font-size: 11px; padding: 3px 5px; outline: none; }
 .fn-type { width: 64px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.14); border-radius: 3px; color: rgba(255,255,255,0.85); font-size: 11px; outline: none; }
 .fn-ok { background: rgba(137,221,255,0.2); border: 1px solid rgba(0,0,0,0.4); border-radius: 3px; color: #fff; font-size: 11px; padding: 0 8px; cursor: pointer; }
+
+.esc-foot { margin-top: auto; padding: 6px 8px 8px; border-top: 1px solid rgba(191,97,106,0.3); }
+.esc-code {
+  margin: 0; max-height: 130px; overflow: auto;
+  font-family: "Monaco", "Menlo", monospace; font-size: 10px; line-height: 1.4;
+  color: #e8b9bd; white-space: pre-wrap; word-break: break-all;
+}
 
 .bp-litrow { padding: 8px; }
 .bp-lit {

@@ -16,7 +16,8 @@ export type NodeSpecial =
     | "member"
     | "function"
     | "fn-in"
-    | "fn-out";
+    | "fn-out"
+    | "escape"; // 码→图:节点词汇表覆盖不了的原始代码(bluemap §4.3)
 
 export interface PinDef {
     id: string;
@@ -24,6 +25,7 @@ export interface PinDef {
     direction: PinDir;
     pinKind: PinKind;
     dataType?: string; // data 针脚带类型(简单名或 FQN);exec 无类型
+    accessor?: string; // 事件根 data-out 的取值方法名(codegen 用),如 getClickedBlock;缺省按 get/is+首字母大写推断
 }
 
 export interface NodeDef {

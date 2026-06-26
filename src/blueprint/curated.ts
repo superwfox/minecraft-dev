@@ -7,8 +7,8 @@ import type { NodeDef, PinDef } from "./model";
 
 const ex = (id: string, name: string, direction: "in" | "out"): PinDef =>
     ({ id, name, direction, pinKind: "exec" });
-const dt = (id: string, name: string, direction: "in" | "out", dataType: string): PinDef =>
-    ({ id, name, direction, pinKind: "data", dataType });
+const dt = (id: string, name: string, direction: "in" | "out", dataType: string, accessor?: string): PinDef =>
+    ({ id, name, direction, pinKind: "data", dataType, ...(accessor ? { accessor } : {}) });
 
 // 面板常驻类别(大致均摊)
 export const CATEGORIES = ["事件", "流程", "运算", "动作", "转换"] as const;
@@ -21,6 +21,7 @@ export const CATEGORY_COLOR: Record<string, string> = {
     "转换": "#ff9b6a",
     "变量": "#89ddff",
     "函数": "#69d6a0",
+    "逃逸": "#bf616a",
 };
 
 export const CURATED: NodeDef[] = [
@@ -38,7 +39,7 @@ export const CURATED: NodeDef[] = [
     {
         type: "event.playerInteract", category: "事件", label: "玩家交互(右键/左键)", kind: "impure", special: "event-root",
         desc: "PlayerInteractEvent",
-        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("action", "动作", "out", "Action"), dt("item", "手持物品", "out", "ItemStack"), dt("block", "点击方块", "out", "Block")],
+        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("action", "动作", "out", "Action"), dt("item", "手持物品", "out", "ItemStack"), dt("block", "点击方块", "out", "Block", "getClickedBlock")],
     },
     {
         type: "event.blockBreak", category: "事件", label: "破坏方块", kind: "impure", special: "event-root",
@@ -53,7 +54,7 @@ export const CURATED: NodeDef[] = [
     {
         type: "event.playerDeath", category: "事件", label: "玩家死亡", kind: "impure", special: "event-root",
         desc: "PlayerDeathEvent",
-        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("deathMessage", "死亡消息", "out", "String")],
+        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player", "getEntity"), dt("deathMessage", "死亡消息", "out", "String")],
     },
     {
         type: "event.asyncChat", category: "事件", label: "玩家聊天", kind: "impure", special: "event-root",
@@ -73,7 +74,7 @@ export const CURATED: NodeDef[] = [
     {
         type: "event.inventoryClick", category: "事件", label: "点击物品栏", kind: "impure", special: "event-root",
         desc: "InventoryClickEvent",
-        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player"), dt("slot", "槽位", "out", "int"), dt("current", "点击物品", "out", "ItemStack")],
+        pins: [ex("then", "▷", "out"), dt("player", "玩家", "out", "Player", "getWhoClicked"), dt("slot", "槽位", "out", "int"), dt("current", "点击物品", "out", "ItemStack", "getCurrentItem")],
     },
     { type: "life.onEnable", category: "事件", label: "插件启用", kind: "impure", special: "lifecycle", desc: "onEnable()", pins: [ex("then", "▷", "out")] },
     { type: "life.onDisable", category: "事件", label: "插件禁用", kind: "impure", special: "lifecycle", desc: "onDisable()", pins: [ex("then", "▷", "out")] },
