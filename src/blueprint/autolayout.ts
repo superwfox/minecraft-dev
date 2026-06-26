@@ -7,7 +7,8 @@ import { layoutOf, NODE_W } from "./layout";
 const COL_GAP = 96;
 const ROW_GAP = 28;
 
-export function autoLayout(graph: BlueprintGraph, defOf: (n: GraphNode) => NodeDef) {
+// keep:这些节点保留现有位置(重解析时按指纹匹配上的节点),只布局其余新节点
+export function autoLayout(graph: BlueprintGraph, defOf: (n: GraphNode) => NodeDef, keep?: Set<string>) {
     const nodes = graph.nodes;
     if (!nodes.length) return;
     const byId = new Map(nodes.map(n => [n.id, n]));
@@ -59,6 +60,7 @@ export function autoLayout(graph: BlueprintGraph, defOf: (n: GraphNode) => NodeD
     for (const [c, list] of colNodes) {
         let y = 40;
         for (const n of list) {
+            if (keep?.has(n.id)) continue; // 已保住位置的节点不动
             n.pos = { x: colX[c], y };
             y += layoutOf(defOf(n)).height + ROW_GAP;
         }

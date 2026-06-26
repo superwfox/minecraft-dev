@@ -16,10 +16,14 @@
       <pre v-if="mode !== 'import'" class="cp-code"><code>{{ code }}</code></pre>
 
       <div v-else class="cp-import">
+        <div class="cp-syncrow">
+          <button class="cp-sync" @click="doSync">⟳ 从项目代码同步</button>
+          <span class="cp-synchint">按指纹保留未变节点的布局,只布局新增</span>
+        </div>
         <textarea v-model="importText" class="cp-ta" spellcheck="false"
-                  placeholder="把 Java 源码粘到这里(可直接用上面「整插件」生成的代码做往返测试)…"></textarea>
+                  placeholder="或把 Java 源码粘到这里追加为图(可用上面「整插件」的输出做往返测试)…"></textarea>
         <div class="cp-imrow">
-          <button class="cp-parse" :disabled="!importText.trim()" @click="doImport">解析为图</button>
+          <button class="cp-parse" :disabled="!importText.trim()" @click="doImport">解析为图(追加)</button>
           <span class="cp-status" :class="{err: status.err}">{{ status.msg }}</span>
         </div>
       </div>
@@ -31,12 +35,14 @@
 import { ref, computed } from "vue";
 import { useBlueprint } from "../useBlueprint";
 import { generatePlugin, generateGraphCode } from "../codegen";
-import { parseJavaToDoc } from "../parse";
+import { parseJavaToDoc, parseFiles } from "../parse";
+import { useIDEStore } from "../../ide/composables/useIDEStore";
 
 defineProps<{ open: boolean }>();
 defineEmits<{ (e: "close"): void }>();
 
 const bp = useBlueprint();
+const ide = useIDEStore();
 const mode = ref<"graph" | "plugin" | "import">("graph");
 const copied = ref(false);
 const importText = ref("");
@@ -48,6 +54,14 @@ function doImport() {
     const r = bp.importParsed(res);
     if (!r.added) { status.value = { msg: "未解析出任何方法/图", err: true }; return; }
     status.value = { msg: `导入 ${r.added} 张图` + (r.warnings ? ` · ${r.warnings} 处降级为逃逸节点` : " · 全部映射成功"), err: false };
+}
+
+// 从项目里所有 .java 重新解析,按指纹对到现有图,保住未变节点的位置
+function doSync() {
+    const files = ide.state.files.filter(f => /\.java$/i.test(f.path));
+    if (!files.length) { status.value = { msg: "项目里没有 .java 文件", err: true }; return; }
+    const r = bp.syncFromParsed(parseFiles(files));
+    status.value = { msg: `同步 ${r.graphs} 图 · 保留 ${r.preserved} 节点位置 · 新增 ${r.added}` + (r.warnings ? ` · ${r.warnings} 逃逸` : ""), err: false };
 }
 
 const code = computed(() => {
@@ -108,6 +122,14 @@ async function copy() {
 
 .cp-tab.imp.on { background: rgba(191,97,106,0.2); border-color: rgba(191,97,106,0.5); color: #f0c4c8; }
 .cp-import { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px; gap: 10px; }
+.cp-syncrow { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.cp-sync {
+  background: rgba(137,221,255,0.16); border: 1px solid rgba(137,221,255,0.4);
+  color: #cdeeff; font-size: 13px; padding: 7px 16px; border-radius: 7px; cursor: pointer; font-family: inherit;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.1), inset -1px -1px 0 rgba(0,0,0,0.4);
+}
+.cp-sync:hover { filter: brightness(1.18); }
+.cp-synchint { font-size: 11px; color: rgba(255,255,255,0.4); }
 .cp-ta {
   flex: 1; min-height: 0; resize: none; box-sizing: border-box;
   background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;

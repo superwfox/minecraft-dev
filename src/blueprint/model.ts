@@ -52,6 +52,7 @@ export interface GraphNode {
     // member/变量节点把定义快照内联,保证 jar 未加载/重载后仍能渲染
     inlineDef?: NodeDef;
     title?: string;
+    fp?: string; // 稳定指纹(bluemap §2.2):由结构/内容派生,跨重解析保持,用于布局保全与 diff
 }
 
 export interface EndPoint { node: string; pin: string; }
@@ -82,6 +83,7 @@ export interface BlueprintGraph {
     edges: GraphEdge[];
     inputs?: GraphParam[];
     outputs?: GraphParam[];
+    fp?: string; // 图身份(入口:事件类型/生命周期/函数名),用于重解析时把新图对到旧图
 }
 
 export interface Viewport { scale: number; panX: number; panY: number; }

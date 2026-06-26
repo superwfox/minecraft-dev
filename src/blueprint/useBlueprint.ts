@@ -12,6 +12,7 @@ import { resolveDef, curatedDef } from "./registry";
 import { pinsCompatible } from "./types";
 import { LITERAL_DEFAULTS } from "./curated";
 import { autoLayout } from "./autolayout";
+import { assignFingerprints } from "./fingerprint";
 import type { ParseResult } from "./parse";
 
 const state = reactive<{
@@ -230,12 +231,53 @@ function importParsed(res: ParseResult): { added: number; warnings: number } {
     for (const g of res.graphs) state.doc.graphs.push(g); // 先全部入库,函数引用节点才能解析到目标图
     for (const g of res.graphs) {
         state.currentGraphId = g.id; // 让 defOf 的 fn:in/out 按本图(而非首图)解析针脚
+        assignFingerprints(g);       // 算稳定指纹,供后续「从代码同步」按指纹保位置
         autoLayout(g, defOf);
     }
     state.currentGraphId = res.graphs[0].id;
     state.selection = [];
     markDirty();
     return { added: res.graphs.length, warnings: res.warnings.length };
+}
+
+// 从代码重新解析并「同步」到现有 doc:按指纹把新图/新节点对到旧的,保住未变节点的位置,
+// 只给新增节点布局;代码里已消失的(有指纹的)图随之移除,用户手建的无指纹图保留。(bluemap §2.2)
+function syncFromParsed(res: ParseResult): { preserved: number; added: number; graphs: number; warnings: number } {
+    if (!state.doc || !res.graphs.length) return { preserved: 0, added: 0, graphs: 0, warnings: res.warnings.length };
+    for (const v of res.variables) if (!state.doc.variables.some(x => x.name === v.name)) state.doc.variables.push(v);
+
+    const prevGraphId = state.currentGraphId; // 同步后尽量留在原来看的图上
+    let preserved = 0, added = 0;
+    const kept = new Set<string>();
+    for (const ng of res.graphs) {
+        assignFingerprints(ng);
+        const og = state.doc.graphs.find(x => x.fp && x.fp === ng.fp);
+        if (og) {
+            const oldPos = new Map<string, NodePos>();
+            for (const on of og.nodes) if (on.fp) oldPos.set(on.fp, on.pos);
+            const keepIds = new Set<string>();
+            for (const nn of ng.nodes) {
+                const p = nn.fp ? oldPos.get(nn.fp) : undefined;
+                if (p) { nn.pos = { ...p }; keepIds.add(nn.id); preserved++; } else added++;
+            }
+            og.nodes = ng.nodes; og.edges = ng.edges; og.inputs = ng.inputs; og.outputs = ng.outputs; og.fp = ng.fp;
+            state.currentGraphId = og.id;
+            autoLayout(og, defOf, keepIds);
+            kept.add(og.id);
+        } else {
+            state.doc.graphs.push(ng);
+            state.currentGraphId = ng.id;
+            autoLayout(ng, defOf);
+            kept.add(ng.id);
+            added += ng.nodes.length;
+        }
+    }
+    // 代码里已消失的解析图(有 fp 且未被本次保留)删除;用户手建无 fp 的图保留
+    state.doc.graphs = state.doc.graphs.filter(g => kept.has(g.id) || !g.fp);
+    state.selection = [];
+    state.currentGraphId = state.doc.graphs.some(g => g.id === prevGraphId) ? prevGraphId : (state.doc.graphs[0]?.id || "");
+    markDirty();
+    return { preserved, added, graphs: res.graphs.length, warnings: res.warnings.length };
 }
 
 // 从已生成代码的解析结果重建蓝图(替换默认空图);仅在 fresh 时由视图调用
@@ -394,7 +436,7 @@ export function useBlueprint() {
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,
         addGraphInput, addGraphOutput, removeGraphInput, removeGraphOutput,
-        copyNodes, pasteNodes, importParsed, replaceWithParsed,
+        copyNodes, pasteNodes, importParsed, replaceWithParsed, syncFromParsed,
         setViewport, setSelection,
     };
 }
