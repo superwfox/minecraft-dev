@@ -499,3 +499,23 @@ export function parseJavaToDoc(code: string): ParseResult {
 
     return { graphs, variables, warnings };
 }
+
+// 多文件(整个已生成项目)→ 合并图集。每个 .java 各自解析,变量按名去重。
+export function parseFiles(files: { path: string; content: string }[]): ParseResult {
+    const graphs: BlueprintGraph[] = [];
+    const variables: Variable[] = [];
+    const warnings: string[] = [];
+    for (const f of files) {
+        if (!/\.java$/i.test(f.path)) continue;
+        const r = parseJavaToDoc(f.content);
+        if (r.error) { warnings.push(`${f.path}:${r.error}`); continue; }
+        const base = f.path.split("/").pop()?.replace(/\.java$/i, "") || "";
+        for (const g of r.graphs) {
+            // 给图名带上来源类名前缀,避免多文件同名(onEnable 等)混淆
+            graphs.push(base && !g.name.startsWith(base) ? { ...g, name: `${base}·${g.name}` } : g);
+        }
+        for (const v of r.variables) if (!variables.some(x => x.name === v.name)) variables.push(v);
+        warnings.push(...r.warnings);
+    }
+    return { graphs, variables, warnings };
+}

@@ -20,12 +20,14 @@ const state = reactive<{
     currentGraphId: string;
     selection: string[];
     loaded: boolean;
+    fresh: boolean; // 尚无有意义的蓝图(仅默认空图)→ 可从已生成代码自动导入
 }>({
     taskId: "",
     doc: null,
     currentGraphId: "",
     selection: [],
     loaded: false,
+    fresh: false,
 });
 
 const currentGraph = computed<BlueprintGraph | null>(() =>
@@ -46,10 +48,17 @@ function emptyDoc(taskId: string): BlueprintDoc {
     return { taskId, graphs: [g], variables: [], viewport: { scale: 1, panX: 0, panY: 0 } };
 }
 
+// 仅默认空图(或全空)→ 视为「尚无蓝图」,允许从已生成代码自动导入
+function isFreshDoc(d: BlueprintDoc | null): boolean {
+    if (!d || !d.graphs?.length) return true;
+    return d.graphs.length === 1 && d.graphs[0].nodes.length === 0;
+}
+
 async function loadForTask(taskId: string) {
     state.loaded = false;
     state.taskId = taskId;
     const loaded = await loadDoc(taskId);
+    state.fresh = isFreshDoc(loaded);
     state.doc = loaded && loaded.graphs?.length ? loaded : emptyDoc(taskId);
     state.currentGraphId = state.doc.graphs[0].id;
     state.selection = [];
@@ -218,8 +227,8 @@ function importParsed(res: ParseResult): { added: number; warnings: number } {
     for (const v of res.variables) {
         if (!state.doc.variables.some(x => x.name === v.name)) state.doc.variables.push(v);
     }
+    for (const g of res.graphs) state.doc.graphs.push(g); // 先全部入库,函数引用节点才能解析到目标图
     for (const g of res.graphs) {
-        state.doc.graphs.push(g);
         state.currentGraphId = g.id; // 让 defOf 的 fn:in/out 按本图(而非首图)解析针脚
         autoLayout(g, defOf);
     }
@@ -227,6 +236,16 @@ function importParsed(res: ParseResult): { added: number; warnings: number } {
     state.selection = [];
     markDirty();
     return { added: res.graphs.length, warnings: res.warnings.length };
+}
+
+// 从已生成代码的解析结果重建蓝图(替换默认空图);仅在 fresh 时由视图调用
+function replaceWithParsed(res: ParseResult): { added: number; warnings: number } {
+    if (!state.doc || !res.graphs.length) return { added: 0, warnings: res.warnings.length };
+    state.doc.graphs = [];
+    state.doc.variables = [];
+    const r = importParsed(res);
+    state.fresh = false;
+    return r;
 }
 
 function removeNode(id: string) {
@@ -375,7 +394,7 @@ export function useBlueprint() {
         connect, removeEdge, isPinConnected,
         addVariable, removeVariable,
         addGraphInput, addGraphOutput, removeGraphInput, removeGraphOutput,
-        copyNodes, pasteNodes, importParsed,
+        copyNodes, pasteNodes, importParsed, replaceWithParsed,
         setViewport, setSelection,
     };
 }
