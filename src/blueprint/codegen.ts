@@ -170,6 +170,11 @@ function createGen(doc: BlueprintDoc) {
         }
         if (sp === "member") return memberCall(g, node, def, bind);
         if (sp === "function") return fnCall(g, node, def, bind);
+        if (node.defType.startsWith("binop:")) {
+            const op = node.defType.slice("binop:".length);
+            return `(${argOfIn(g, node, def, "a", bind)} ${op} ${argOfIn(g, node, def, "b", bind)})`;
+        }
+        if (node.defType.startsWith("field:")) return node.defType.slice("field:".length); // 限定名引用 verbatim
 
         const tpl = EXPR_TEMPLATES[node.defType];
         if (tpl) return fillTemplate(tpl, g, node, def, bind);
@@ -195,12 +200,18 @@ function createGen(doc: BlueprintDoc) {
     }
 
     function memberCall(g: BlueprintGraph, node: GraphNode, def: NodeDef, bind: Map<string, string>): string {
-        const method = memberMethodName(node.defType);
-        const recv = argOfIn(g, node, def, "self", bind);
+        const dt = node.defType;
         const args = def.pins
             .filter(p => p.direction === "in" && p.pinKind === "data" && p.id !== "self")
             .map(p => argOfIn(g, node, def, p.id, bind));
-        return `${recv}.${method}(${args.join(", ")})`;
+        if (dt.startsWith("new:")) return `new ${typeEmit(dt.slice(4, dt.indexOf("(")))}(${args.join(", ")})`;
+        if (dt.startsWith("static:")) {
+            const recv = dt.slice(7, dt.indexOf("#"));
+            const method = memberMethodName(dt);
+            return recv ? `${typeEmit(recv)}.${method}(${args.join(", ")})` : `${method}(${args.join(", ")})`;
+        }
+        const recv = argOfIn(g, node, def, "self", bind);
+        return `${recv}.${memberMethodName(dt)}(${args.join(", ")})`;
     }
 
     function fnCall(g: BlueprintGraph, node: GraphNode, def: NodeDef, bind: Map<string, string>): string {

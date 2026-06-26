@@ -22,6 +22,9 @@ export const CATEGORY_COLOR: Record<string, string> = {
     "变量": "#89ddff",
     "函数": "#69d6a0",
     "逃逸": "#bf616a",
+    "构造": "#d8a657",
+    "调用": "#7daea3",
+    "引用": "#83a598",
 };
 
 export const CURATED: NodeDef[] = [

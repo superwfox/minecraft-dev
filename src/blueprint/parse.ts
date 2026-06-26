@@ -40,7 +40,13 @@ const accessorFor = (id: string, type?: string) => {
     return (s === "boolean" || s === "Boolean") ? "is" + cap : "get" + cap;
 };
 
-const BINOP: Record<string, string> = { "+": "value.concat", "&&": "value.and", "||": "value.or", ">": "value.greaterThan", "==": "value.equals" };
+// 运算符优先级(数大者先结合)+ 已收录的策展运算节点;未收录的走通用 binop 节点
+const PREC: Record<string, number> = {
+    "||": 3, "&&": 4, "|": 5, "^": 6, "&": 7, "==": 8, "!=": 8,
+    "<": 9, ">": 9, "<=": 9, ">=": 9, "<<": 10, ">>": 10, ">>>": 10,
+    "+": 11, "-": 11, "*": 12, "/": 12, "%": 12,
+};
+const OPNODE: Record<string, string> = { "+": "value.concat", "&&": "value.and", "||": "value.or", ">": "value.greaterThan", "==": "value.equals" };
 
 interface End { node: string; pin: string; }
 interface StmtFlow { head: End | null; tails: End[]; } // head=入口 exec-in;tails=待接续的 exec-out 端点
@@ -98,23 +104,44 @@ function buildGraph(opts: {
         if (kid(cond, "QuestionMark") || kids(cond, "Colon").length) return escapeData(cond, "三元表达式");
         return mapBinary(kid(cond, "binaryExpression"));
     }
+    // 二元运算:对 java-parser 扁平化的 operands/ops 做优先级攀爬,正确建树
     function mapBinary(bin: Cst): End {
         if (!bin) return escapeData(bin);
         if (kid(bin, "Instanceof")) return escapeData(bin, "instanceof");
         const ops = kids(bin, "BinaryOperator").map(img);
         const operands = kids(bin, "unaryExpression");
         if (ops.length === 0) return mapUnary(operands[0]);
-        const uniform = ops.every(o => o === ops[0]) && BINOP[ops[0]] && operands.length === ops.length + 1;
-        if (!uniform) return escapeData(bin, "复合/未支持运算");
-        let left = mapUnary(operands[0]);
-        for (let i = 0; i < ops.length; i++) {
-            const right = mapUnary(operands[i + 1]);
-            const op = add(BINOP[ops[0]]);
-            link(left, { node: op.id, pin: "a" }, "data");
-            link(right, { node: op.id, pin: "b" }, "data");
-            left = { node: op.id, pin: "result" };
+        if (operands.length !== ops.length + 1) return escapeData(bin, "运算结构异常");
+        const ends = operands.map(mapUnary);
+        let oi = 0, i = 0;
+        const climb = (minPrec: number): End => {
+            let left = ends[oi++];
+            while (i < ops.length && (PREC[ops[i]] ?? 0) >= minPrec) {
+                const op = ops[i++];
+                const right = climb((PREC[op] ?? 0) + 1);
+                left = makeOpNode(op, left, right);
+            }
+            return left;
+        };
+        return climb(0);
+    }
+    function makeOpNode(op: string, a: End, b: End): End {
+        const curated = OPNODE[op];
+        if (curated) {
+            const n = add(curated);
+            link(a, { node: n.id, pin: "a" }, "data"); link(b, { node: n.id, pin: "b" }, "data");
+            return { node: n.id, pin: "result" };
         }
-        return left;
+        const def: NodeDef = {
+            type: `binop:${op}`, category: "运算", label: `A ${op} B`, kind: "pure", pins: [
+                { id: "a", name: "A", direction: "in", pinKind: "data", dataType: "Object" },
+                { id: "b", name: "B", direction: "in", pinKind: "data", dataType: "Object" },
+                { id: "result", name: `A ${op} B`, direction: "out", pinKind: "data", dataType: "Object" },
+            ], desc: op,
+        };
+        const n = add(def.type, def);
+        link(a, { node: n.id, pin: "a" }, "data"); link(b, { node: n.id, pin: "b" }, "data");
+        return { node: n.id, pin: "result" };
     }
     function mapUnary(u: Cst): End {
         const prefixes = kids(u, "UnaryPrefixOperator").map(img);
@@ -128,30 +155,80 @@ function buildGraph(opts: {
         if (prefixes.length > 0) return escapeData(u, "前缀运算");
         return mapPrimary(primary);
     }
-    function mapPrimary(primary: Cst): End {
-        if (!primary) return escapeData(primary);
+    // value 上下文取主表达式(含调用链)的值端
+    function mapPrimary(primary: Cst): End { return mapPrimaryFull(primary, false).end; }
+
+    // 主表达式 + 后缀链 a.b().c().d:end=值端;node/exec=链尾调用(供语句上下文接 exec)
+    function mapPrimaryFull(primary: Cst, statement: boolean): { end: End; node?: GraphNode; exec?: boolean } {
+        if (!primary) return { end: escapeData(primary) };
         const prefix = kid(primary, "primaryPrefix");
         const suffixes = kids(primary, "primarySuffix");
+
         if (suffixes.length === 0) {
             const paren = kid(prefix, "parenthesisExpression");
-            if (paren) return mapExpr(kid(paren, "expression"));
+            if (paren) return { end: mapExpr(kid(paren, "expression")) };
             const lit = kid(prefix, "literal");
-            if (lit) return mapLiteral(lit);
+            if (lit) return { end: mapLiteral(lit) };
+            const neu = kid(prefix, "newExpression");
+            if (neu) return { end: mapNew(neu) };
             const fqn = kid(prefix, "fqnOrRefType");
             if (fqn) {
                 const parts = fqnParts(fqn);
-                if (parts.length === 1) return resolveName(parts[0]);
-                return escapeData(primary, "字段访问链");
+                if (parts.length === 1) return { end: resolveName(parts[0]) };
+                return { end: fieldRef(parts) }; // 限定名:枚举常量 / 静态字段(Material.DIAMOND 等)
             }
-            return escapeData(primary, "cast/new/其它");
+            return { end: escapeData(primary, "复杂前缀") };
         }
-        if (suffixes.length === 1) {
-            const mis = kid(suffixes[0], "methodInvocationSuffix");
-            const fqn = kid(prefix, "fqnOrRefType");
-            if (mis && fqn) { const r = mapInvocation(fqn, mis, false); return r.value || escapeData(primary, "调用无返回值"); }
+
+        // 起点:fqn 名链(尾段待消费) 或 括号/new/字面量 得到的值
+        let curEnd: End | null = null;
+        let pending: string | null = null;
+        let parts: string[] = [];
+        const fqn = kid(prefix, "fqnOrRefType");
+        if (fqn) { parts = fqnParts(fqn); pending = parts.pop() || null; }
+        else {
+            const paren = kid(prefix, "parenthesisExpression");
+            const neu = kid(prefix, "newExpression");
+            const lit = kid(prefix, "literal");
+            if (paren) curEnd = mapExpr(kid(paren, "expression"));
+            else if (neu) curEnd = mapNew(neu);
+            else if (lit) curEnd = mapLiteral(lit);
+            else return { end: escapeData(primary, "复杂前缀链") };
         }
-        return escapeData(primary, "复杂主表达式");
+
+        let last: { node?: GraphNode; exec?: boolean } = {};
+        for (let i = 0; i < suffixes.length; i++) {
+            const mis = kid(suffixes[i], "methodInvocationSuffix");
+            if (mis) {
+                if (pending == null) return { end: escapeData(primary, "调用结构异常") };
+                const args = kids(kid(mis, "argumentList"), "expression").map(mapExpr);
+                const method = pending; pending = null;
+                const isStmt = statement && i === suffixes.length - 1;
+                if (curEnd) {
+                    const mn = memberNode(method, curEnd, "Object", args, isStmt);
+                    curEnd = { node: mn.id, pin: "ret" }; last = { node: mn, exec: isStmt };
+                } else {
+                    const r = resolveReceiverCall(parts, method, args, isStmt);
+                    if (!r.end && !r.node) return { end: escapeData(primary, "未解析调用") };
+                    curEnd = r.end || (r.node ? { node: r.node.id, pin: "ret" } : null);
+                    last = { node: r.node, exec: r.exec };
+                }
+                continue;
+            }
+            const id = img(kid(suffixes[i], "Identifier"));
+            if (id) {
+                if (pending != null) return { end: escapeData(primary, "字段访问链") };
+                pending = id; continue;
+            }
+            return { end: escapeData(primary, "未知后缀") };
+        }
+        if (pending != null) {
+            if (!curEnd && parts.length === 0) return { end: resolveName(pending) };
+            return { end: escapeData(primary, "尾部字段访问") };
+        }
+        return { end: curEnd || escapeData(primary, "空链"), node: last.node, exec: last.exec };
     }
+
     function mapLiteral(lit: Cst): End {
         if (kid(lit, "StringLiteral")) {
             const raw = img(kid(lit, "StringLiteral"));
@@ -173,48 +250,84 @@ function buildGraph(opts: {
         const n = add("var:get", undefined, { varRef: { name, mode: "get" } });
         return { node: n.id, pin: "value" };
     }
+    // 限定名引用(枚举常量 / 静态字段):整段 verbatim,codegen 原样输出
+    function fieldRef(parts: string[]): End {
+        const path = parts.join(".");
+        const def: NodeDef = {
+            type: `field:${path}`, category: "引用", label: parts.slice(-2).join("."), kind: "pure",
+            pins: [{ id: "value", name: parts[parts.length - 1], direction: "out", pinKind: "data", dataType: "Object" }], desc: path,
+        };
+        const n = add(def.type, def);
+        return { node: n.id, pin: "value" };
+    }
 
-    // 方法调用 → 节点。node=供 exec 接续(仅当 exec=true);value=数据出端;exec=该 node 是否在执行链上
-    function mapInvocation(fqn: Cst, mis: Cst, statement: boolean): { node?: GraphNode; value?: End; exec?: boolean } {
-        const parts = fqnParts(fqn);
-        const method = parts[parts.length - 1];
-        const recv = parts.slice(0, -1);
-        const args = kids(kid(mis, "argumentList"), "expression").map(mapExpr);
-        const lastRecv = recv[recv.length - 1] || "";
+    // new X(args) → 构造节点(纯值)
+    function mapNew(neu: Cst): End {
+        const u = kid(neu, "unqualifiedClassInstanceCreationExpression");
+        if (!u) return escapeData(neu, "new(限定/数组)");
+        if (kid(u, "classBody")) return escapeData(neu, "匿名类");
+        const type = simpleType(sliceOf(kid(u, "classOrInterfaceTypeToInstantiate")));
+        const args = kids(kid(u, "argumentList"), "expression").map(mapExpr);
+        const pins: PinDef[] = args.map((_, i) => ({ id: "p" + i, name: "arg" + i, direction: "in", pinKind: "data", dataType: "Object" } as PinDef));
+        pins.push({ id: "ret", name: type, direction: "out", pinKind: "data", dataType: type });
+        const def: NodeDef = { type: `new:${type}(${args.map(() => "Object").join(",")})`, category: "构造", label: `new ${type}`, kind: "pure", special: "member", pins, desc: `new ${type}` };
+        const n = add(def.type, def);
+        args.forEach((a, i) => link(a, { node: n.id, pin: "p" + i }, "data"));
+        return { node: n.id, pin: "ret" };
+    }
 
-        // 事件 getter:event.getX()(纯引用,无新节点)
-        if (recv.length === 1 && recv[0] === opts.eventParam && eventNode && eventDef) {
+    // 静态调用 / 隐式 this 调用 → 节点(recvPath 空=隐式 this)
+    function staticNode(method: string, recvPath: string, args: End[], statement: boolean): GraphNode {
+        const simple = recvPath ? simpleType(recvPath) : "";
+        const pins: PinDef[] = [];
+        if (statement) pins.push({ id: "exec", name: "▷", direction: "in", pinKind: "exec" });
+        args.forEach((_, i) => pins.push({ id: "p" + i, name: "arg" + i, direction: "in", pinKind: "data", dataType: "Object" }));
+        if (statement) pins.push({ id: "then", name: "▷", direction: "out", pinKind: "exec" });
+        pins.push({ id: "ret", name: "返回", direction: "out", pinKind: "data", dataType: "Object" });
+        const def: NodeDef = {
+            type: `static:${recvPath}#${method}(${args.map(() => "Object").join(",")})`,
+            category: simple || "调用", label: simple ? `${simple}.${method}` : method,
+            kind: statement ? "impure" : "pure", special: "member", pins, desc: simple ? `${simple}.${method}` : method,
+        };
+        const n = add(def.type, def);
+        args.forEach((a, i) => link(a, { node: n.id, pin: "p" + i }, "data"));
+        return n;
+    }
+
+    // 起点调用的接收者解析:事件 getter / Objects.equals / Bukkit 便利 / 函数调用 / 实例(值·字段) / 静态 / 隐式 this
+    function resolveReceiverCall(parts: string[], method: string, args: End[], statement: boolean): { end?: End; node?: GraphNode; exec?: boolean } {
+        const lastRecv = parts[parts.length - 1] || "";
+        if (parts.length === 1 && parts[0] === opts.eventParam && eventNode && eventDef) {
             const pin = eventDef.pins.find(p => p.direction === "out" && p.pinKind === "data"
                 && (p.accessor || accessorFor(p.id, p.dataType)) === method);
-            if (pin) return { value: { node: eventNode.id, pin: pin.id } };
+            if (pin) return { end: { node: eventNode.id, pin: pin.id } };
         }
-        // 全局动作 / 便利
         if (lastRecv === "Objects" && method === "equals" && args.length === 2) {
             const n = add("value.equals"); link(args[0], { node: n.id, pin: "a" }, "data"); link(args[1], { node: n.id, pin: "b" }, "data");
-            return { value: { node: n.id, pin: "result" } };
+            return { end: { node: n.id, pin: "result" } };
         }
         if (lastRecv === "Bukkit") {
-            if (method === "getOnlinePlayers") { const n = add("value.onlinePlayers"); return { node: n, value: { node: n.id, pin: "players" }, exec: false }; }
-            if (method === "broadcastMessage" && statement) { const n = add("action.broadcast"); if (args[0]) link(args[0], { node: n.id, pin: "message" }, "data"); return { node: n, exec: true }; }
-            if (method === "dispatchCommand" && statement) { const n = add("action.runCommand"); const cmd = args[args.length - 1]; if (cmd) link(cmd, { node: n.id, pin: "command" }, "data"); return { node: n, exec: true }; }
+            if (method === "getOnlinePlayers") { const n = add("value.onlinePlayers"); return { node: n, end: { node: n.id, pin: "players" }, exec: false }; }
+            if (method === "broadcastMessage") { const n = add("action.broadcast"); if (args[0]) link(args[0], { node: n.id, pin: "message" }, "data"); return { node: n, exec: true }; }
+            if (method === "dispatchCommand") { const n = add("action.runCommand"); const c = args[args.length - 1]; if (c) link(c, { node: n.id, pin: "command" }, "data"); return { node: n, exec: true }; }
         }
-        // 无接收者:函数调用(图引用)
-        if (recv.length === 0) {
+        if (parts.length === 0) {
             const f = opts.fnMap.get(method);
             if (f) {
                 const n = add(`graphref:${f.graphId}`, undefined, { graphRef: f.graphId });
                 f.inputs.forEach((inp, i) => { if (args[i]) link(args[i], { node: n.id, pin: `in:${inp.id}` }, "data"); });
-                return { node: n, value: f.outputs[0] ? { node: n.id, pin: `out:${f.outputs[0].id}` } : undefined, exec: true };
+                return { node: n, end: f.outputs[0] ? { node: n.id, pin: `out:${f.outputs[0].id}` } : undefined, exec: true };
             }
+            const sn = staticNode(method, "", args, statement);
+            return { node: sn, end: { node: sn.id, pin: "ret" }, exec: statement };
         }
-        // 实例方法调用:接收者是已知值
-        if (recv.length === 1 && symbols.has(recv[0])) {
-            const sym = symbols.get(recv[0])!;
-            const mn = memberNode(method, { node: sym.node, pin: sym.pin }, sym.type, args, statement);
-            return { node: mn, value: { node: mn.id, pin: "ret" }, exec: statement };
+        const isStatic = parts.length > 1 || /^[A-Z]/.test(parts[0]);
+        if (!isStatic) {
+            const mn = memberNode(method, resolveName(parts[0]), symbols.get(parts[0])?.type || "Object", args, statement);
+            return { node: mn, end: { node: mn.id, pin: "ret" }, exec: statement };
         }
-        // 其余(静态/链式/未知)→ 逃逸
-        return {};
+        const sn = staticNode(method, parts.join("."), args, statement);
+        return { node: sn, end: { node: sn.id, pin: "ret" }, exec: statement };
     }
     // 合成实例成员节点(self + 参数 + ret;statement 时带 exec)
     function memberNode(method: string, recvEnd: End, recvType: string, args: End[], statement: boolean): GraphNode {
@@ -260,16 +373,13 @@ function buildGraph(opts: {
         if (!init || !name) return PASS;
         const expr = kid(init, "expression");
         const be = kid(kid(expr, "conditionalExpression"), "binaryExpression");
-        if (be && kids(be, "BinaryOperator").length === 0 && !kid(be, "AssignmentOperator") && !kid(be, "Instanceof")) {
-            const primary = kid(kids(be, "unaryExpression")[0], "primary");
-            const suffixes = kids(primary, "primarySuffix");
-            const fqn = kid(kid(primary, "primaryPrefix"), "fqnOrRefType");
-            if (suffixes.length === 1 && fqn && kid(suffixes[0], "methodInvocationSuffix")) {
-                const r = mapInvocation(fqn, kid(suffixes[0], "methodInvocationSuffix"), true);
-                if (r.value) symbols.set(name, { node: r.value.node, pin: r.value.pin, type });
-                if (r.node && r.exec) return chain(r.node);
-                if (r.value) return PASS;
-            }
+        const operands = be ? kids(be, "unaryExpression") : [];
+        if (be && kids(be, "BinaryOperator").length === 0 && !kid(be, "AssignmentOperator") && !kid(be, "Instanceof")
+            && operands.length === 1 && kids(operands[0], "UnaryPrefixOperator").length === 0) {
+            const r = mapPrimaryFull(kid(operands[0], "primary"), true);
+            symbols.set(name, { node: r.end.node, pin: r.end.pin, type }); // RHS 值端绑定到本地名
+            if (r.node && r.exec) return chain(r.node); // RHS 是副作用调用 → 入执行链
+            return PASS;
         }
         const end = mapExpr(expr);
         symbols.set(name, { node: end.node, pin: end.pin, type });
@@ -295,20 +405,15 @@ function buildGraph(opts: {
     }
     function mapExprStmt(es: Cst): StmtFlow {
         if (sliceOf(es).includes("registerEvents(")) return PASS; // 跳过 onEnable 的监听器注册样板
-        const bin = kid(kid(kid(es, "statementExpression"), "expression"), "conditionalExpression");
-        const be = kid(bin, "binaryExpression");
+        const be = kid(kid(kid(kid(es, "statementExpression"), "expression"), "conditionalExpression"), "binaryExpression");
         if (!be) return escapeStmt(es, "表达式语句");
         if (kid(be, "AssignmentOperator")) return mapAssign(be);
-        // 方法调用语句
+        // 方法调用语句(含调用链 a.b().c())
         const operands = kids(be, "unaryExpression");
-        if (kids(be, "BinaryOperator").length === 0 && operands.length === 1) {
-            const primary = kid(operands[0], "primary");
-            const suffixes = kids(primary, "primarySuffix");
-            const fqn = kid(kid(primary, "primaryPrefix"), "fqnOrRefType");
-            if (suffixes.length === 1 && fqn && kid(suffixes[0], "methodInvocationSuffix")) {
-                const r = mapInvocation(fqn, kid(suffixes[0], "methodInvocationSuffix"), true);
-                if (r.node && r.exec) return chain(r.node);
-            }
+        if (kids(be, "BinaryOperator").length === 0 && !kid(be, "Instanceof") && operands.length === 1
+            && kids(operands[0], "UnaryPrefixOperator").length === 0) {
+            const r = mapPrimaryFull(kid(operands[0], "primary"), true);
+            if (r.node && r.exec) return chain(r.node);
         }
         return escapeStmt(es, "未识别的语句");
     }
