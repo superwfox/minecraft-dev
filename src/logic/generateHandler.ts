@@ -473,12 +473,15 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 // fileStatuses 持久化保证不重复生成已完成文件。
                 let bucketDone = false;
                 let guard = 0;
+                let noProgress = 0;
+                const doneCount = () => genTask.files.filter(f => f.status === "done").length;
                 while (!bucketDone) {
                     if (guard++ > 80) { // 安全阀，防意外死循环
                         genTask.logs.push(`× 桶 #${bucketIndex} 批次过多，终止生成`);
                         needReplan = true; break;
                     }
                     // 单批重试一次：批小，重试更不易再撞限制
+                    const doneBefore = doneCount();
                     let bucketResult: any = null;
                     for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
                         try {
@@ -490,9 +493,22 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                         }
                     }
                     if (!bucketResult) {
-                        genTask.logs.push(`× 桶 #${bucketIndex} 批次多次无返回，退回重新规划`);
-                        needReplan = true; break;
+                        // 流被切断（多因推理审查静默太久被 CF 切）≠ 生成失败：进度已在后端增量落库,
+                        // 直接重试【同一桶】（已 done 文件会被 pending 跳过、继续往下做），不做破坏性重新规划。
+                        // 只要本批收到过 file_done（有进度）就清零计数；连续多批零进度才退回 replan 兜底。
+                        if (doneCount() > doneBefore) {
+                            noProgress = 0;
+                            genTask.logs.push(`· 桶 #${bucketIndex} 本批流中断但已落地部分文件，重试同一桶继续...`);
+                            continue;
+                        }
+                        if (++noProgress >= 5) {
+                            genTask.logs.push(`× 桶 #${bucketIndex} 连续 ${noProgress} 批零进度，退回重新规划`);
+                            needReplan = true; break;
+                        }
+                        genTask.logs.push(`· 桶 #${bucketIndex} 本批无返回且无进度（${noProgress}/5），重试同一桶...`);
+                        continue;
                     }
+                    noProgress = 0;
                     if (bucketResult.replan) { needReplan = true; break; }
                     // 把本批完成的内容回填到 files
                     for (const c of bucketResult.completed || []) {

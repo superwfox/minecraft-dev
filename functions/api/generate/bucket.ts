@@ -363,6 +363,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
 
     const process = (async () => {
+        // 心跳:reChecker 审查 / 摘要等非流式 LLM 调用期间(推理模型 thinking 阶段不吐 token,
+        // 首 token 可达 100s+),SSE 会长时间无字节 → Cloudflare 切断连接 → 前端收不到 result
+        // 事件 → 误判「无返回」→ 退回重新规划循环。每 12s 写个 heartbeat 维持流活着(前端忽略此事件)。
+        const heartbeat = setInterval(() => {
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+        }, 12000);
         try {
             await writer.write(sseEvent(encoder, {
                 type: "bucket_start", bucketIndex, paths: bucket.map(f => f.path), concurrency,
@@ -416,6 +422,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             state.fileStatuses[target.path] = "error";
                         } else {
                             state.fileStatuses[target.path] = "done";
+                            // 增量持久化:本文件完成即入库 + 落 KV。半路被 CF 杀掉也不丢进度,
+                            // 前端重试同一桶时已 done 的文件会被 pending 过滤跳过,继续往下做。
+                            state.generatedFiles.push({ path: r.path, content: r.content, apiSummary: r.apiSummary });
+                            for (const nf of r.newFiles) {
+                                if (!state.generatedFiles.find((g: any) => g.path === nf.path)) {
+                                    state.generatedFiles.push(nf);
+                                    state.fileStatuses[nf.path] = "done";
+                                }
+                            }
+                            state.currentFileIndex = state.generatedFiles.length;
+                            try { await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 }); } catch { /* 落盘失败不阻断本批 */ }
                         }
                         results.push(r);
                     } catch (taskErr: any) {
@@ -458,16 +475,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 return;
             }
 
-            // 桶完成：把所有结果与新生成的动态文件追加到 state.generatedFiles
-            for (const r of results) {
-                state.generatedFiles.push({ path: r.path, content: r.content, apiSummary: r.apiSummary });
-                for (const nf of r.newFiles) {
-                    if (!state.generatedFiles.find((g: any) => g.path === nf.path)) {
-                        state.generatedFiles.push(nf);
-                        state.fileStatuses[nf.path] = "done";
-                    }
-                }
-            }
+            // 本批文件已在各自完成时增量入库 + 落 KV（见上方 generateAndCheckFile 成功分支）
             // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶
             const bucketDone = pending.length <= targets.length;
             if (bucketDone) state.currentBucket = bucketIndex + 1;
@@ -496,6 +504,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
             } catch { /* writer 可能已关闭 */ }
         } finally {
+            clearInterval(heartbeat);
             await writer.close();
         }
     })();
