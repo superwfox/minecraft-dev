@@ -349,9 +349,21 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
 
         while (true) {
             genTask.reasoningContent = "";
-            const clarifyResult = await streamClarify(genTask.taskId, answers, extraPrompt);
+            // 澄清调用可能因 CF→模型服务链路慢/抖动拿不到 result(超时/被切/连接失败)。
+            // 这不一定是真失败:重试几次(保留已填 answers/补充说明),都不行才硬失败。
+            let clarifyResult: any = null;
+            for (let attempt = 0; attempt < 3 && !clarifyResult; attempt++) {
+                try {
+                    const r = await streamClarify(genTask.taskId, answers, extraPrompt);
+                    if (r && !r.error) { clarifyResult = r; break; }
+                    genTask.logs.push(`· 澄清${r?.error ? `出错(${r.error})` : "无返回"}，重试 (${attempt + 1}/3)...`);
+                } catch (ce: any) {
+                    if (isInterrupt(ce)) throw ce; // ESC 撤回照常中断
+                    genTask.logs.push(`· 澄清中断（${ce?.message || ce}），重试 (${attempt + 1}/3)...`);
+                }
+            }
             extraPrompt = undefined;
-            if (!clarifyResult) throw new Error("澄清阶段无响应");
+            if (!clarifyResult) throw new Error("澄清阶段多次无响应（可能与模型服务连接不稳定，请稍后重试）");
 
             if (clarifyResult.needMoreInput) {
                 genTask.moreInputHint = clarifyResult.hint || "请补充更多需求描述";

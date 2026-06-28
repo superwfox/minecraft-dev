@@ -5,6 +5,7 @@ import { resolveLLM } from "../../_lib/llm";
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const CLARIFY_MODEL = "deepseek-v4-pro";
 const MAX_CLARIFY_ROUNDS = 5;
+const CLARIFY_TIMEOUT_MS = 150000; // 与模型服务连接慢/挂死时 abort,避免 Worker 无限等待 → SSE 永不返回 result
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -23,58 +24,65 @@ async function callReasonerStream(
     url: string, key: string, model: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
-    const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-            model,
-            stream: true,
-            stream_options: { include_usage: true },
-            reasoning_effort: "high",
-            thinking: { type: "enabled" },
-            messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CLARIFY_TIMEOUT_MS);
+    try {
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+            body: JSON.stringify({
+                model,
+                stream: true,
+                stream_options: { include_usage: true },
+                reasoning_effort: "high",
+                thinking: { type: "enabled" },
+                messages: [{ role: "system", content: system }, { role: "user", content: user }],
+            }),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let content = "";
-    let usage: UsageBreakdown | undefined;
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let content = "";
+        let usage: UsageBreakdown | undefined;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                const chunk = JSON.parse(payload);
-                if (chunk.usage) usage = chunk.usage;
-                const delta = chunk.choices?.[0]?.delta;
-                if (!delta) continue;
-                if (delta.reasoning_content) {
-                    await writer.write(sseEvent(encoder, {
-                        type: "reasoning", content: delta.reasoning_content,
-                    }));
-                }
-                if (delta.content) {
-                    content += delta.content;
-                    await writer.write(sseEvent(encoder, {
-                        type: "delta", content: delta.content,
-                    }));
-                }
-            } catch { /* skip */ }
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                try {
+                    const chunk = JSON.parse(payload);
+                    if (chunk.usage) usage = chunk.usage;
+                    const delta = chunk.choices?.[0]?.delta;
+                    if (!delta) continue;
+                    if (delta.reasoning_content) {
+                        await writer.write(sseEvent(encoder, {
+                            type: "reasoning", content: delta.reasoning_content,
+                        }));
+                    }
+                    if (delta.content) {
+                        content += delta.content;
+                        await writer.write(sseEvent(encoder, {
+                            type: "delta", content: delta.content,
+                        }));
+                    }
+                } catch { /* skip */ }
+            }
         }
+        return { content, usage };
+    } finally {
+        clearTimeout(timer);
     }
-    return { content, usage };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -113,6 +121,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
 
     const process = (async () => {
+        // 心跳:从发请求到推理首 token 之间那段是静默的(CF→DS 链路慢时尤甚),每 12s 写个
+        // heartbeat 维持 SSE 有字节,避免被 CF 因长静默切断 → 前端收不到 result → 误判「无响应」。
+        const heartbeat = setInterval(() => {
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+        }, 12000);
         try {
             // 超过最大轮次，强制 done
             if (state.clarifyRounds.length >= MAX_CLARIFY_ROUNDS) {
@@ -183,9 +196,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "result", done, todos }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
-            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${e.message}` }));
-            await writer.write(encoder.encode("data: [DONE]\n\n"));
+            const msg = e?.name === "AbortError" ? "与模型服务连接超时" : (e?.message || String(e));
+            try {
+                await writer.write(sseEvent(encoder, { type: "log", msg: `× 澄清错误: ${msg}` }));
+                // 关键:出错也发一个带 error 的 result,前端据此重试,而非拿到 null 直接判「无响应」硬失败
+                await writer.write(sseEvent(encoder, { type: "result", error: msg }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+            } catch { /* writer 可能已被 abort/关闭 */ }
         } finally {
+            clearInterval(heartbeat);
             await writer.close();
         }
     })();
