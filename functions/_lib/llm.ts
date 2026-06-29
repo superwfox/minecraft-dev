@@ -20,10 +20,11 @@ const DEEPSEEK_MODELS: Record<LLMTier, string> = {
     pro: "deepseek-v4-pro",
     flash: "deepseek-v4-flash",
 };
-// GLM 两档（用户自带 key；如果某账号没有这些型号，改这里即可）
+// GLM 两档（用户自带 key；如果某账号没有这些型号，改这里即可）。
+// 当前统一用最新的 glm-5.2（智谱默认旗舰）；如需给 flash 档换更省的型号，改 flash 这行即可。
 const GLM_MODELS: Record<LLMTier, string> = {
-    pro: "glm-4.6",
-    flash: "glm-4-flash",
+    pro: "glm-5.2",
+    flash: "glm-5.2",
 };
 
 export interface LLMProvider {
