@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | **Pre-checker** | `flash` / `pro` | 判断需求是否逻辑闭环、能否进入规划 |
 | **Clarifier** | `pro`（Reasoner） | 多轮 TodoList 形式产出关键决策点 |
+| **Grader** | `pro`（Reasoner） | 给需求打复杂度分级，非「直接」级出**实现路径**让用户选 |
 | **Planner** | `pro`（Reasoner） | 产出主类蓝图 + 分类型文件树 + 拓扑序 |
 | **11 类 Generator** | `flash` | 各按文件类型生成代码 |
 | **Reviewer（reChecker）** | `pro` JSON | 静态审查语法/依赖问题，列出缺失类 |
@@ -22,7 +23,9 @@
 | 模型 | 用途 | 备注 |
 |------|------|------|
 | `deepseek-v4-flash` | Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | 速度快，承担批量生成 |
-| `deepseek-v4-pro` | precheck / clarify / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
+| `deepseek-v4-pro` | precheck / clarify / **grade** / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
+
+> **自带 GLM Key（银牌+赞助）**：累计赞助满 ¥25 的用户可在前端填入自己的智谱 GLM API Key，后端 `resolveLLM` 校验档位后把全部 LLM 调用切到 **GLM-4.6 / glm-4-flash**（BYOK），且**不计平台额度**。未配置时统一走共享的 DeepSeek。
 
 `functions/api/chat.ts` 与 `stream.ts` 在 `model` 包含 `pro` 时自动注入上述两个字段，调用方只传模型名即可。
 
@@ -39,7 +42,12 @@ graph TB
     A5 --> A6{done?}
     A6 -->|未完成| A5
     A6 -->|needMoreInput| A3
-    A6 -->|完成| B[Planner 出蓝图 + 文件树]
+    A6 -->|完成| GR[grade 复杂度分级]
+    GR --> GR1{直接级?}
+    GR1 -->|是| B[Planner 出蓝图 + 文件树]
+    GR1 -->|否| GR2[实现路径确认门]
+    GR2 -->|选定路径| B
+    GR2 -->|打回修正| GR
     B --> B1[拓扑排序 + 计算深度桶]
     B1 --> C[for bucket in 0..N]
     C --> C1[桶内并发 GEN_CONCURRENCY 个文件]
@@ -113,9 +121,47 @@ sequenceDiagram
 
 澄清答案（`clarifyRounds`）全部回灌进 `plannerPrompt` 作为「已确认决策」，避免 Planner 自行猜测产生冗余。
 
+## 第零·五阶段：复杂度分级 + 实现路径确认门
+
+澄清完成后、进入 Planner 之前，先经一道**分级门**（`/api/generate/grade`，`deepseek-v4-pro` + thinking，SSE）。它解决两个问题：**控制 plan 的体量**，以及**在有多种合理实现时让用户拍板**，而不是让 Planner 替用户猜。
+
+### 打分向量 + 确定性下限
+
+Grader 不是直接拍一个等级，而是先对需求打一个**打分向量**（`functions/_lib/complexity.ts` 的 `ScoreVector`），分两组轴：
+
+- **广度轴**（branches 数、文件体量等）：**不抬等级**，只影响 plan 的体量 / 图大小。
+- **深度轴**（状态生命周期、作用域、时序、外部硬集成、状态共享…）：**触发等级下限**。
+
+模型给出建议 `level`，但代码侧用 **`enforceLevelFloor` 强制 `level ≥ 硬跳变下限`**——这是确定性规则，模型压不下来。例如：
+
+```
+持久化(persistent) / 全局作用域 / 定时任务      → 至少「中等」
+状态共享 / ≥2 个外部硬集成                      → 至少「复杂」
+```
+
+等级共四档：**直接 → 简单 → 中等 → 复杂**。
+
+### 确认门：选不选、怎么选
+
+```mermaid
+graph LR
+    G[grade 分级] --> Q{直接级?}
+    Q -->|是| P[直接进 Planner]
+    Q -->|否 且有 paths| GATE[实现路径确认门]
+    GATE -->|用户选定 chosenPathId| P
+    GATE -->|用户打回 + 修正| G
+```
+
+- **直接级**（或被硬规则顶上来、但模型没给出可选路径）→ **跳过门**，直接进 Planner。
+- **非直接级且给出多条 `paths`** → 前端弹出**实现路径确认门**（`confirming` 阶段，「手牌」式路径卡）。用户**选一条** `chosenPathId`，或**填一句修正打回**重新分级。
+
+被选定的路径 id 与打分向量一起带进 Planner——`plannerPrompt` 据 `vector` 注入对应的「轴要求」，让规划体量与所选实现路径对齐。分级阶段任何异常都**不阻断生成**：兜底按「直接级」继续。
+
 ## 第一阶段：Planner 规划（主类蓝图 + 文件树）
 
-`clarifyDone === true` 后前端第二次调 `/api/generate/plan`（带 taskId）。后端用 `deepseek-v4-pro`（thinking）产出**两样东西**：主类蓝图 `mainBlueprint` 和带类型的文件树 `files[]`。
+`clarifyDone === true` 后前端第二次调 `/api/generate/plan`（带 taskId，并附上用户挂载的 `skillIds`）。后端用 `deepseek-v4-pro`（thinking）产出**两样东西**：主类蓝图 `mainBlueprint` 和带类型的文件树 `files[]`。
+
+> **技能注入**：若用户挂载了 [技能库](/features/skills) 中的 Skill，`plan.ts` 用 `getSkillBundles`（KV 缓存 30 分钟）拉取每个技能的资料 + 生成器条目，存入任务状态，在规划与逐文件生成阶段注入 AI 上下文——让 Planner 和 Generator 能用上 Paper 默认 API 之外的能力。
 
 ### 主类蓝图（MainBlueprint）：消除「主类拼装失败」
 
@@ -163,7 +209,7 @@ Planner 输出的每个文件带 `depends`（依赖的文件名）。`plan.ts` �
 
 ## 第二阶段：深度桶并发生成
 
-前端按桶号升序逐个调 `/api/generate/bucket`（`functions/api/generate/bucket.ts`），**桶间串行、桶内并发**。
+前端按桶号升序推进，**桶间串行、桶内并发**。但「一个 CF Worker 请求跑完整桶」很容易撞上 Cloudflare 的单请求 CPU / 时长上限被杀，于是改成**桶分批推进**：每次调 `/api/generate/bucket`（`functions/api/generate/bucket.ts`）只生成**一批**（`GEN_CONCURRENCY` 个并发文件），对同一桶**反复调用**直到该桶全部完成。`fileStatuses` 持久化保证已完成文件不被重复生成。
 
 ```mermaid
 graph LR
@@ -179,6 +225,9 @@ graph LR
 ```
 
 - **并发上限** `makeSemaphore(GEN_CONCURRENCY)`，默认 2，可由 CF 环境变量 `GEN_CONCURRENCY` 覆盖。这是卡在 Cloudflare Workers 免费档约束（单请求 CPU 上限 + 子请求上限）与 DeepSeek 限速之间的甜点值。
+- **增量落库**：每个文件一生成完就立刻写回 KV（`generatedFiles` + `fileStatuses`），进度不依赖整桶跑完——即便中途断流，已完成的部分也不丢。
+- **心跳保活**：推理审查（`pro`）首 token 前会长时间静默，`bucket.ts` 每 12 秒发一个 `heartbeat` SSE，避免连接被 CF 当作「长时间无数据」切断。
+- **重试不重规划**：某批流被切断 ≠ 生成失败（进度已落库）。前端直接**重试同一桶**继续往下做（已 done 文件跳过）；只有**连续多批零进度**才退回 replan 兜底。这条专门治「桶持续空返回 → 误判失败 → 反复重新规划」的死循环。
 - 桶完成后，所有新文件的 `FileSummary` 注入 KV，下一桶的 Generator 能看到上一桶的完整 API。
 
 ### dispatchGen：按类型路由专项 prompt
@@ -229,7 +278,7 @@ interface FileSummary {
 
 **桶级异常隔离**（`bucket.ts`）：单个文件抛错时其他并发任务继续，整桶汇总 `errors[]` 后才决策是否 replan——避免一颗螺丝拖垮整条流水线。即使整桶执行抛异常，也始终发出 `result` 事件（`replan=true`），避免前端拿到 null 卡死。
 
-前端编排（`src/logic/generateHandler.ts`）的 `startGenerate` 把这些回路串起来：clarify 循环 → replan 循环（plan → 按桶并发生成 → verify 补缺 → `buildWithRetry`）。
+前端编排（`src/logic/generateHandler.ts`）的 `startGenerate` 把这些回路串起来：clarify 循环 → 分级门（grade → 选实现路径）→ replan 循环（plan → 按桶分批生成 → verify 补缺 → `buildWithRetry`）。
 
 ## 第五阶段：编译失败自动修复
 
@@ -258,7 +307,7 @@ sequenceDiagram
 
 ## 服务端 KV 状态机
 
-整个任务的状态活在一个 KV value 里（`TASKS.put(taskId, state, ttl=3600)`），关键字段：`status` / `userPrompt` / `coreType` / `version` / `clarifyRounds` / `clarifyDone` / `mainBlueprint` / `plan` / `buckets` / `fileStatuses` / `currentBucket` / `generatedFiles` / `buildBranch` / `runId` / `artifactId` / `logs`。每个 endpoint 都是纯 read-modify-write KV，前端任意阶段断网/刷新都能恢复到最近一次写入。
+整个任务的状态活在一个 KV value 里（`TASKS.put(taskId, state, ttl=3600)`），关键字段：`status` / `userPrompt` / `coreType` / `version` / `clarifyRounds` / `clarifyDone` / `grade` / `skills` / `mainBlueprint` / `plan` / `buckets` / `fileStatuses` / `currentBucket` / `generatedFiles` / `buildBranch` / `runId` / `artifactId` / `logs`。每个 endpoint 都是纯 read-modify-write KV，前端任意阶段断网/刷新都能恢复到最近一次写入。
 
 ## 为什么这样设计？
 
@@ -281,6 +330,8 @@ sequenceDiagram
 ## 下一步
 
 - [完整演示](/guide/demo-showcase)：看 AI 如何处理实际案例
+- [技能库](/features/skills)：给生成注入 Paper 默认 API 之外的能力
 - [浏览器 IDE](/features/ide)：生成后如何在线编辑与二次加工
+- [可视化蓝图](/features/blueprint)：把生成的逻辑变成可视节点图
 - [系统架构](/technical/architecture)：理解系统如何协调各 Agent
-- [API 参考](/technical/api-reference)：plan / clarify / bucket / fix 端点细节
+- [API 参考](/technical/api-reference)：plan / clarify / grade / bucket / fix 端点细节

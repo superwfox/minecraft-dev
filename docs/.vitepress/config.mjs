@@ -21,6 +21,8 @@ export default withMermaid(defineConfig({
                 items: [
                     { text: "AI 工作流", link: "/features/ai-workflow" },
                     { text: "浏览器 IDE", link: "/features/ide" },
+                    { text: "可视化蓝图", link: "/features/blueprint" },
+                    { text: "技能库", link: "/features/skills" },
                     { text: "前端亮点", link: "/features/frontend-highlights" },
                     { text: "语音输入", link: "/features/voice-input" },
                 ],
@@ -48,6 +50,8 @@ export default withMermaid(defineConfig({
                 items: [
                     { text: "AI 工作流", link: "/features/ai-workflow" },
                     { text: "浏览器 IDE", link: "/features/ide" },
+                    { text: "可视化蓝图", link: "/features/blueprint" },
+                    { text: "技能库", link: "/features/skills" },
                     { text: "前端亮点", link: "/features/frontend-highlights" },
                     { text: "语音输入", link: "/features/voice-input" },
                 ],

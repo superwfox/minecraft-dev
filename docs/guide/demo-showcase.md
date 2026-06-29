@@ -2,6 +2,8 @@
 
 本文展示一个完整的插件生成案例，从需求描述到最终 JAR，演示 AI 如何处理多文件项目和自动修正错误。
 
+> **开始前**：用户已用 GitHub 登录平台。每完成一次生成消耗 **1 件** 额度（每月白送 5 件，赞助满 ¥25 还能自带 GLM Key 不计额度）。本文聚焦生成流程本身，登录与额度细节见 [快速开始](/guide/quick-start)。
+
 ## 需求描述
 
 ```
@@ -119,9 +121,48 @@ ClarifyPanel 顶部显示进度 `1/3`，单卡片纵向选项。用户选择：
 
 ● 澄清结束，共 2 轮真问 + 1 轮收尾，clarifyRounds 写回 KV。
 
+## 第零·五阶段：复杂度分级与实现路径
+
+澄清结束后、进入 Planner 之前，前端调用 `POST /api/generate/grade`（`deepseek-v4-pro` + thinking），先给需求评一个复杂度，必要时让用户拍板实现路径。
+
+### grade 输出
+
+前端通过 SSE 收到 `reasoning`（思考流）+ 最终 `result`：
+
+```json
+{
+  "direct": false,
+  "level": "中等",
+  "paths": [
+    {
+      "id": "config-reload",
+      "title": "命令直接写 config.yml",
+      "summary": "/setNotice 把新提示写进 config.yml 并 saveConfig()，进服时实时读取。最简，零额外状态。"
+    },
+    {
+      "id": "memory-cache",
+      "title": "内存缓存 + 启动加载",
+      "summary": "onEnable 读入内存，命令改内存并落盘；进服读内存，省一次磁盘 IO。"
+    }
+  ]
+}
+```
+
+**为什么是「中等」而不是「简单」？** 提示消息要**持久化**到 YAML 文件——`functions/_lib/complexity.ts` 的硬规则把「persistent」一律顶到至少「中等」，模型即便想判低也会被 `enforceLevelFloor` 拉回。广度轴（就一个命令 + 一个监听）不抬等级，只影响 plan 体量。
+
+### 实现路径确认门
+
+因为不是「直接」级、且给出了多条 `paths`，前端进入 `confirming` 阶段，以「手牌」式卡片展示两条路径。用户选择：
+
+- `config-reload` → 最贴合「服主就想改个提示语」的朴素诉求。
+
+> 若两条都不满意，可填一句修正打回，Grader 带着修正重新分级。需求若被判「直接」级、或没有给出可选路径，这道门会自动跳过，直接进 Planner。
+
+被选定的 `chosenPathId = "config-reload"` 与打分向量一起带进下一步——Planner 据此把体量收在「一个命令 + 一个监听 + config 读写」，不画蛇添足。
+
 ## 第一阶段：Planner 规划
 
-澄清完成后，前端再次调用 `POST /api/generate/plan`（带 taskId），后端把已确认决策拼接进 `plannerPrompt` 并调用 `deepseek-v4-pro` 出文件树。
+澄清与分级完成后，前端再次调用 `POST /api/generate/plan`（带 taskId 与 `chosenPathId`），后端把已确认决策 + 所选实现路径拼接进 `plannerPrompt` 并调用 `deepseek-v4-pro` 出文件树。
 
 ### Planner 输入
 
@@ -637,6 +678,12 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 - Reasoner 的思考流写入折叠区，todos 增量解析逐张推到面板，无空档
 - clarifyRounds 全部回灌 `plannerPrompt`，让 Planner 按"已确认决策"出文件树，避免冗余
 
+### 0.5 复杂度分级 + 实现路径确认门
+
+- grade（`deepseek-v4-pro` + thinking）对需求打**分向量**，`enforceLevelFloor` 用确定性硬规则强制等级下限（如"持久化"必到中等）
+- 非"直接"级时列出多条**实现路径**让用户选定，或填修正打回重评——在"有多种合理做法"时把决定权交还用户，而非让 Planner 替用户猜
+- 所选路径 + 打分向量带进 Planner，控制 plan 体量与实现方向
+
 ### 1. 主类蓝图 + 依赖深度桶 + 主类最后生成
 
 - Planner 先确定主类蓝图（MainBlueprint），再声明每个文件的 `generatorType` 与 `depends`
@@ -664,7 +711,8 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 
 ## 下一步
 
-- [了解 AI 工作流](/features/ai-workflow)：深入理解 Planner、Generator、reChecker 的设计
+- [了解 AI 工作流](/features/ai-workflow)：深入理解 Grader、Planner、Generator、reChecker 的设计
+- [技能库](/features/skills)：挂载额外能力扩展生成边界
 - [浏览器 IDE](/features/ide)：在生成结果上继续在线编辑
+- [可视化蓝图](/features/blueprint)：把生成的逻辑变成可视节点图
 - [查看架构设计](/technical/architecture)：了解系统如何协调各个组件
-- [API 参考](/technical/api-reference)：查看完整的 API 文档
