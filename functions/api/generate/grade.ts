@@ -5,6 +5,7 @@ import { resolveLLM } from "../../_lib/llm";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
+const GRADE_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 reasoning，慢但活着不会误杀）
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -23,54 +24,65 @@ async function callReasonerStream(
     url: string, key: string, model: string, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
-    const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-            model,
-            stream: true,
-            stream_options: { include_usage: true },
-            reasoning_effort: "high",
-            thinking: { type: "enabled" },
-            messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
+    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
+    const ctrl = new AbortController();
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), GRADE_IDLE_MS); };
+    arm();
+    try {
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+            body: JSON.stringify({
+                model,
+                stream: true,
+                stream_options: { include_usage: true },
+                reasoning_effort: "high",
+                thinking: { type: "enabled" },
+                messages: [{ role: "system", content: system }, { role: "user", content: user }],
+            }),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let content = "";
-    let usage: UsageBreakdown | undefined;
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let content = "";
+        let usage: UsageBreakdown | undefined;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            arm();
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                const chunk = JSON.parse(payload);
-                if (chunk.usage) usage = chunk.usage;
-                const delta = chunk.choices?.[0]?.delta;
-                if (!delta) continue;
-                if (delta.reasoning_content) {
-                    await writer.write(sseEvent(encoder, { type: "reasoning", content: delta.reasoning_content }));
-                }
-                if (delta.content) {
-                    content += delta.content;
-                    await writer.write(sseEvent(encoder, { type: "delta", content: delta.content }));
-                }
-            } catch { /* skip */ }
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                try {
+                    const chunk = JSON.parse(payload);
+                    if (chunk.usage) usage = chunk.usage;
+                    const delta = chunk.choices?.[0]?.delta;
+                    if (!delta) continue;
+                    if (delta.reasoning_content) {
+                        await writer.write(sseEvent(encoder, { type: "reasoning", content: delta.reasoning_content }));
+                    }
+                    if (delta.content) {
+                        content += delta.content;
+                        await writer.write(sseEvent(encoder, { type: "delta", content: delta.content }));
+                    }
+                } catch { /* skip */ }
+            }
         }
+        return { content, usage };
+    } finally {
+        clearTimeout(idle);
     }
-    return { content, usage };
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -103,6 +115,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
 
     const process = (async () => {
+        // 心跳:推理首 token 前那段静默期每 12s 写一个,避免被 CF 因长静默切断连接 → 前端收不到 result。
+        const heartbeat = setInterval(() => {
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+        }, 12000);
         try {
             await writer.write(sseEvent(encoder, { type: "phase", phase: "grading" }));
 
@@ -159,6 +175,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
+            clearInterval(heartbeat);
             await writer.close();
         }
     })();

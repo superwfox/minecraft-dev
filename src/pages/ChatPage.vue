@@ -16,7 +16,7 @@
           <span class="reasoning-title">AI 思考中</span>
           <span class="reasoning-toggle">{{ genTask.reasoningVisible ? "收起" : "展开" }}</span>
         </div>
-        <div v-if="genTask.reasoningVisible" class="reasoning-body">{{ genTask.reasoningContent }}</div>
+        <div v-if="genTask.reasoningVisible" ref="reasonBodyEl" class="reasoning-body">{{ genTask.reasoningContent }}</div>
       </div>
 
       <!-- Q&A 收敛：需求确认完成的问答收敛成 ─问/·答 -->
@@ -155,7 +155,18 @@ const extraInput = ref("");
 const lastSubmitted = ref(""); // 记住上次提交的需求，ESC 中断后恢复回输入框
 const sending = ref(false);
 const composerEl = ref<HTMLTextAreaElement | null>(null);
+const reasonBodyEl = ref<HTMLElement | null>(null); // 思考流容器，用于自动粘底
 const showResetModal = ref(false);
+
+// 思考流自动跟随到底部:内容增长时,若用户本就贴着底部就跟随滚到底;
+// 若用户上翻查看历史(距底 > 60px)则不打扰。pinned 判定在 DOM 更新前读取旧位置,更新后再滚。
+watch(() => genTask.reasoningContent, () => {
+    const el = reasonBodyEl.value;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (!pinned) return;
+    nextTick(() => { if (reasonBodyEl.value) reasonBodyEl.value.scrollTop = reasonBodyEl.value.scrollHeight; });
+});
 
 // 缺失参数选择
 const selectingBlock = ref<ChatBlock | null>(null);

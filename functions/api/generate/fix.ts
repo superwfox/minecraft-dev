@@ -12,6 +12,8 @@ interface Env {
 
 interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
 
+const FIX_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 delta，慢但活着不误杀）
+
 async function callAIStream(
     llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
@@ -26,43 +28,54 @@ async function callAIStream(
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
 
-    const resp = await fetch(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
+    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
+    const ctrl = new AbortController();
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), FIX_IDLE_MS); };
+    arm();
+    try {
+        const resp = await fetch(llm.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let full = "";
-    let buffer = "";
-    let usage: UsageBreakdown | undefined;
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        let buffer = "";
+        let usage: UsageBreakdown | undefined;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            arm();
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                const chunk = JSON.parse(payload);
-                const delta = chunk.choices?.[0]?.delta?.content;
-                if (delta) {
-                    full += delta;
-                    await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
-                }
-                if (chunk.usage) usage = chunk.usage;
-            } catch { /* skip */ }
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                try {
+                    const chunk = JSON.parse(payload);
+                    const delta = chunk.choices?.[0]?.delta?.content;
+                    if (delta) {
+                        full += delta;
+                        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
+                    }
+                    if (chunk.usage) usage = chunk.usage;
+                } catch { /* skip */ }
+            }
         }
+        return { content: full, model, usage };
+    } finally {
+        clearTimeout(idle);
     }
-    return { content: full, model, usage };
 }
 
 function stripFences(raw: string): string {
@@ -142,6 +155,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
 
     const process = (async () => {
+        // 心跳:拉日志 + 推理首 token 前那段静默期每 12s 写一个,避免被 CF 因长静默切断连接。
+        const heartbeat = setInterval(() => {
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+        }, 12000);
         try {
             // Fetch build log
             await writer.write(sseEvent(encoder, { type: "log", msg: "▸ 正在获取构建错误日志..." }));
@@ -260,6 +277,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "result", fixed: 0, error: e.message }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
+            clearInterval(heartbeat);
             await writer.close();
         }
     })();

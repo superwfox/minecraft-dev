@@ -46,17 +46,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         payload.thinking = {type: "enabled"};
     }
 
-    const resp = await fetch(llm.url, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + llm.apiKey,
-        },
-        body: JSON.stringify(payload),
-    });
+    // 空闲超时:连续 IDLE_MS 无字节才 abort（掐真正断死的连接；长思考只要还在流就不误杀）。
+    const IDLE_MS = 120000;
+    const ctrl = new AbortController();
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE_MS); };
+    arm();
 
-    if (!resp.ok) return new Response(await resp.text(), {status: resp.status});
-    if (!resp.body) return new Response("Empty response", {status: 502});
+    let resp: Response;
+    try {
+        resp = await fetch(llm.url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + llm.apiKey,
+            },
+            body: JSON.stringify(payload),
+            signal: ctrl.signal,
+        });
+    } catch {
+        clearTimeout(idle);
+        return new Response(JSON.stringify({ error: "与模型服务连接失败或超时" }), {
+            status: 504, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    if (!resp.ok) { clearTimeout(idle); return new Response(await resp.text(), {status: resp.status}); }
+    if (!resp.body) { clearTimeout(idle); return new Response("Empty response", {status: 502}); }
 
     // 用 TransformStream 包一层：原样 forward 给前端，同时本端解析 usage
     const upstream = resp.body;
@@ -73,6 +89,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
+                arm(); // 收到上游字节就续命
                 // 原样转发给前端
                 await writer.write(value);
                 // 本端解析 SSE 找 usage
@@ -92,6 +109,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
         } catch { /* upstream broken, end anyway */ }
         finally {
+            clearTimeout(idle);
             try { await writer.close(); } catch { /* already closed */ }
         }
 

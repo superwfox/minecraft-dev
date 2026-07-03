@@ -6,7 +6,8 @@ import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
 const DEFAULT_CONCURRENCY = 2;
-const LLM_TIMEOUT_MS = 150000; // 单次 LLM 调用上限，超时 abort，避免某次 hang 拖垮整桶导致前端「无返回」
+const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
+const LLM_IDLE_MS = 120000;    // 流式调用的「空闲超时」：连续这么久没字节才 abort，长思考只要还在流就不误杀
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -121,7 +122,10 @@ async function callAIStream(
     }
 
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接；避免长思考被固定总时长误杀。
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), LLM_IDLE_MS); };
+    arm();
     try {
         const resp = await fetchWithBackoff(llm.url, {
             method: "POST",
@@ -140,6 +144,7 @@ async function callAIStream(
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            arm(); // 收到数据就重置空闲计时器
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop()!;
@@ -162,7 +167,7 @@ async function callAIStream(
         }
         return { content: full, model, usage };
     } finally {
-        clearTimeout(timer);
+        clearTimeout(idle);
     }
 }
 

@@ -5,6 +5,8 @@ import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
+const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
+const LLM_IDLE_MS = 120000;    // 流式调用的空闲超时：连续这么久没字节才 abort，长思考只要在流就不误杀
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -25,18 +27,25 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
     }
     if (jsonMode) body.response_format = { type: "json_object" };
 
-    const resp = await fetch(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json() as any;
-    return {
-        content: data.choices?.[0]?.message?.content ?? "",
-        model,
-        usage: data.usage,
-    };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    try {
+        const resp = await fetch(llm.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json() as any;
+        return {
+            content: data.choices?.[0]?.message?.content ?? "",
+            model,
+            usage: data.usage,
+        };
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 async function callAIStream(
@@ -56,43 +65,54 @@ async function callAIStream(
         body.thinking = { type: "enabled" };
     }
 
-    const resp = await fetch(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
+    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
+    const ctrl = new AbortController();
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), LLM_IDLE_MS); };
+    arm();
+    try {
+        const resp = await fetch(llm.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!resp.ok) throw new Error(await resp.text());
 
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let full = "";
-    let buffer = "";
-    let usage: UsageBreakdown | undefined;
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        let buffer = "";
+        let usage: UsageBreakdown | undefined;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            arm();
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-                const chunk = JSON.parse(payload);
-                const delta = chunk.choices?.[0]?.delta?.content;
-                if (delta) {
-                    full += delta;
-                    await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
-                }
-                if (chunk.usage) usage = chunk.usage;
-            } catch { /* skip */ }
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                try {
+                    const chunk = JSON.parse(payload);
+                    const delta = chunk.choices?.[0]?.delta?.content;
+                    if (delta) {
+                        full += delta;
+                        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
+                    }
+                    if (chunk.usage) usage = chunk.usage;
+                } catch { /* skip */ }
+            }
         }
+        return { content: full, model, usage };
+    } finally {
+        clearTimeout(idle);
     }
-    return { content: full, model, usage };
 }
 
 function stripFences(raw: string): string {
@@ -241,6 +261,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
 
     const process = (async () => {
+        // 心跳:推理/审查首 token 前那段静默期每 12s 写一个,避免被 CF 因长静默切断连接。
+        const heartbeat = setInterval(() => {
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+        }, 12000);
         try {
             // Phase: generating main file
             await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: target.path }));
@@ -369,6 +393,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${e.message}` }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
+            clearInterval(heartbeat);
             await writer.close();
         }
     })();

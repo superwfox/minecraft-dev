@@ -5,7 +5,11 @@ import { resolveLLM } from "../../_lib/llm";
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const CLARIFY_MODEL = "deepseek-v4-pro";
 const MAX_CLARIFY_ROUNDS = 5;
-const CLARIFY_TIMEOUT_MS = 150000; // 与模型服务连接慢/挂死时 abort,避免 Worker 无限等待 → SSE 永不返回 result
+// 空闲超时:仅当「连续这么久没有任何字节」才 abort —— 掐真正断死的连接，而不是慢而活着的长思考。
+// 关键:高 reasoning_effort 的最后一轮澄清整体可能 >150s,但推理期间 reasoning_content 一直在流,
+// 每收到一块就续命(见 callReasonerStream 的 arm())。旧的「固定总时长超时」会误杀这种健康长调用 →
+// 「与模型服务连接超时」→ 重试撞同一上限 → 「多次无响应」(概率极高,且正好在澄清最后一轮)。
+const CLARIFY_IDLE_MS = 120000;
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -25,7 +29,9 @@ async function callReasonerStream(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), CLARIFY_TIMEOUT_MS);
+    let idle: any;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), CLARIFY_IDLE_MS); };
+    arm(); // 覆盖连接建立 + 首 token 的静默窗口
     try {
         const resp = await fetch(url, {
             method: "POST",
@@ -51,6 +57,7 @@ async function callReasonerStream(
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            arm(); // 每收到一块数据就重置空闲计时器 —— 只要还在流就不 abort
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop()!;
@@ -81,7 +88,7 @@ async function callReasonerStream(
         }
         return { content, usage };
     } finally {
-        clearTimeout(timer);
+        clearTimeout(idle);
     }
 }
 
