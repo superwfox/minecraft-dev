@@ -1,6 +1,6 @@
 // Cloudflare Pages Function: POST /api/chat
-// 对前端仍是非流式 JSON 响应({ content });内部改用「流式消费上游 + 空闲超时」，
-// 避免 pro+thinking 的长时间静默把 Worker 挂死拿不到返回。
+// 非流式：向上游发非流式请求，只做 1 次 resp.json()。CF 免费版单请求 CPU 极有限，
+// 流式逐 chunk 解析会超 CPU 被硬杀，故所有 LLM 调用统一走非流式。
 
 import { accumulateCost } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
@@ -35,23 +35,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
     }
 
-    const payload: any = {model, messages: body.messages, stream: true, stream_options: {include_usage: true}};
+    // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse 会超 CPU 被硬杀。
+    // 只做 1 次 resp.json()——precheck/getInfo 等本就要完整 JSON，非流式最省 CPU。
+    const payload: any = {model, messages: body.messages};
     if (tier === "pro") {
         payload.reasoning_effort = "high";
         payload.thinking = {type: "enabled"};
     }
     if (body.response_format) payload.response_format = body.response_format;
 
-    // 空闲超时:连续这么久没字节才 abort（掐真正断死的连接；长思考只要在流就不误杀）。
-    const CHAT_IDLE_MS = 120000;
     const ctrl = new AbortController();
-    let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), CHAT_IDLE_MS); };
-    arm();
-
-    let resp: Response;
+    const timer = setTimeout(() => ctrl.abort(), 180000);
+    let data: any;
     try {
-        resp = await fetch(llm.url, {
+        const resp = await fetch(llm.url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -60,45 +57,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             body: JSON.stringify(payload),
             signal: ctrl.signal,
         });
+        if (!resp.ok) { clearTimeout(timer); return new Response(await resp.text(), {status: resp.status}); }
+        data = await resp.json();
     } catch {
-        clearTimeout(idle);
+        clearTimeout(timer);
         return new Response(JSON.stringify({ error: "与模型服务连接失败或超时" }), {
             status: 504, headers: { "Content-Type": "application/json" },
         });
     }
+    clearTimeout(timer);
 
-    if (!resp.ok) { clearTimeout(idle); return new Response(await resp.text(), {status: resp.status}); }
-
-    // 内部消费流:累积 content(忽略 reasoning) + 末尾 usage
-    let content = "";
-    let usage: any;
-    try {
-        const reader = resp.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            arm();
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) {
-                const t = line.trim();
-                if (!t.startsWith("data:")) continue;
-                const p = t.slice(5).trim();
-                if (p === "[DONE]") continue;
-                try {
-                    const chunk = JSON.parse(p);
-                    const delta = chunk.choices?.[0]?.delta?.content;
-                    if (delta) content += delta;
-                    if (chunk.usage) usage = chunk.usage;
-                } catch { /* skip */ }
-            }
-        }
-    } finally {
-        clearTimeout(idle);
-    }
+    const content = data.choices?.[0]?.message?.content ?? "";
+    const usage = data.usage;
 
     if (!llm.byok && uid && taskId && usage) {
         // 不阻塞响应：waitUntil 后台累积

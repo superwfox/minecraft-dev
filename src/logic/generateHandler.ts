@@ -334,10 +334,23 @@ async function streamBuildFix(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
+// 记住上次生成的入参，供失败后「重试」手动重跑（现在后端已非流式，重试通常直接成功）。
+let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
+export function canRetryGenerate(): boolean {
+    return !!lastGenParams && (genTask.phase === "error" || genTask.phase === "idle");
+}
+/** 手动重试：用上次入参从头重跑一次（全新 taskId，会重新澄清）。 */
+export function retryGenerate() {
+    if (!lastGenParams) return;
+    const { userPrompt, coreType, version } = lastGenParams;
+    startGenerate(userPrompt, coreType, version).catch(() => { });
+}
+
 export async function startGenerate(userPrompt: string, coreType: string, version: string) {
     if (isGeneratingPhase(genTask.phase)) {
         throw new Error("当前已有构建任务正在进行");
     }
+    lastGenParams = { userPrompt, coreType, version };
 
     resetGenTask();
 

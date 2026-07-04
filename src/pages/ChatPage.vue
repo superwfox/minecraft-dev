@@ -5,7 +5,13 @@
     <div v-if="inFocusPhase" class="focus-stack">
       <div v-if="statusText" class="focus-status">{{ statusText }}</div>
 
-      <div v-if="activeError" class="focus-error">{{ activeError }}</div>
+      <!-- 后台思考跑马灯（缓解等待焦虑） -->
+      <div v-if="aiWorking" class="focus-marquee"><ThinkingMarquee/></div>
+
+      <div v-if="activeError" class="focus-error">
+        <span class="focus-error-msg">{{ activeError }}</span>
+        <button v-if="showRetry" class="focus-retry" @click="retryGenerate">↻ 重试</button>
+      </div>
 
       <!-- 离题对话回复（fallback） -->
       <div v-if="fallbackText" class="focus-fallback">{{ fallbackText }}</div>
@@ -140,12 +146,13 @@ import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, resetChat} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo, interruptAnalyze} from "../logic/chatHandler";
 import GenerateProgress from "../components/GenerateProgress.vue";
+import ThinkingMarquee from "../components/ThinkingMarquee.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
 import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
 import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../logic/skills";
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting} from "../logic/generateState";
-import {startGenerate, interruptGenerate} from "../logic/generateHandler";
+import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
 const centerText = inject<Ref<string>>("centerText")!;
@@ -176,6 +183,14 @@ const selectVer = ref("");
 
 // ── 视图态：尚未产出文件时都用居中聚焦视图；一旦开始生成文件切到进度视图 ──
 const inFocusPhase = computed(() => genTask.files.length === 0);
+
+// AI 正在「后台思考」（非流式、无逐字流）→ 显示跑马灯缓解等待
+const aiWorking = computed(() =>
+    (sending.value && !selectingBlock.value)
+    || (["clarifying", "grading", "planning"].includes(genTask.phase)
+        && !clarifyWaiting.value && !pathGateWaiting.value)
+);
+const showRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
 
 // 已选 skill（手牌）：输入框上方小卡条 + 卡牌质感开关
 const chosenSkills = computed(() => selectedBriefs());
@@ -406,12 +421,37 @@ watch(() => genTask.phase, (p) => {
   letter-spacing: 0.5px;
   user-select: none;
 }
+.focus-marquee {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
 .focus-error {
   text-align: center;
   color: #ff9a8a;
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.focus-error-msg { white-space: pre-wrap; }
+.focus-retry {
+  padding: 7px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffd9a0;
+  background: rgba(255, 176, 46, 0.12);
+  border: 1px solid rgba(255, 176, 46, 0.45);
+  border-radius: 8px; /* 圆角矩形 */
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.focus-retry:hover {
+  background: rgba(255, 176, 46, 0.2);
+  border-color: rgba(255, 176, 46, 0.7);
 }
 .focus-fallback {
   color: #fff;

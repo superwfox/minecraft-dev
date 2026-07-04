@@ -5,11 +5,7 @@ import { resolveLLM } from "../../_lib/llm";
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const CLARIFY_MODEL = "deepseek-v4-pro";
 const MAX_CLARIFY_ROUNDS = 5;
-// 空闲超时:仅当「连续这么久没有任何字节」才 abort —— 掐真正断死的连接，而不是慢而活着的长思考。
-// 关键:高 reasoning_effort 的最后一轮澄清整体可能 >150s,但推理期间 reasoning_content 一直在流,
-// 每收到一块就续命(见 callReasonerStream 的 arm())。旧的「固定总时长超时」会误杀这种健康长调用 →
-// 「与模型服务连接超时」→ 重试撞同一上限 → 「多次无响应」(概率极高,且正好在澄清最后一轮)。
-const CLARIFY_IDLE_MS = 120000;
+const CLARIFY_TIMEOUT_MS = 180000; // 非流式总时长上限（pro+thinking 可思考较久）
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -24,22 +20,19 @@ function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function callReasonerStream(
+async function callReasoner(
     url: string, key: string, model: string, system: string, user: string,
-    writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
+    // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse（推理响应块数很多）会超
+    // CPU 被硬杀 → 澄清「多次无响应」。改为非流式，只做 1 次 resp.json()。代价：失去「AI 思考中」逐字流。
     const ctrl = new AbortController();
-    let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), CLARIFY_IDLE_MS); };
-    arm(); // 覆盖连接建立 + 首 token 的静默窗口
+    const timer = setTimeout(() => ctrl.abort(), CLARIFY_TIMEOUT_MS);
     try {
         const resp = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
             body: JSON.stringify({
                 model,
-                stream: true,
-                stream_options: { include_usage: true },
                 reasoning_effort: "high",
                 thinking: { type: "enabled" },
                 messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -47,48 +40,10 @@ async function callReasonerStream(
             signal: ctrl.signal,
         });
         if (!resp.ok) throw new Error(await resp.text());
-
-        const reader = resp.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let content = "";
-        let usage: UsageBreakdown | undefined;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            arm(); // 每收到一块数据就重置空闲计时器 —— 只要还在流就不 abort
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop()!;
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                const payload = trimmed.slice(5).trim();
-                if (payload === "[DONE]") continue;
-                try {
-                    const chunk = JSON.parse(payload);
-                    if (chunk.usage) usage = chunk.usage;
-                    const delta = chunk.choices?.[0]?.delta;
-                    if (!delta) continue;
-                    if (delta.reasoning_content) {
-                        await writer.write(sseEvent(encoder, {
-                            type: "reasoning", content: delta.reasoning_content,
-                        }));
-                    }
-                    if (delta.content) {
-                        content += delta.content;
-                        await writer.write(sseEvent(encoder, {
-                            type: "delta", content: delta.content,
-                        }));
-                    }
-                } catch { /* skip */ }
-            }
-        }
-        return { content, usage };
+        const data = await resp.json() as any;
+        return { content: data.choices?.[0]?.message?.content ?? "", usage: data.usage };
     } finally {
-        clearTimeout(idle);
+        clearTimeout(timer);
     }
 }
 
@@ -153,7 +108,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const { system, user } = plannerClarifyPrompt(
                 state.userPrompt, state.coreType, state.version, state.clarifyRounds, skillCtx,
             );
-            const callRes = await callReasonerStream(llm.url, llm.apiKey, llm.modelFor("pro"), system, user, writer, encoder);
+            const callRes = await callReasoner(llm.url, llm.apiKey, llm.modelFor("pro"), system, user);
             const content = callRes.content;
             if (!llm.byok && uid && callRes.usage) {
                 const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), callRes.usage);

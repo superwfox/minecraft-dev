@@ -19,7 +19,10 @@
 
     <!-- 规划卡片 -->
     <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
-      <div class="gen-card-title">▪ 项目规划</div>
+      <div class="gen-card-head">
+        <div class="gen-card-title">▪ 项目规划</div>
+        <ThinkingMarquee v-if="marqueeOn"/>
+      </div>
       <div class="gen-phases">
         <span v-for="p in phases" :key="p.key" class="gen-phase"
               :class="{active: p.key === genTask.phase, done: phaseOrder(p.key) < phaseOrder(genTask.phase)}">
@@ -84,7 +87,16 @@
         <a :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
         <router-link :to="`/ide/${genTask.taskId}`" class="gen-download-btn ide">在 IDE 打开</router-link>
       </div>
-      <div v-if="genTask.phase === 'error'" class="gen-error">{{ genTask.error }}</div>
+    </div>
+
+    <!-- 失败卡片：手动重试入口（自动兜底用尽后，交回用户手动操作） -->
+    <div class="glass2 gen-card gen-error-card" v-if="genTask.phase === 'error'">
+      <div class="gen-card-title">▪ 生成失败</div>
+      <div class="gen-error">{{ genTask.error }}</div>
+      <div class="gen-error-actions">
+        <button v-if="canRetry" class="gen-retry-btn" @click="retryGenerate">↻ 重试（用上次需求重跑）</button>
+        <button v-if="genTask.debugLog.length" class="gen-retry-btn ghost" @click="downloadDebug">⬇ 下载调试日志</button>
+      </div>
     </div>
 
     <!-- 继续完善：生成完成后直接追加需求（增量补充现有项目）-->
@@ -115,7 +127,14 @@
 import {ref, computed, watch, nextTick} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
 import type {GeneratorType, GenFile} from "../logic/generateState";
-import {getDownloadUrl, appendFeature} from "../logic/generateHandler";
+import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
+import ThinkingMarquee from "./ThinkingMarquee.vue";
+
+// 后台活跃阶段（无逐字流）显示跑马灯
+const marqueeOn = computed(() =>
+    ["planning", "generating", "verifying", "fixing"].includes(genTask.phase)
+);
+const canRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
 
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
@@ -209,7 +228,7 @@ const streamPhaseLabel = computed(() => streamPhaseLabels[genTask.streamingPhase
 const streamKey = computed(() => genTask.streamingPhase + ":" + genTask.streamingFile);
 
 const showBuild = computed(() =>
-    ["uploading", "building", "polling", "fixing", "done", "error"].includes(genTask.phase)
+    ["uploading", "building", "polling", "fixing", "done"].includes(genTask.phase)
 );
 
 const phases = [
@@ -266,7 +285,7 @@ watch(() => genTask.streamingContent, async () => {
   color: rgba(255, 255, 255, 0.6);
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
+  border-radius: 8px; /* 圆角矩形 */
   cursor: pointer;
   transition: all 0.18s;
   white-space: nowrap;
@@ -299,9 +318,45 @@ watch(() => genTask.streamingContent, async () => {
   font-size: 10px;
   opacity: 0.7;
   padding: 1px 5px;
-  border-radius: 999px;
+  border-radius: 4px; /* 圆角矩形 */
   background: rgba(120, 200, 255, 0.15);
 }
+
+/* 规划卡头部：标题 + 跑马灯并排 */
+.gen-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 失败卡片 + 重试 */
+.gen-error-card { border-color: rgba(255, 122, 102, 0.35); }
+.gen-error-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.gen-retry-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffd9a0;
+  background: rgba(255, 176, 46, 0.12);
+  border: 1px solid rgba(255, 176, 46, 0.45);
+  border-radius: 8px; /* 圆角矩形 */
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.gen-retry-btn:hover { background: rgba(255, 176, 46, 0.2); border-color: rgba(255, 176, 46, 0.7); }
+.gen-retry-btn.ghost {
+  color: rgba(120, 200, 255, 0.85);
+  background: rgba(120, 200, 255, 0.08);
+  border-color: rgba(120, 200, 255, 0.3);
+}
+.gen-retry-btn.ghost:hover { background: rgba(120, 200, 255, 0.16); border-color: rgba(120, 200, 255, 0.55); }
 
 .gen-card {
   flex-direction: column;

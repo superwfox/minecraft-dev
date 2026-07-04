@@ -5,7 +5,7 @@ import { resolveLLM } from "../../_lib/llm";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
-const GRADE_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 reasoning，慢但活着不会误杀）
+const GRADE_TIMEOUT_MS = 180000; // 非流式总时长上限（pro+thinking 可思考较久）
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -20,23 +20,19 @@ function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function callReasonerStream(
+async function callReasoner(
     url: string, key: string, model: string, system: string, user: string,
-    writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
-    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
+    // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse 会超 CPU 被硬杀。
+    // 改为非流式，只做 1 次 resp.json()。代价：失去逐字思考流（由前端跑马灯动画缓解等待）。
     const ctrl = new AbortController();
-    let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), GRADE_IDLE_MS); };
-    arm();
+    const timer = setTimeout(() => ctrl.abort(), GRADE_TIMEOUT_MS);
     try {
         const resp = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
             body: JSON.stringify({
                 model,
-                stream: true,
-                stream_options: { include_usage: true },
                 reasoning_effort: "high",
                 thinking: { type: "enabled" },
                 messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -44,44 +40,10 @@ async function callReasonerStream(
             signal: ctrl.signal,
         });
         if (!resp.ok) throw new Error(await resp.text());
-
-        const reader = resp.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let content = "";
-        let usage: UsageBreakdown | undefined;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            arm();
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop()!;
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                const payload = trimmed.slice(5).trim();
-                if (payload === "[DONE]") continue;
-                try {
-                    const chunk = JSON.parse(payload);
-                    if (chunk.usage) usage = chunk.usage;
-                    const delta = chunk.choices?.[0]?.delta;
-                    if (!delta) continue;
-                    if (delta.reasoning_content) {
-                        await writer.write(sseEvent(encoder, { type: "reasoning", content: delta.reasoning_content }));
-                    }
-                    if (delta.content) {
-                        content += delta.content;
-                        await writer.write(sseEvent(encoder, { type: "delta", content: delta.content }));
-                    }
-                } catch { /* skip */ }
-            }
-        }
-        return { content, usage };
+        const data = await resp.json() as any;
+        return { content: data.choices?.[0]?.message?.content ?? "", usage: data.usage };
     } finally {
-        clearTimeout(idle);
+        clearTimeout(timer);
     }
 }
 
@@ -124,7 +86,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             const skillCtx = state.skills?.length ? skillClarifyContext(state.skills) : "";
             const { system, user } = graderPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, correction, skillCtx);
-            const callRes = await callReasonerStream(llm.url, llm.apiKey, llm.modelFor("pro"), system, user, writer, encoder);
+            const callRes = await callReasoner(llm.url, llm.apiKey, llm.modelFor("pro"), system, user);
 
             if (!llm.byok && uid && callRes.usage) {
                 const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), callRes.usage);
