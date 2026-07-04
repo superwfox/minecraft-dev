@@ -5,7 +5,7 @@ import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
-const DEFAULT_CONCURRENCY = 2;
+const SUPER_CONCURRENCY = 2; // 「超级并发」开关开启时的桶内并发数（默认串行=1）
 const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
 const LLM_IDLE_MS = 120000;    // 流式调用的「空闲超时」：连续这么久没字节才 abort，长思考只要还在流就不误杀
 
@@ -321,14 +321,20 @@ async function generateAndCheckFile(
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { taskId, bucketIndex } = await context.request.json() as any;
+    const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
     const llm = await resolveLLM(context);
-    let concurrency = Math.max(1, parseInt(context.env.GEN_CONCURRENCY || "") || DEFAULT_CONCURRENCY);
+    // 默认串行（1 文件/请求，最稳）；仅当前端「超级并发」开关开启时才桶内并发（env 可覆盖并发数）。
+    // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/返工，更快但更易撞
+    // 单请求 CPU/时长/子请求上限被强杀 →「零进度 → 重新规划 → 失败」，故默认关闭。
+    let concurrency = 1;
+    if (superConcurrency) {
+        concurrency = Math.max(2, parseInt(context.env.GEN_CONCURRENCY || "") || SUPER_CONCURRENCY);
+    }
 
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
-    // 挂了 skill 的任务：prompt 更大、文件更多，降并发到 1，避免大 prompt × 并发撞 CF Worker 限制
+    // 挂了 skill 的任务：prompt 更大、文件更多，强制串行，避免大 prompt × 并发撞 CF Worker 限制
     if (state.skills?.length) concurrency = 1;
 
     if (state.quotaExhausted) {

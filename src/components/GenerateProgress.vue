@@ -1,5 +1,18 @@
 <template>
   <div class="gen-wrap" ref="wrapRef">
+    <!-- 超级并发开关：默认串行最稳；开启桶内并发更快但更易生成失败，慎用 -->
+    <div class="gen-super-bar" v-if="genTask.phase !== 'idle'">
+      <button class="gen-super-toggle" :class="{ on: superConcurrency }"
+              @click="setSuperConcurrency(!superConcurrency)">
+        <span class="dot"></span>{{ superConcurrency ? "⚡ 超级并发 · 开" : "超级并发 · 关" }}
+      </button>
+      <span class="gen-super-note" :class="{ warn: superConcurrency }">
+        {{ superConcurrency
+          ? "⚠ 桶内并发更快，但更易撞 Cloudflare 限制导致生成失败，慎用"
+          : "默认串行最稳。开启后更快，但可能失败" }}
+      </span>
+    </div>
+
     <!-- 规划卡片 -->
     <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
       <div class="gen-card-title">▪ 项目规划</div>
@@ -96,7 +109,7 @@
 
 <script setup lang="ts">
 import {ref, computed, watch, nextTick} from "vue";
-import {genTask} from "../logic/generateState";
+import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
 import type {GeneratorType, GenFile} from "../logic/generateState";
 import {getDownloadUrl, appendFeature} from "../logic/generateHandler";
 
@@ -208,6 +221,47 @@ watch(() => genTask.streamingContent, async () => {
   flex-direction: column;
   gap: 16px;
 }
+
+/* 超级并发开关 */
+.gen-super-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 2px 2px 0;
+}
+.gen-super-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s;
+  white-space: nowrap;
+}
+.gen-super-toggle:hover { color: rgba(255, 255, 255, 0.85); border-color: rgba(255, 255, 255, 0.25); }
+.gen-super-toggle .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  transition: all 0.18s;
+}
+.gen-super-toggle.on {
+  color: #ffcf6b;
+  background: rgba(255, 176, 46, 0.12);
+  border-color: rgba(255, 176, 46, 0.5);
+}
+.gen-super-toggle.on .dot { background: #ffb02e; box-shadow: 0 0 8px #ffb02e; }
+.gen-super-note {
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.gen-super-note.warn { color: rgba(255, 176, 46, 0.85); }
 
 .gen-card {
   flex-direction: column;

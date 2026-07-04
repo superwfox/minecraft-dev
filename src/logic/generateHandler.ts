@@ -1,4 +1,4 @@
-import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput } from "./generateState";
+import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput, superConcurrency } from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 import { byokHeaders } from "./byok";
@@ -122,16 +122,27 @@ function findFile(path: string) {
 }
 
 /** Read an SSE stream, dispatch events to genTask, return the result event */
-async function readSSE(resp: Response): Promise<any> {
+async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => void }): Promise<any> {
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result: any = null;
     let streamedTodoCount = 0;
 
+    // 空闲超时:每收到一块数据(含后端心跳)就重置;连续 idleMs 收不到任何字节才判定后端已死 → onIdle()。
+    // 只在调用方传入 idleMs 时启用(桶生成),避免误杀健康但耗时很长的流。
+    let idleTimer: any;
+    const armIdle = () => {
+        if (!opts?.idleMs) return;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => opts.onIdle?.(), opts.idleMs);
+    };
+    armIdle();
+
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdle();
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
@@ -231,6 +242,7 @@ async function readSSE(resp: Response): Promise<any> {
         }
     }
 
+    clearTimeout(idleTimer);
     genTask.streamingPhase = "";
     genTask.streamingFile = "";
     genTask.streamingContent = "";
@@ -254,24 +266,21 @@ async function streamFileGeneration(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
-/** SSE streaming bucket generation — 一次跑一个桶，桶内并发。
- *  带超时：某次 LLM 调用 hang 住 / Worker 被强杀导致 SSE 流无声中断时，避免前端无限等待。 */
-const BUCKET_TIMEOUT_MS = 300000; // 5 分钟
+/** SSE streaming bucket generation — 一次跑一批文件。
+ *  空闲超时(非总时长!):后端每 12s 发 heartbeat,只要还在流就一直续命;连续 BUCKET_IDLE_MS
+ *  收不到任何字节(CF 强杀 / 上游彻底断死)才 abort → 前端重试同一桶。
+ *  旧的「300s 总时长」会误杀健康但耗时较长的批次(如慢模型/pro 返工)→ 零进度 → replan 死循环。 */
+const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), BUCKET_TIMEOUT_MS);
-    try {
-        const resp = await fetch("/api/generate/bucket", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...byokHeaders() },
-            body: JSON.stringify({ taskId, bucketIndex }),
-            signal: ctrl.signal,
-        });
-        if (!resp.ok) throw new Error(await resp.text());
-        return await readSSE(resp);
-    } finally {
-        clearTimeout(timer);
-    }
+    const resp = await fetch("/api/generate/bucket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        body: JSON.stringify({ taskId, bucketIndex, superConcurrency: superConcurrency.value }),
+        signal: ctrl.signal,
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    return await readSSE(resp, { idleMs: BUCKET_IDLE_MS, onIdle: () => ctrl.abort() });
 }
 
 /** SSE streaming clarify round */

@@ -111,6 +111,18 @@ export function resetGenTask() {
     pathGateWaiting.value = false;
 }
 
+// 超级并发开关：默认 false（桶内串行，每个 CF 请求只做 1 文件，最稳）。
+// 开启后桶内并发生成、更快，但更易撞 Cloudflare Worker 单请求 CPU/时长/子请求上限导致「零进度 → 重新规划 → 失败」——慎用。
+// 用户偏好，持久化到 localStorage。
+function loadSuperConcurrency(): boolean {
+    try { return localStorage.getItem("tahai-super-concurrency") === "1"; } catch { return false; }
+}
+export const superConcurrency = ref(loadSuperConcurrency());
+export function setSuperConcurrency(on: boolean) {
+    superConcurrency.value = on;
+    try { localStorage.setItem("tahai-super-concurrency", on ? "1" : "0"); } catch { /* ignore */ }
+}
+
 // 中断标记：ESC 撤回时抛出，startGenerate 的 catch 据此安静复位
 export class InterruptError extends Error {
     interrupted = true;
