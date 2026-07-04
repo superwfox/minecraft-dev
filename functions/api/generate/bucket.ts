@@ -9,6 +9,11 @@ const SUPER_CONCURRENCY = 2; // 「超级并发」开关开启时的桶内并发
 const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
 const LLM_IDLE_MS = 120000;    // 流式调用的「空闲超时」：连续这么久没字节才 abort，长思考只要还在流就不误杀
 
+// 详细调试:把每一步(含 LLM 的 HTTP 状态/首字节耗时/错误堆栈/心跳是否真在跳)通过 SSE debug 事件发出,
+// 前端累积并可下载。用于定位「桶零进度、无返回」到底死在哪一步。
+type Dbg = (msg: string, extra?: any) => void;
+const noopDbg: Dbg = () => { /* no-op */ };
+
 interface Env {
     DEEPSEEK_API_KEY: string;
     GEN_CONCURRENCY?: string;
@@ -67,7 +72,7 @@ async function fetchWithBackoff(url: string, init: RequestInit, maxRetries = 3):
     }
 }
 
-async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
+async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false, dbg: Dbg = noopDbg): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
@@ -81,6 +86,8 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    const t0 = Date.now();
+    dbg("callAI:req", { model, jsonMode, usePro, sysLen: system.length, userLen: user.length });
     try {
         const resp = await fetchWithBackoff(llm.url, {
             method: "POST",
@@ -88,13 +95,19 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
-        if (!resp.ok) throw new Error(await resp.text());
+        dbg("callAI:http", { model, status: resp.status, ms: Date.now() - t0 });
+        if (!resp.ok) {
+            const txt = await resp.text();
+            dbg("callAI:http-err", { status: resp.status, body: txt.slice(0, 400) });
+            throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
+        }
         const data = await resp.json() as any;
-        return {
-            content: data.choices?.[0]?.message?.content ?? "",
-            model,
-            usage: data.usage,
-        };
+        const content = data.choices?.[0]?.message?.content ?? "";
+        dbg("callAI:done", { model, ms: Date.now() - t0, contentLen: content.length });
+        return { content, model, usage: data.usage };
+    } catch (e: any) {
+        dbg("callAI:throw", { model, ms: Date.now() - t0, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
+        throw e;
     } finally {
         clearTimeout(timer);
     }
@@ -108,6 +121,7 @@ async function callAIStream(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     pathTag: string,
     usePro = false,
+    dbg: Dbg = noopDbg,
 ): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
@@ -126,6 +140,9 @@ async function callAIStream(
     let idle: any;
     const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), LLM_IDLE_MS); };
     arm();
+    const t0 = Date.now();
+    let firstByteMs = -1, chunks = 0;
+    dbg("stream:req", { path: pathTag, model, usePro, sysLen: system.length, userLen: user.length });
     try {
         const resp = await fetchWithBackoff(llm.url, {
             method: "POST",
@@ -133,7 +150,12 @@ async function callAIStream(
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
-        if (!resp.ok) throw new Error(await resp.text());
+        dbg("stream:http", { path: pathTag, status: resp.status, ms: Date.now() - t0 });
+        if (!resp.ok) {
+            const txt = await resp.text();
+            dbg("stream:http-err", { path: pathTag, status: resp.status, body: txt.slice(0, 400) });
+            throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
+        }
 
         const reader = resp.body!.getReader();
         const decoder = new TextDecoder();
@@ -145,6 +167,8 @@ async function callAIStream(
             const { done, value } = await reader.read();
             if (done) break;
             arm(); // 收到数据就重置空闲计时器
+            chunks++;
+            if (firstByteMs < 0) { firstByteMs = Date.now() - t0; dbg("stream:first-byte", { path: pathTag, ms: firstByteMs }); }
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop()!;
@@ -165,7 +189,11 @@ async function callAIStream(
                 } catch { /* skip */ }
             }
         }
+        dbg("stream:done", { path: pathTag, ms: Date.now() - t0, firstByteMs, chunks, len: full.length });
         return { content: full, model, usage };
+    } catch (e: any) {
+        dbg("stream:throw", { path: pathTag, ms: Date.now() - t0, firstByteMs, chunks, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
+        throw e;
     } finally {
         clearTimeout(idle);
     }
@@ -192,6 +220,7 @@ async function generateAndCheckFile(
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
     charge: ChargeFn,
+    dbg: Dbg = noopDbg,
 ): Promise<FileGenOutput> {
     const filePath = target.path;
     const newFiles: FileGenOutput["newFiles"] = [];
@@ -200,10 +229,12 @@ async function generateAndCheckFile(
     await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 正在生成 ${filePath}` }));
     state.logs.push(`▸ 正在生成 ${filePath}`);
 
+    dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
     const slice = computeSlice(target, blueprint);
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
     const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx);
-    const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath);
+    dbg("file:gen-begin", { path: filePath });
+    const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath, false, dbg);
     await charge(initialRes);
     let content = stripFences(initialRes.content);
 
@@ -217,11 +248,13 @@ async function generateAndCheckFile(
         await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 审查 ${filePath}...` }));
         state.logs.push(`▸ 审查 ${filePath}...`);
 
+        dbg("file:review-begin", { path: filePath, round: reworkCount });
         const check = dispatched.checker(filePath, content);
-        const reviewRes = await callAI(llm, check.system, check.user, true, true);
+        const reviewRes = await callAI(llm, check.system, check.user, true, true, dbg);
         await charge(reviewRes);
         let review: any;
-        try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+        try { review = JSON.parse(reviewRes.content); } catch { dbg("file:review-parse-fail", { path: filePath }); passed = true; break; }
+        dbg("file:review-done", { path: filePath, is_ok: !!review.is_ok, missing: (review.missing_classes ?? []).length });
 
         if (review.is_ok) {
             await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `● ${filePath} 审查通过` }));
@@ -252,7 +285,7 @@ async function generateAndCheckFile(
                     };
                     const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx);
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
-                    const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath);
+                    const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath, false, dbg);
                     await charge(subRes);
                     const subContent = stripFences(subRes.content);
 
@@ -260,7 +293,7 @@ async function generateAndCheckFile(
                     let subSummary: any = null;
                     try {
                         const ext = summaryExtractPrompt(newPath, subContent);
-                        const sumRes = await callAI(llm, ext.system, ext.user, true);
+                        const sumRes = await callAI(llm, ext.system, ext.user, true, false, dbg);
                         await charge(sumRes);
                         subSummary = JSON.parse(sumRes.content);
                     } catch {
@@ -282,8 +315,9 @@ async function generateAndCheckFile(
         await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: reworkMsg }));
         state.logs.push(reworkMsg);
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
+        dbg("file:rework-begin", { path: filePath, round: reworkCount });
         const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries);
-        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true);
+        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true, dbg);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
@@ -300,17 +334,20 @@ async function generateAndCheckFile(
 
     // Summary extraction
     await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "summarizing" }));
+    dbg("file:summary-begin", { path: filePath });
     let apiSummary: any = null;
     try {
         await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
         state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
         const ext = summaryExtractPrompt(filePath, content);
-        const sumRes = await callAI(llm, ext.system, ext.user, true);
+        const sumRes = await callAI(llm, ext.system, ext.user, true, false, dbg);
         await charge(sumRes);
         apiSummary = JSON.parse(sumRes.content);
-    } catch {
+    } catch (e: any) {
+        dbg("file:summary-fallback", { path: filePath, msg: String(e?.message || e).slice(0, 200) });
         apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
     }
+    dbg("file:return", { path: filePath, failed: !passed, reworkCount });
 
     const doneMsg = `● ${filePath} 已完成${reworkCount > 0 ? ` (修正${reworkCount}次)` : ""}`;
     state.logs.push(doneMsg);
@@ -373,14 +410,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const encoder = new TextEncoder();
     const writer = writable.getWriter();
 
+    // 详细调试:每一步发一个 debug SSE 事件(前端累积、可下载)。t 为相对本请求起点的毫秒。
+    const T0 = Date.now();
+    const dbg: Dbg = (msg, extra) => {
+        writer.write(sseEvent(encoder, { type: "debug", t: Date.now() - T0, bucket: bucketIndex, msg, ...(extra || {}) })).catch(() => { });
+    };
+
     const process = (async () => {
         // 心跳:reChecker 审查 / 摘要等非流式 LLM 调用期间(推理模型 thinking 阶段不吐 token,
         // 首 token 可达 100s+),SSE 会长时间无字节 → Cloudflare 切断连接 → 前端收不到 result
         // 事件 → 误判「无返回」→ 退回重新规划循环。每 12s 写个 heartbeat 维持流活着(前端忽略此事件)。
+        // n=心跳序号:前端据此判断 CF Worker 的 setInterval 是否真的在跳(若无 heartbeat,则定时器未触发)。
+        let hbCount = 0;
         const heartbeat = setInterval(() => {
-            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+            hbCount++;
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now(), n: hbCount })).catch(() => { });
+            dbg("heartbeat", { n: hbCount });
         }, 12000);
         try {
+            dbg("process:start", { bucketIndex, concurrency, superOn: !!superConcurrency, skills: state.skills?.length || 0, bucketsTotal: buckets.length });
             await writer.write(sseEvent(encoder, {
                 type: "bucket_start", bucketIndex, paths: bucket.map(f => f.path), concurrency,
             }));
@@ -417,6 +465,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             let replanTriggered: FileGenOutput | null = null;
 
             // 每个并发任务自己捕获异常，失败也照常写入 errors 数组，避免一个失败拖垮整个桶
+            dbg("batch:begin", { pending: pending.length, targets: targets.map(t => t.path) });
             await Promise.all(targets.map(async (target) => {
                 await sem.acquire();
                 try {
@@ -424,10 +473,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     state.fileStatuses ??= {};
                     state.fileStatuses[target.path] = "generating";
                     const localSummaries = baseSummaries.slice();
+                    dbg("task:begin", { path: target.path });
                     try {
                         const r = await generateAndCheckFile(
-                            llm, target, ctx, localSummaries, blueprint, writer, encoder, state, charge,
+                            llm, target, ctx, localSummaries, blueprint, writer, encoder, state, charge, dbg,
                         );
+                        dbg("task:ok", { path: target.path, failed: r.failed, reworkCount: r.reworkCount });
                         if (r.replan) {
                             replanTriggered = r;
                             state.fileStatuses[target.path] = "error";
@@ -448,6 +499,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         results.push(r);
                     } catch (taskErr: any) {
                         const reason = taskErr?.message ? String(taskErr.message) : String(taskErr);
+                        dbg("task:throw", { path: target.path, err: taskErr?.name, msg: reason.slice(0, 400), stack: String(taskErr?.stack || "").slice(0, 600) });
                         state.fileStatuses[target.path] = "error";
                         errors.push({ path: target.path, reason });
                         const failMsg = `× ${target.path} 生成异常：${reason}`;
@@ -474,6 +526,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             if (replanTriggered) {
+                dbg("result:replan", { path: replanTriggered.path, reason: replanTriggered.reason, errors: errors.length });
                 state.status = "error";
                 state.error = replanTriggered.reason ?? "审查未通过";
                 await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
@@ -493,6 +546,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.currentFileIndex = state.generatedFiles.length;
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
+            dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
             await writer.write(sseEvent(encoder, {
                 type: "result",
                 bucketIndex,
@@ -505,6 +559,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
             const errMsg = e?.message ? String(e.message) : String(e);
+            dbg("process:catch", { err: e?.name, msg: errMsg.slice(0, 400), stack: String(e?.stack || "").slice(0, 800) });
             try {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` }));
                 // 关键：始终发出 result 事件，避免前端拿到 null
@@ -515,6 +570,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
             } catch { /* writer 可能已关闭 */ }
         } finally {
+            dbg("process:finally", { hb: hbCount });
             clearInterval(heartbeat);
             await writer.close();
         }

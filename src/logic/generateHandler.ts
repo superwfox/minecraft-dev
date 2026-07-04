@@ -237,6 +237,10 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                     case "result":
                         result = evt;
                         break;
+                    case "debug":
+                        genTask.debugLog.push(evt);
+                        if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
+                        break;
                 }
             } catch { /* skip */ }
         }

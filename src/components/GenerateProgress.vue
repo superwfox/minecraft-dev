@@ -11,6 +11,10 @@
           ? "⚠ 桶内并发更快，但更易撞 Cloudflare 限制导致生成失败，慎用"
           : "默认串行最稳。开启后更快，但可能失败" }}
       </span>
+      <button v-if="genTask.debugLog.length" class="gen-super-toggle dbg" @click="downloadDebug"
+              title="导出后端逐步调试日志（JSON），用于定位生成失败">
+        ⬇ 调试日志 <span class="dbg-count">{{ genTask.debugLog.length }}</span>
+      </button>
     </div>
 
     <!-- 规划卡片 -->
@@ -115,6 +119,28 @@ import {getDownloadUrl, appendFeature} from "../logic/generateHandler";
 
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
+
+// 导出后端逐步调试日志（含 logs + debug 事件），用于定位「桶零进度、无返回」死因
+function downloadDebug() {
+    const payload = {
+        taskId: genTask.taskId,
+        phase: genTask.phase,
+        error: genTask.error,
+        projectName: genTask.projectName,
+        exportedAt: new Date().toISOString(),
+        logs: genTask.logs,
+        debug: genTask.debugLog,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tahai-debug-${genTask.taskId || "task"}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
 
 // 继续完善：追加需求 → 增量补充
 const appendText = ref("");
@@ -262,6 +288,20 @@ watch(() => genTask.streamingContent, async () => {
   color: rgba(255, 255, 255, 0.4);
 }
 .gen-super-note.warn { color: rgba(255, 176, 46, 0.85); }
+.gen-super-toggle.dbg {
+  margin-left: auto;
+  color: rgba(120, 200, 255, 0.85);
+  border-color: rgba(120, 200, 255, 0.3);
+  background: rgba(120, 200, 255, 0.08);
+}
+.gen-super-toggle.dbg:hover { color: #9dd4ff; border-color: rgba(120, 200, 255, 0.55); }
+.dbg-count {
+  font-size: 10px;
+  opacity: 0.7;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(120, 200, 255, 0.15);
+}
 
 .gen-card {
   flex-direction: column;

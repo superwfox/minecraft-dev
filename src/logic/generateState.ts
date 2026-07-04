@@ -63,6 +63,7 @@ export type GenTask = {
     reasoningVisible: boolean;
     moreInputHint: string;
     grade: GradeInfo | null;
+    debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
 };
 
 export const genTask = reactive<GenTask>({
@@ -85,6 +86,7 @@ export const genTask = reactive<GenTask>({
     reasoningVisible: true,
     moreInputHint: "",
     grade: null,
+    debugLog: [],
 });
 
 export function resetGenTask() {
@@ -107,6 +109,7 @@ export function resetGenTask() {
     genTask.reasoningVisible = true;
     genTask.moreInputHint = "";
     genTask.grade = null;
+    genTask.debugLog = [];
     clarifyWaiting.value = false;
     pathGateWaiting.value = false;
 }
