@@ -68,8 +68,8 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
     letter-spacing: 0.06em;
     color: rgba(255, 255, 255, 0.62);
     text-decoration: none;
-    padding: 3px 14px;
-    border-radius: 10px;
+    padding: 4px 14px;
+    border-radius: 6px; /* 圆角矩形（原 10px 在矮元素上偏药丸感） */
     border: 1px solid transparent;
     transition: color 0.2s, background 0.2s, border-color 0.2s;
     cursor: pointer;

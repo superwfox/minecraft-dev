@@ -409,8 +409,7 @@ watch(() => genTask.streamingContent, async () => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 480px;
-  overflow-y: auto;
+  /* 直接铺开，不做内部滚动 */
 }
 .gen-group {
   border: 1px solid rgba(255,255,255,0.08);

@@ -1,4 +1,4 @@
-import { reactive, ref } from "vue";
+import { reactive, ref, watch } from "vue";
 
 export type GenPhase = "idle" | "planning" | "clarifying" | "grading" | "confirming" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
 
@@ -46,6 +46,9 @@ export type ClarifyRound = {
 export type GenTask = {
     taskId: string;
     phase: GenPhase;
+    userPrompt: string;   // 原始需求（持久化用：刷新后重试/续跑）
+    coreType: string;
+    version: string;
     projectName: string;
     packageName: string;
     javaVersion: string;
@@ -69,6 +72,9 @@ export type GenTask = {
 export const genTask = reactive<GenTask>({
     taskId: "",
     phase: "idle",
+    userPrompt: "",
+    coreType: "",
+    version: "",
     projectName: "",
     packageName: "",
     javaVersion: "",
@@ -92,6 +98,9 @@ export const genTask = reactive<GenTask>({
 export function resetGenTask() {
     genTask.taskId = "";
     genTask.phase = "idle";
+    genTask.userPrompt = "";
+    genTask.coreType = "";
+    genTask.version = "";
     genTask.projectName = "";
     genTask.packageName = "";
     genTask.javaVersion = "";
@@ -112,6 +121,7 @@ export function resetGenTask() {
     genTask.debugLog = [];
     clarifyWaiting.value = false;
     pathGateWaiting.value = false;
+    clearPersistedGenTask();
 }
 
 // 超级并发开关：默认 false（桶内串行，每个 CF 请求只做 1 文件，最稳）。
@@ -125,6 +135,75 @@ export function setSuperConcurrency(on: boolean) {
     superConcurrency.value = on;
     try { localStorage.setItem("tahai-super-concurrency", on ? "1" : "0"); } catch { /* ignore */ }
 }
+
+// ── 生成态持久化：刷新不丢会话（taskID 的职责是重建会话，而非刷新即失败）──
+// 快照存 localStorage（不含文件正文，保持体积小；正文在后端 KV，续跑时按需重取）。
+const GEN_KEY = "tahai-gentask";
+let persistTimer: any = null;
+export function persistGenTask() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+        try {
+            if (genTask.phase === "idle" || !genTask.taskId) { localStorage.removeItem(GEN_KEY); return; }
+            const snap = {
+                taskId: genTask.taskId,
+                phase: genTask.phase,
+                userPrompt: genTask.userPrompt,
+                coreType: genTask.coreType,
+                version: genTask.version,
+                projectName: genTask.projectName,
+                packageName: genTask.packageName,
+                javaVersion: genTask.javaVersion,
+                files: genTask.files.map(f => ({
+                    path: f.path, role: f.role, status: f.status,
+                    generatorType: f.generatorType, tag: f.tag, pairPath: f.pairPath, bucket: f.bucket,
+                })),
+                currentIndex: genTask.currentIndex,
+                logs: genTask.logs.slice(-200),
+                clarifyHistory: genTask.clarifyHistory,
+                grade: genTask.grade,
+                error: genTask.error,
+                t: Date.now(),
+            };
+            localStorage.setItem(GEN_KEY, JSON.stringify(snap));
+        } catch { /* ignore（超配额等） */ }
+    }, 400);
+}
+export function clearPersistedGenTask() {
+    try { localStorage.removeItem(GEN_KEY); } catch { /* ignore */ }
+}
+/** 页面加载时还原上次生成态。返回是否还原了一个「进行中/可续」的任务。 */
+export function restoreGenTask(): boolean {
+    try {
+        const raw = localStorage.getItem(GEN_KEY);
+        if (!raw) return false;
+        const s = JSON.parse(raw);
+        if (!s.taskId || s.phase === "idle") return false;
+        if (s.t && Date.now() - s.t > 3600_000) { localStorage.removeItem(GEN_KEY); return false; } // 超 KV TTL 作废
+        genTask.taskId = s.taskId;
+        genTask.phase = s.phase;
+        genTask.userPrompt = s.userPrompt || "";
+        genTask.coreType = s.coreType || "";
+        genTask.version = s.version || "";
+        genTask.projectName = s.projectName || "";
+        genTask.packageName = s.packageName || "";
+        genTask.javaVersion = s.javaVersion || "";
+        genTask.files = s.files || [];
+        genTask.currentIndex = s.currentIndex || 0;
+        genTask.logs = s.logs || [];
+        genTask.clarifyHistory = s.clarifyHistory || [];
+        genTask.grade = s.grade || null;
+        genTask.error = s.error || "";
+        return true;
+    } catch { return false; }
+}
+
+// genTask 关键字段变化 → 防抖落盘
+watch(
+    () => [genTask.phase, genTask.files.length, genTask.currentIndex, genTask.logs.length,
+        genTask.files.filter(f => f.status === "done").length],
+    persistGenTask,
+);
 
 // 中断标记：ESC 撤回时抛出，startGenerate 的 catch 据此安静复位
 export class InterruptError extends Error {

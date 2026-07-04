@@ -334,16 +334,99 @@ async function streamBuildFix(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
-// 记住上次生成的入参，供失败后「重试」手动重跑（现在后端已非流式，重试通常直接成功）。
+// 记住上次生成的入参，供失败后「重试」手动重跑。刷新后内存丢失时，改用 genTask 上还原的入参。
 let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
 export function canRetryGenerate(): boolean {
-    return !!lastGenParams && (genTask.phase === "error" || genTask.phase === "idle");
+    const has = !!lastGenParams || !!genTask.userPrompt || !!genTask.taskId;
+    return has && (genTask.phase === "error" || genTask.phase === "idle");
 }
-/** 手动重试：用上次入参从头重跑一次（全新 taskId，会重新澄清）。 */
+/** 手动重试：优先用内存入参重跑；刷新后内存丢了则用还原的入参重跑，或从 KV 续跑。 */
 export function retryGenerate() {
-    if (!lastGenParams) return;
-    const { userPrompt, coreType, version } = lastGenParams;
-    startGenerate(userPrompt, coreType, version).catch(() => { });
+    const params = lastGenParams
+        || (genTask.userPrompt ? { userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version } : null);
+    if (params) {
+        startGenerate(params.userPrompt, params.coreType, params.version).catch(() => { });
+    } else if (genTask.taskId) {
+        resumeGenerate().catch(() => { });
+    }
+}
+
+/** 刷新恢复：genTask 已由 restoreGenTask 还原，据当前阶段续跑，避免刷新即失败。 */
+export async function resumeGenerate() {
+    const p = genTask.phase;
+    if (!genTask.taskId || ["idle", "done", "error"].includes(p)) return;
+
+    // 构建阶段：直接回到构建 + 轮询
+    if (["uploading", "building", "polling", "fixing"].includes(p)) {
+        try { await buildWithRetry(); }
+        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
+        return;
+    }
+
+    // 准备阶段（澄清/分级/规划，尚无 plan）刷新：交互无法干净续接 → 转为可重试错误态
+    if (!genTask.files.length) {
+        genTask.phase = "error";
+        genTask.error = "页面刷新中断了准备阶段，点「重试」用上次需求继续。";
+        return;
+    }
+
+    // 生成/校验阶段（plan 已完成、有 files）：续跑桶循环（后端 fileStatuses 天然可续）→ 校验 → 构建
+    try {
+        genTask.logs.push("↻ 从刷新中断处继续生成…");
+        setPhase("generating", "从中断处继续生成…");
+
+        const bucketMap = new Map<number, number>();
+        for (const f of genTask.files) { const b = f.bucket ?? 0; bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1); }
+        const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
+
+        for (const bucketIndex of sortedBucketIds) {
+            let bucketDone = false, guard = 0, noProgress = 0;
+            const doneCount = () => genTask.files.filter(f => f.status === "done").length;
+            while (!bucketDone) {
+                if (guard++ > 80) throw new Error("续跑批次过多，请重试");
+                const doneBefore = doneCount();
+                let bucketResult: any = null;
+                for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
+                    try { bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex); }
+                    catch { bucketResult = null; }
+                }
+                if (!bucketResult) {
+                    if (doneCount() > doneBefore) { noProgress = 0; continue; }
+                    if (++noProgress >= 5) throw new Error("续跑连续零进度，请重试");
+                    continue;
+                }
+                noProgress = 0;
+                if (bucketResult.replan) throw new Error("续跑仍未通过审查，请重试");
+                for (const c of bucketResult.completed || []) {
+                    const f = genTask.files.find(x => x.path === c.path);
+                    if (f) { f.content = c.content; f.status = "done"; }
+                }
+                bucketDone = !!bucketResult.bucketDone;
+                if (bucketResult.done) break;
+            }
+        }
+
+        setPhase("verifying", "正在校验文件完整性…");
+        let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+        for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
+            const missingList = verifyResult.missing as string[];
+            await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
+            setPhase("generating");
+            for (const mp of missingList) {
+                genTask.logs.push(`↻ 补生成 ${mp}`);
+                const fileResult = await streamFileGeneration(genTask.taskId);
+                if (!fileResult || fileResult.done) break;
+            }
+            verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
+        }
+        if (!verifyResult.verified) throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件`);
+
+        await buildWithRetry();
+    } catch (e: any) {
+        genTask.phase = "error";
+        genTask.error = e?.message || String(e);
+        genTask.logs.push("× " + genTask.error);
+    }
 }
 
 export async function startGenerate(userPrompt: string, coreType: string, version: string) {
@@ -353,6 +436,9 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     lastGenParams = { userPrompt, coreType, version };
 
     resetGenTask();
+    genTask.userPrompt = userPrompt;
+    genTask.coreType = coreType;
+    genTask.version = version;
 
     // ── Phase 1: create taskId (no plan yet) ──
     try {

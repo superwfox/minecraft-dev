@@ -151,8 +151,8 @@ import ClarifyCards from "../components/ClarifyCards.vue";
 import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
 import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../logic/skills";
-import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting} from "../logic/generateState";
-import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
+import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting, restoreGenTask} from "../logic/generateState";
+import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 
 const centerText = inject<Ref<string>>("centerText")!;
@@ -364,6 +364,17 @@ function onKeydown(e: KeyboardEvent) {
 }
 onMounted(() => window.addEventListener("keydown", onKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
+
+// 刷新恢复：若上次生成态还在（且当前是全新页面 idle），还原并按阶段续跑，避免刷新即失败。
+onMounted(() => {
+    if (genTask.phase !== "idle" || genTask.taskId) return; // 已有活动态则不覆盖
+    if (restoreGenTask()) {
+        // done/error 只还原展示；进行中的阶段交给 resumeGenerate 续跑
+        if (!["done", "error", "idle"].includes(genTask.phase)) {
+            resumeGenerate().catch(() => { });
+        }
+    }
+});
 
 // 顶栏中部状态文案
 const phaseLabels: Record<string, string> = {
