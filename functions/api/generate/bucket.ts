@@ -181,10 +181,11 @@ async function callAIStream(
                 try {
                     const chunk = JSON.parse(payload);
                     const delta = chunk.choices?.[0]?.delta?.content;
-                    if (delta) {
-                        full += delta;
-                        await writer.write(sseEvent(encoder, { type: "delta", path: pathTag, content: delta }));
-                    }
+                    // 只在服务端累积,【不再逐 token 转发 delta 到客户端】。
+                    // 实测(debug trace):CF Pages 的 waitUntil 流式响应下,这个 tight loop 里的
+                    // `await writer.write(delta)` 会在收到首字节后的第一个 delta 写就挂死(背压/CPU),
+                    // 导致「桶零进度、无返回 → replan → 失败」。客户端靠 file_done/result 拿最终内容。
+                    if (delta) full += delta;
                     if (chunk.usage) usage = chunk.usage;
                 } catch { /* skip */ }
             }
