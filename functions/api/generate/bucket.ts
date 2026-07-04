@@ -6,8 +6,7 @@ import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
 const SUPER_CONCURRENCY = 2; // 「超级并发」开关开启时的桶内并发数（默认串行=1）
-const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
-const LLM_IDLE_MS = 120000;    // 流式调用的「空闲超时」：连续这么久没字节才 abort，长思考只要还在流就不误杀
+const LLM_TIMEOUT_MS = 150000; // 单次 LLM 调用总时长上限（生成/审查均走非流式，免费版 CPU 有限）
 
 // 详细调试:把每一步(含 LLM 的 HTTP 状态/首字节耗时/错误堆栈/心跳是否真在跳)通过 SSE debug 事件发出,
 // 前端累积并可下载。用于定位「桶零进度、无返回」到底死在哪一步。
@@ -123,11 +122,13 @@ async function callAIStream(
     usePro = false,
     dbg: Dbg = noopDbg,
 ): Promise<AICallResult> {
+    // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse(几百次)会超 CPU
+    // 被硬杀(debug 实测:29 次生成仅 2 次跑到 stream:done)。改为非流式,只做 1 次 resp.json()——
+    // 与在免费版上稳定工作的 reChecker(callAI 非流式)同款,CPU 骤降。逐 token delta 转发本就已去掉,
+    // 不流式对结果无影响。writer/encoder 参数保留仅为兼容调用点签名。
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
-        stream: true,
-        stream_options: { include_usage: true },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
     if (usePro) {
@@ -136,12 +137,8 @@ async function callAIStream(
     }
 
     const ctrl = new AbortController();
-    // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接；避免长思考被固定总时长误杀。
-    let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), LLM_IDLE_MS); };
-    arm();
+    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
     const t0 = Date.now();
-    let firstByteMs = -1, chunks = 0;
     dbg("stream:req", { path: pathTag, model, usePro, sysLen: system.length, userLen: user.length });
     try {
         const resp = await fetchWithBackoff(llm.url, {
@@ -156,47 +153,15 @@ async function callAIStream(
             dbg("stream:http-err", { path: pathTag, status: resp.status, body: txt.slice(0, 400) });
             throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
         }
-
-        const reader = resp.body!.getReader();
-        const decoder = new TextDecoder();
-        let full = "";
-        let buffer = "";
-        let usage: UsageBreakdown | undefined;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            arm(); // 收到数据就重置空闲计时器
-            chunks++;
-            if (firstByteMs < 0) { firstByteMs = Date.now() - t0; dbg("stream:first-byte", { path: pathTag, ms: firstByteMs }); }
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop()!;
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                const payload = trimmed.slice(5).trim();
-                if (payload === "[DONE]") continue;
-                try {
-                    const chunk = JSON.parse(payload);
-                    const delta = chunk.choices?.[0]?.delta?.content;
-                    // 只在服务端累积,【不再逐 token 转发 delta 到客户端】。
-                    // 实测(debug trace):CF Pages 的 waitUntil 流式响应下,这个 tight loop 里的
-                    // `await writer.write(delta)` 会在收到首字节后的第一个 delta 写就挂死(背压/CPU),
-                    // 导致「桶零进度、无返回 → replan → 失败」。客户端靠 file_done/result 拿最终内容。
-                    if (delta) full += delta;
-                    if (chunk.usage) usage = chunk.usage;
-                } catch { /* skip */ }
-            }
-        }
-        dbg("stream:done", { path: pathTag, ms: Date.now() - t0, firstByteMs, chunks, len: full.length });
-        return { content: full, model, usage };
+        const data = await resp.json() as any;
+        const content = data.choices?.[0]?.message?.content ?? "";
+        dbg("stream:done", { path: pathTag, ms: Date.now() - t0, len: content.length });
+        return { content, model, usage: data.usage };
     } catch (e: any) {
-        dbg("stream:throw", { path: pathTag, ms: Date.now() - t0, firstByteMs, chunks, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
+        dbg("stream:throw", { path: pathTag, ms: Date.now() - t0, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
         throw e;
     } finally {
-        clearTimeout(idle);
+        clearTimeout(timer);
     }
 }
 
