@@ -117,8 +117,16 @@ body {
 }
 
 .header-title {
-  font-family: "ZhuoKai", sans-serif;
+  font-family: "MinecrafterAlt", sans-serif;
+  font-size: 24px;
+  letter-spacing: 0.04em;
   cursor: pointer;
+}
+
+.right .link {
+  font-family: "MinecrafterAlt", sans-serif;
+  font-size: 14px;
+  letter-spacing: 0.04em;
 }
 
 .qq-link {
