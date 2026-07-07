@@ -13,7 +13,7 @@
           <div class="quota-logout" @click="doLogout">退出登录</div>
         </div>
       </div>
-      <span class="header-title" @click="goHome">TAHAI</span>
+      <span class="header-title" @click="goHome">tahai</span>
     </div>
 
     <div class="center">
@@ -22,18 +22,16 @@
 
     <div class="right">
       <span v-if="authState.loaded && !authState.user" class="link" @click="login">登录</span>
-      <a class="link" href="https://minecraft-dev.pages.dev/" rel="noreferrer">文档</a>
+      <a class="link" href="https://minecraft-dev.pages.dev/" rel="noreferrer">DOC</a>
       <a
         class="link qq-link"
         href="https://qm.qq.com/q/l2PcLa4nqU"
         target="_blank"
         rel="noopener noreferrer"
-        title="加入 QQ 群"
-        aria-label="QQ 群"
+        title="qq"
+        aria-label="qq"
       >
-        <svg class="qq-icon" viewBox="0 0 1024 1024" fill="currentColor" aria-hidden="true">
-          <path d="M824.8 613.2c-16-51.4-34.4-94.6-62.7-165.3C766.5 262.2 689.3 112 511.5 112 331.7 112 256.2 265.2 261 447.9c-28.4 70.8-46.7 113.7-62.7 165.3-34 109.5-23 154.8-14.6 155.8 18 2.2 70.1-82.4 70.1-82.4 0 49 25.2 112.9 79.8 159-26.4 8.1-85.7 29.9-71.6 53.8 11.4 19.3 196.2 12.3 249.5 6.3 53.3 6 238.1 13 249.5-6.3 14.1-23.8-45.3-45.7-71.6-53.8 54.6-46.1 79.8-110 79.8-159 0 0 52.1 84.6 70.1 82.4 8.5-1 19.5-46.3-14.5-155.8z"/>
-        </svg>
+        qq
       </a>
     </div>
   </GlassCard>
@@ -123,16 +121,9 @@ body {
   cursor: pointer;
 }
 
-/* QQ 群入口：内联 svg，继承 .link 的白色 currentColor */
 .qq-link {
   display: inline-flex;
   align-items: center;
-}
-
-.qq-icon {
-  width: 20px;
-  height: 20px;
-  display: block;
 }
 
 /* logo 与 hover 浮层 */
