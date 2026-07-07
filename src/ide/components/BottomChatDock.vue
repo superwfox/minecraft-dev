@@ -46,7 +46,7 @@
           </div>
         </div>
         <div v-if="streaming" class="msg msg-assistant">
-          <div class="msg-text streaming">{{ streamingText || '思考中…' }}</div>
+          <div class="msg-text streaming" :class="{ 'waiting-text': !streamingText }">{{ streamingText || 'thinking…' }}</div>
         </div>
       </div>
 
@@ -390,6 +390,10 @@ watch(() => [props.messages.length, props.streamingText], async () => {
 .intent-edit { background: rgba(245,222,179,0.18); color: wheat; }
 .msg-file-count { font-size: 11px; color: rgba(255,255,255,0.45); font-family: "Monaco", monospace; }
 .msg-text { white-space: pre-wrap; }
+.waiting-text {
+  font-family: "MinecrafterReg", "Monaco", monospace;
+  letter-spacing: 1px;
+}
 .msg-text.streaming::after {
   content: "▌";
   color: wheat;

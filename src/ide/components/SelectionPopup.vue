@@ -32,7 +32,7 @@
     <!-- 流式中 -->
     <div v-else-if="phase === 'thinking'" class="sel-body">
       <div class="sel-task-tag">{{ currentTask }}</div>
-      <div class="sel-stream">{{ streamingText || '思考中…' }}<span class="sel-cursor">▌</span></div>
+      <div class="sel-stream" :class="{ 'waiting-text': !streamingText }">{{ streamingText || 'thinking…' }}<span class="sel-cursor">▌</span></div>
     </div>
 
     <!-- 已应用（修改类任务） -->
@@ -361,6 +361,10 @@ watch(() => props.visible, async (v) => {
   overflow-y: auto;
   white-space: pre-wrap;
   font-family: "Monaco", system-ui, sans-serif;
+}
+.sel-stream.waiting-text {
+  font-family: "MinecrafterReg", "Monaco", monospace;
+  letter-spacing: 1px;
 }
 .sel-result.preview {
   font-family: "Monaco", monospace;

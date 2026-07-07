@@ -1,56 +1,126 @@
 // pom.xml 安全 scrub：上传给 GitHub 触发 Actions 前的最后一道闸。
 // 防御目标：恶意 pom 在 Actions runner 内执行任意命令、写仓库、对外攻击。
 //
+// 策略：黑名单，不再用依赖白名单。只拦截明显危险的构建能力、危险仓库 URL，
+// 以及不适合小型 Minecraft 插件生成的超大框架/库。
+//
 // 已知威胁向量与对应黑名单：
 //   - <extensions> 加载任意类
 //   - exec-maven-plugin / maven-antrun-plugin 等可执行任意命令的插件
-//   - <repository> 指向攻击者控制的 Maven 仓库拉恶意依赖
-//   - <dependency> groupId 不在常见 Paper 插件依赖范围内
+//   - <repository> 指向本机、内网或云元数据地址
+//   - <dependency> 引入脚本执行、原生调用、桌面浏览器、云大 SDK、大数据/AI/企业后端框架
 
 const PLUGIN_BLACKLIST = [
     "exec-maven-plugin",
     "maven-antrun-plugin",
     "groovy-maven-plugin",
     "gmavenplus-plugin",
+    "frontend-maven-plugin",
+    "docker-maven-plugin",
+    "jib-maven-plugin",
+    "nar-maven-plugin",
+    "native-maven-plugin",
 ];
 
-const REPO_HOST_WHITELIST = [
-    "repo.maven.apache.org",
-    "repo1.maven.org",
-    "papermc.io",
-    "repo.papermc.io",
-    "hub.spigotmc.org",
-    "oss.sonatype.org",
+const DEP_GROUP_BLACKLIST = [
+    // 大型后端 / 容器框架：会把简单插件变成服务端应用，体量和构建风险都过高
+    "org.springframework",
+    "io.quarkus",
+    "io.micronaut",
+    "org.apache.tapestry",
+    "com.vaadin",
+    "org.apache.wicket",
+
+    // 大数据 / 搜索 / 消息平台
+    "org.apache.hadoop",
+    "org.apache.spark",
+    "org.apache.flink",
+    "org.apache.storm",
+    "org.elasticsearch",
+    "org.opensearch",
+    "org.apache.solr",
+    "org.apache.kafka",
+
+    // AI / 数值计算大包
+    "org.tensorflow",
+    "ai.djl",
+    "org.deeplearning4j",
+    "org.nd4j",
+
+    // 云厂商大 SDK
+    "software.amazon.awssdk",
+    "com.amazonaws",
+    "com.azure",
+    "com.google.cloud",
+
+    // 浏览器自动化 / 桌面 UI
+    "org.seleniumhq.selenium",
+    "com.microsoft.playwright",
+    "org.openjfx",
+
+    // 原生调用 / 进程执行 / 脚本运行时
+    "net.java.dev.jna",
+    "com.github.oshi",
+    "org.zeroturnaround",
+    "org.codehaus.groovy",
+    "org.apache.groovy",
+    "org.jruby",
+    "org.python",
+    "org.mozilla",
+    "org.openjdk.nashorn",
 ];
 
-const DEP_GROUP_WHITELIST = [
-    "io.papermc",
-    "com.destroystokyo.paper",
-    "org.spigotmc",
-    "org.bukkit",
-    "net.md-5",
-    "org.apache.maven.plugins",
-    "org.projectlombok",
-    "com.google.code.gson",
-    "com.google.guava",
-    "org.yaml.snakeyaml",
-    "mysql",
-    "com.mysql",
-    "com.h2database",
-    "com.zaxxer",
-    "org.xerial",
-    "org.postgresql",
-    "redis.clients",
-    "org.jetbrains",
-    "org.junit",
-    "org.junit.jupiter",
-    "junit",
-    "org.mockito",
+const DEP_COORD_BLACKLIST = [
+    "org.apache.commons:commons-exec",
+    "commons-beanutils:commons-beanutils",
+    "org.beanshell:bsh",
+    "org.jline:jline-terminal-jna",
+    "com.github.jnr:jnr-posix",
+    "com.github.jnr:jnr-ffi",
+    "com.github.jnr:jffi",
+    "com.kenai.jffi:jffi",
 ];
+
+const PRIVATE_HOST_RE = /^(localhost|metadata\.google\.internal)$/i;
 
 export interface PomCheckResult { ok: boolean; reason?: string; }
 
-export function checkPom(content: string, extraGroups: string[] = []): PomCheckResult {
+function isBlacklistedGroup(groupId: string): boolean {
+    return DEP_GROUP_BLACKLIST.some(g => groupId === g || groupId.startsWith(g + "."));
+}
+
+function isPrivateIp(host: string): boolean {
+    const h = host.replace(/^\[|\]$/g, "");
+    if (/^127\./.test(h) || /^10\./.test(h) || /^0\./.test(h)) return true;
+    if (/^192\.168\./.test(h)) return true;
+    if (/^169\.254\./.test(h)) return true;
+    const m = h.match(/^172\.(\d+)\./);
+    if (m) {
+        const n = Number(m[1]);
+        if (n >= 16 && n <= 31) return true;
+    }
+    return h === "::1" || h.toLowerCase().startsWith("fe80:");
+}
+
+function checkRepositoryUrl(rawUrl: string): PomCheckResult {
+    let u: URL;
+    try {
+        u = new URL(rawUrl);
+    } catch {
+        return { ok: true };
+    }
+    const protocol = u.protocol.toLowerCase();
+    if (protocol !== "https:" && protocol !== "http:") {
+        return { ok: false, reason: `pom 仓库 URL 使用危险协议: ${protocol}` };
+    }
+    const host = u.hostname.toLowerCase();
+    if (PRIVATE_HOST_RE.test(host) || isPrivateIp(host)) {
+        return { ok: false, reason: `pom 仓库 URL 指向本机/内网地址: ${host}` };
+    }
+    return { ok: true };
+}
+
+export function checkPom(content: string): PomCheckResult {
     // 1. 禁 extensions（任意类加载）
     if (/<extensions\b[^>]*>(?!\s*<\/extensions>)/i.test(content)) {
         return { ok: false, reason: "pom 不允许 <extensions> 元素" };
@@ -64,7 +134,7 @@ export function checkPom(content: string, extraGroups: string[] = []): PomCheckR
         }
     }
 
-    // 3. <repository> / <pluginRepository> 的 url 必须在白名单
+    // 3. <repository> / <pluginRepository> 的 url 只拦危险地址，不做公网仓库白名单
     //    只检测出现在 <repositories>/<pluginRepositories> 块内的 <url>，
     //    避免误伤 project / scm / organization 的 <url>。
     const repoBlocks = [
@@ -75,43 +145,37 @@ export function checkPom(content: string, extraGroups: string[] = []): PomCheckR
         const body = m[1];
         const urls = [...body.matchAll(/<url>\s*([^<\s][^<]*?)\s*<\/url>/g)].map(u => u[1].trim());
         for (const u of urls) {
-            let host = "";
-            try { host = new URL(u).hostname.toLowerCase(); } catch { continue; }
-            const ok = REPO_HOST_WHITELIST.some(w => host === w || host.endsWith("." + w));
-            if (!ok) return { ok: false, reason: `pom 出现非白名单仓库 host: ${host}` };
+            const r = checkRepositoryUrl(u);
+            if (!r.ok) return r;
         }
     }
 
-    // 4. <dependency> groupId 白名单（基础白名单 ∪ 挂载 skill 声明的依赖）
-    const allowGroups = [...DEP_GROUP_WHITELIST, ...extraGroups];
+    // 4. <dependency> 黑名单：只拦截危险或超大依赖
     const deps = [...content.matchAll(/<dependency>([\s\S]*?)<\/dependency>/g)];
     for (const m of deps) {
         const block = m[1];
         const gMatch = block.match(/<groupId>\s*([^<\s]+)\s*<\/groupId>/);
+        const aMatch = block.match(/<artifactId>\s*([^<\s]+)\s*<\/artifactId>/);
         if (!gMatch) continue;
         const g = gMatch[1].trim();
+        const a = aMatch?.[1]?.trim() || "";
         // 允许 ${...} 变量（一般是 project.groupId 引用，构建期 Maven 自己解析）
         if (g.startsWith("${")) continue;
-        const ok = allowGroups.some(w => g === w || g.startsWith(w + "."));
-        if (!ok) return { ok: false, reason: `pom 出现非白名单依赖 groupId: ${g}` };
+        if (isBlacklistedGroup(g)) {
+            return { ok: false, reason: `pom 禁止使用危险或超大依赖 groupId: ${g}` };
+        }
+        if (DEP_COORD_BLACKLIST.includes(`${g}:${a}`)) {
+            return { ok: false, reason: `pom 禁止使用危险依赖: ${g}:${a}` };
+        }
     }
 
     return { ok: true };
 }
 
 /**
- * 从挂载的 skill bundle 提取它们在 md frontmatter 的 pom 里声明的依赖 groupId。
- * skill 经 PR 人工审批入库，其声明的依赖视为可信 → 该次构建放行（见 checkPom 的 extraGroups）。
+ * 兼容旧调用：pomGuard 已切换为黑名单策略，不再需要从 skill 中放行依赖 groupId。
  */
 export function extractSkillGroups(skills: any[]): string[] {
-    const groups = new Set<string>();
-    for (const b of skills || []) {
-        for (const f of b?.files || []) {
-            const body = typeof f?.body === "string" ? f.body : "";
-            for (const m of body.matchAll(/<groupId>\s*([^<\s$][^<]*?)\s*<\/groupId>/g)) {
-                groups.add(m[1].trim());
-            }
-        }
-    }
-    return [...groups];
+    void skills;
+    return [];
 }

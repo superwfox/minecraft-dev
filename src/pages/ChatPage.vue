@@ -19,7 +19,7 @@
       <!-- Reasoner 思考流（折叠） -->
       <div v-if="genTask.reasoningContent" class="reasoning-wrap glass2">
         <div class="reasoning-head" @click="genTask.reasoningVisible = !genTask.reasoningVisible">
-          <span class="reasoning-title">AI 思考中</span>
+          <span class="reasoning-title">ai thinking</span>
           <span class="reasoning-toggle">{{ genTask.reasoningVisible ? "收起" : "展开" }}</span>
         </div>
         <div v-if="genTask.reasoningVisible" ref="reasonBodyEl" class="reasoning-body">{{ genTask.reasoningContent }}</div>
@@ -734,8 +734,10 @@ watch(() => genTask.phase, (p) => {
   user-select: none;
 }
 .reasoning-title {
+  font-family: "MinecrafterReg", "Monaco", monospace;
   color: rgba(255, 255, 255, 0.55);
   font-size: 13px;
+  letter-spacing: 1px;
 }
 .reasoning-toggle {
   color: wheat;

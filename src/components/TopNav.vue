@@ -1,9 +1,9 @@
 <template>
   <nav class="topnav">
     <div class="topnav-tabs">
-      <router-link to="/ide" class="tab" :class="{ active: act('ide'), busy: ideBusy }">IDE</router-link>
-      <router-link to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }">CHAT</router-link>
-      <router-link to="/skills" class="tab" :class="{ active: act('skills') }">SKILL</router-link>
+      <router-link to="/ide" class="tab" :class="{ active: act('ide'), busy: ideBusy }">ide</router-link>
+      <router-link to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }">chat</router-link>
+      <router-link to="/skills" class="tab" :class="{ active: act('skills') }">skill</router-link>
     </div>
     <div class="topnav-status">{{ statusText }}</div>
   </nav>
@@ -49,6 +49,7 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
+    font-family: "MinecrafterAlt", sans-serif;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -63,9 +64,9 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
 }
 
 .tab {
-    font-family: "ZhuoKai", sans-serif;
     font-size: 15px;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
     color: rgba(255, 255, 255, 0.62);
     text-decoration: none;
     padding: 4px 14px;

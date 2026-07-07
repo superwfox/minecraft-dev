@@ -11,7 +11,7 @@ import { ref, onMounted, onUnmounted } from "vue";
 
 // 缓解等待焦虑：非流式后没有逐字思考流，用单色高光扫过这些状态词表示「仍在工作」。
 // 每个词高光扫过 3 次后停住（CSS iteration-count: 3），静置片刻再淡出切换 —— 避免高光刚露头就被下一个词打断。
-const WORDS = ["WORKING", "THINKING", "DELIBERATING", "FOSTERING", "LEAFING"];
+const WORDS = ["working", "thinking", "deliberating", "fostering", "leafing"];
 const word = ref(WORDS[0]);
 let i = 0;
 let timer: any = null;
@@ -35,10 +35,10 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 
 .tm-word {
   position: relative;
-  font-family: "Monaco", "Menlo", monospace;
-  font-weight: 700;
+  font-family: "MinecrafterReg", "Monaco", "Menlo", monospace;
+  font-weight: 400;
   font-size: 15px;
-  letter-spacing: 3px;
+  letter-spacing: 2px;
   color: rgba(255, 255, 255, 0.72); /* 静态可读底色 */
   white-space: nowrap;
 }

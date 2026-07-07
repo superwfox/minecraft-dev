@@ -51,4 +51,7 @@ public/maven.yml
 #reference
 font
 scripts
+!scripts/
+scripts/*
+!scripts/build-minecraft-fonts.mjs
 planReference

@@ -24,7 +24,7 @@ async function callReasoner(
     url: string, key: string, model: string, system: string, user: string,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse（推理响应块数很多）会超
-    // CPU 被硬杀 → 澄清「多次无响应」。改为非流式，只做 1 次 resp.json()。代价：失去「AI 思考中」逐字流。
+    // CPU 被硬杀 → 澄清「多次无响应」。改为非流式，只做 1 次 resp.json()。代价：失去逐字流。
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), CLARIFY_TIMEOUT_MS);
     try {

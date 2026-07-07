@@ -91,6 +91,22 @@ onMounted(() => {
   font-display: swap;
 }
 
+@font-face {
+  font-family: "MinecrafterAlt";
+  src: url("/minecrafter-alt.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MinecrafterReg";
+  src: url("/minecrafter-reg.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 * {
   margin: 0;
   padding: 0;
