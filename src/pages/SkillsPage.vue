@@ -8,6 +8,11 @@
         <template v-else-if="skillsState.error">加载失败：{{ skillsState.error }}（可稍后刷新）</template>
         <template v-else>像安排手牌一样挑选能力 · 已收录 {{ skillsState.all.length }} 个</template>
       </div>
+      <label class="sk-search-wrap">
+        <span class="sk-search-icon" aria-hidden="true">⌕</span>
+        <input v-model="query" class="sk-search" type="search" placeholder="SEARCH SKILL" aria-label="搜索技能">
+        <span class="sk-search-count">{{ visibleSkillCount }}</span>
+      </label>
       <div class="sk-contrib"><SkillSubmit/></div>
     </div>
 
@@ -152,6 +157,7 @@ const baseW = 184, baseH = 256;
 
 // ── 卡片（本地态，持退场/入场瞬态）──
 const cards = ref<SkCard[]>([]);
+const query = ref("");
 function buildCards() {
     const list: SkCard[] = [{
         id: "__readme__", kind: "readme", color: "cocoa",
@@ -171,13 +177,26 @@ function buildCards() {
 watch(() => skillsState.all, buildCards, { immediate: true });
 
 const colorOf = (id: string) => cards.value.find((c) => c.id === id)?.color ?? "wheat";
+const normalizedQuery = computed(() => query.value.trim().toLocaleLowerCase());
+
+function matchesQuery(c: SkCard): boolean {
+    if (c.kind === "readme" || !normalizedQuery.value) return true;
+    const b = c.brief!;
+    return [b.name, b.id, b.author, b.capability, b.description, ...(b.tags || [])]
+        .some((value) => value?.toLocaleLowerCase().includes(normalizedQuery.value));
+}
+const visibleSkillCount = computed(() => cards.value.filter((c) =>
+    c.kind === "skill" && !isSelected(c.brief!.id) && matchesQuery(c),
+).length);
 
 // 卡是否在手牌区显示：README 始终；skill 仅未选（退场动画期间仍显示）
 function cardShown(c: SkCard): boolean {
-    return !!c.exiting || c.kind === "readme" || !isSelected(c.brief!.id);
+    return !!c.exiting || c.kind === "readme" || (!isSelected(c.brief!.id) && matchesQuery(c));
 }
 // 参与扇形布局的卡（退场中的不占位 → 手牌立即收拢）
-const laidOut = computed(() => cards.value.filter((c) => !c.exiting && (c.kind === "readme" || !isSelected(c.brief!.id))));
+const laidOut = computed(() => cards.value.filter((c) =>
+    !c.exiting && (c.kind === "readme" || (!isSelected(c.brief!.id) && matchesQuery(c))),
+));
 const chosen = computed(() => selectedBriefs());
 
 // ── 扇形布局 ──
@@ -319,6 +338,8 @@ function openCard(c: SkCard) {
     else detail.value = c.brief || null;
 }
 function onKey(e: KeyboardEvent) {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
     if (e.key === "Escape") { readmeOpen.value = false; detail.value = null; return; }
     if (e.key === " " || e.code === "Space") {
         if (readmeOpen.value || detail.value) { e.preventDefault(); readmeOpen.value = false; detail.value = null; return; }
@@ -405,21 +426,63 @@ onUnmounted(() => {
 
 .sk-head {
     position: fixed;
-    top: 92px;
+    top: 124px;
     left: 0;
     right: 0;
     z-index: 10;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
+    gap: 10px;
     pointer-events: none;
     text-align: center;
     padding: 0 24px;
 }
 .sk-title { font-family: "MinecrafterAlt", "ZhuoKai", sans-serif; font-size: 22px; color: #d1c8b6; }
 .sk-sub { font-size: 12px; color: rgba(209, 200, 182, 0.48); letter-spacing: 0.03em; }
-.sk-contrib { margin-top: 10px; pointer-events: auto; }
+.sk-contrib { margin-top: 8px; pointer-events: auto; }
+.sk-search-wrap {
+    position: absolute;
+    top: 2px;
+    right: max(24px, calc((100vw - 1120px) / 2));
+    width: 230px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 10px;
+    border: 1px solid rgba(209, 200, 182, 0.18);
+    border-radius: 7px;
+    background: rgba(4, 4, 2, 0.68);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    pointer-events: auto;
+    transition: border-color 0.18s ease, background 0.18s ease;
+}
+.sk-search-wrap:focus-within {
+    border-color: rgba(213, 201, 172, 0.48);
+    background: rgba(9, 9, 7, 0.82);
+}
+.sk-search-icon { color: rgba(209, 200, 182, 0.46); font-size: 13px; }
+.sk-search {
+    min-width: 0;
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #f4f1ec;
+    font: 10px/1 "Monaco", monospace;
+    letter-spacing: 0.06em;
+}
+.sk-search::placeholder { color: rgba(209, 200, 182, 0.4); opacity: 1; }
+.sk-search-count {
+    min-width: 20px;
+    padding-left: 8px;
+    border-left: 1px solid rgba(209, 200, 182, 0.12);
+    color: rgba(209, 200, 182, 0.46);
+    font: 10px/1 "Monaco", monospace;
+    text-align: right;
+}
 
 .sk-edge-hints {
     position: fixed;
@@ -596,5 +659,16 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
     .sk-card, .sk-card-inner { transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear; }
+}
+
+@media (max-width: 900px) {
+    .sk-head { top: 104px; gap: 8px; padding-inline: 16px; }
+    .sk-search-wrap {
+        position: static;
+        width: min(280px, calc(100vw - 32px));
+        margin-top: 4px;
+    }
+    .sk-contrib { margin-top: 4px; }
+    .sk-stage { top: 56%; }
 }
 </style>
