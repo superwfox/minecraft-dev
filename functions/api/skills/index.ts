@@ -82,8 +82,8 @@ export const onRequestGet: PagesFunction<SkillEnv> = async (context) => {
         context.waitUntil((async () => {
             try {
                 await env.TASKS.put(CACHE_KEY, payload, { expirationTtl: CACHE_TTL });
-                // 仅在拿到非空数据时刷新兜底，避免空态覆盖好数据
-                if (data.skills.length || data.readme) {
+                // 只有技能目录完整时才刷新兜底；README 单独成功不能覆盖已有的完整列表。
+                if (data.skills.length) {
                     await env.TASKS.put(BACKUP_KEY, payload, { expirationTtl: BACKUP_TTL });
                 }
             } catch { /* ignore */ }

@@ -10,19 +10,21 @@ export const BRANCHES = ["main", "master"];   // 仓库默认分支为 main，�
 export interface SkillEnv {
     TASKS: KVNamespace;
     GITHUB_TOKEN?: string;
+    GITHUB_PAT?: string;
 }
 
-export function ghHeaders(env: { GITHUB_TOKEN?: string }): Record<string, string> {
+export function ghHeaders(env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string }): Record<string, string> {
     const h: Record<string, string> = {
         "User-Agent": "tahai-skills",       // api.github.com 要求 UA，否则 403
         "Accept": "application/vnd.github+json",
     };
-    if (env.GITHUB_TOKEN) h["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
+    const token = env.GITHUB_TOKEN || env.GITHUB_PAT;
+    if (token) h["Authorization"] = `Bearer ${token}`;
     return h;
 }
 
 /** 取首个可用分支的顶层目录列表 */
-export async function listRoot(env: { GITHUB_TOKEN?: string }): Promise<{ branch: string; entries: any[] } | null> {
+export async function listRoot(env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string }): Promise<{ branch: string; entries: any[] } | null> {
     for (const branch of BRANCHES) {
         try {
             const r = await fetch(`https://api.github.com/repos/${REPO}/contents?ref=${branch}`, { headers: ghHeaders(env) });

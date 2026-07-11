@@ -217,16 +217,18 @@ function seededRandom(seed: number) {
 }
 
 const ambientRandom = seededRandom(0x0B51D1A);
-const ambientPixels = Array.from({length: 72}, (_, id) => {
-    // Build a cone from positions alone: points cluster near the source and thin out toward the tail.
-    const progress = 0.025 + Math.pow(ambientRandom(), 1.72) * 0.9;
-    const spread = (ambientRandom() * 2 - 1) * (0.018 + progress * 0.2);
-    const jitter = (ambientRandom() - 0.5) * 0.028;
-    const x = Math.min(0.975, Math.max(0.012, progress + spread + jitter));
-    const y = Math.min(0.975, Math.max(0.012, progress - spread - jitter));
-    const size = Math.round(4 + (1 - progress) * 9 + ambientRandom() * 5);
-    const alpha = (0.08 + Math.pow(1 - progress, 1.45) * (0.42 + ambientRandom() * 0.22)).toFixed(3);
-    const gray = Math.round(112 + ambientRandom() * 72);
+const ambientPixels = Array.from({length: 68}, (_, id) => {
+    // Two fading dotted rays describe the wedge. There is deliberately no filled light field.
+    const progress = 0.03 + Math.pow(ambientRandom(), 1.34) * 0.83;
+    const edgeJitter = (ambientRandom() - 0.5) * (0.02 + progress * 0.025);
+    const onWideEdge = id % 2 === 0;
+    const longAxis = progress * 0.94;
+    const shortAxis = progress * 0.31;
+    const x = Math.min(0.94, Math.max(0.012, (onWideEdge ? longAxis : shortAxis) + edgeJitter));
+    const y = Math.min(0.94, Math.max(0.012, (onWideEdge ? shortAxis : longAxis) - edgeJitter));
+    const size = Math.round(4 + (1 - progress) * 7 + ambientRandom() * 4);
+    const alpha = (0.055 + Math.pow(1 - progress, 1.38) * (0.36 + ambientRandom() * 0.18)).toFixed(3);
+    const gray = Math.round(126 + ambientRandom() * 62);
     const edge = Math.min(214, gray + 28);
     const lift = 5 + ambientRandom() * 9;
     const turn = Math.round((ambientRandom() * 2 - 1) * 105);
@@ -542,10 +544,10 @@ watch(() => genTask.phase, (p) => {
   --graphite-hover: #262626;
   --line: rgba(209, 200, 182, 0.18);
   --line-bright: rgba(209, 200, 182, 0.46);
-  --text: #d1c8b6;
-  --muted: #78736a;
-  --warm: #c6b07d;
-  --warm-light: #d5c9ac;
+  --text: #e8e3d9;
+  --muted: #88847d;
+  --warm: #bcb7ad;
+  --warm-light: #e8e3d9;
   min-height: 100vh;
   width: 100%;
   padding: 100px 16px 120px;
@@ -600,6 +602,7 @@ watch(() => genTask.phase, (p) => {
 .pixel-wedge {
   position: absolute;
   inset: 0;
+  opacity: 0.86;
   will-change: opacity;
 }
 .wedge-swap-enter-active,
@@ -766,20 +769,20 @@ watch(() => genTask.phase, (p) => {
   display: flex;
   padding: 12px 14px 10px;
   border: 1px solid var(--line);
-  border-radius: 4px;
-  background: rgba(4, 4, 2, 0.7);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  border-radius: 12px;
+  background: rgba(5, 5, 3, 0.84);
+  backdrop-filter: blur(22px) saturate(88%);
+  -webkit-backdrop-filter: blur(22px) saturate(88%);
   box-shadow:
     inset 0 1px 0 rgba(244, 241, 236, 0.04),
-    0 10px 30px rgba(0, 0, 0, 0.18);
+    0 14px 38px rgba(0, 0, 0, 0.24);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .composer-input-shell:focus-within {
   border-color: var(--line-bright);
   box-shadow:
     inset 0 1px 0 rgba(244, 241, 236, 0.07),
-    0 0 0 1px rgba(198, 176, 125, 0.08),
+    0 0 0 1px rgba(232, 227, 217, 0.08),
     0 12px 32px rgba(0, 0, 0, 0.22);
 }
 .composer.disabled { opacity: 0.58; }
@@ -840,7 +843,7 @@ watch(() => genTask.phase, (p) => {
   caret-color: var(--warm-light);
   font: 400 15px/1.48 system-ui, "Noto Sans SC", "PingFang SC", sans-serif;
 }
-.composer-input::placeholder { color: rgba(209, 200, 182, 0.38); opacity: 1; }
+.composer-input::placeholder { color: rgba(232, 227, 217, 0.4); opacity: 1; }
 .composer-actions {
   display: flex;
   align-items: center;
@@ -859,12 +862,12 @@ watch(() => genTask.phase, (p) => {
   justify-content: center;
   gap: 6px;
   padding: 0 11px;
-  border-radius: 4px;
-  border: 1px solid rgba(209, 200, 182, 0.22);
-  border-bottom-color: rgba(209, 200, 182, 0.1);
-  background: rgba(4, 4, 2, 0.66);
-  color: rgba(209, 200, 182, 0.76);
-  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(244, 241, 236, 0.055);
+  border-radius: 8px;
+  border: 1px solid rgba(232, 227, 217, 0.2);
+  border-bottom-color: rgba(232, 227, 217, 0.09);
+  background: rgba(8, 8, 6, 0.78);
+  color: rgba(232, 227, 217, 0.76);
+  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, 0.05);
   font: 12px/1 system-ui, "Noto Sans SC", sans-serif;
   cursor: pointer;
   transition: top 0.1s, color 0.16s, border-color 0.16s, background 0.16s, box-shadow 0.1s;
@@ -947,19 +950,19 @@ watch(() => genTask.phase, (p) => {
   flex-shrink: 0;
   min-width: 76px;
   background: var(--warm-light);
-  border-color: #e1d8c4;
-  border-bottom-color: #8f815f;
-  color: #040402;
-  box-shadow: 0 2px 0 #5e5137, inset 0 1px 0 rgba(255, 255, 255, 0.34);
+  border-color: #f2eee6;
+  border-bottom-color: #817d74;
+  color: #070706;
+  box-shadow: 0 2px 0 #504d47, inset 0 1px 0 #fff;
   font-weight: 700;
 }
 .send-btn:hover:not(:disabled) {
-  background: #e1d8c4;
-  border-color: #f4f1ec;
-  border-bottom-color: #9a8354;
+  background: #f2eee6;
+  border-color: #fff;
+  border-bottom-color: #8f8a80;
 }
 .send-btn:active:not(:disabled) {
-  box-shadow: 0 1px 0 #5e5137, inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  box-shadow: 0 1px 0 #504d47, inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .esc-hint {

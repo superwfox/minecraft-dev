@@ -103,7 +103,9 @@ export function fetchSkills(force = false): Promise<void> {
     if (inflight) return inflight;
     skillsState.loading = true;
     skillsState.error = "";
-    inflight = fetch("/api/skills")
+    const url = force ? "/api/skills?fresh=1" : "/api/skills";
+    // 技能索引本身已有 KV 缓存；浏览器层不再缓存，避免一次降级空响应黏住页面两分钟。
+    inflight = fetch(url, { cache: "no-store" })
         .then(async (r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const data = await r.json();
