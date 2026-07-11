@@ -3,6 +3,7 @@
     <g v-for="e in drawn" :key="e.id">
       <!-- 命中区(粗透明) -->
       <path :d="e.d" class="hit" @click.stop="bp.removeEdge(e.id)"/>
+      <path :d="e.d" class="wire underlay" :stroke-width="e.exec ? 7 : 6"/>
       <!-- 可见线 -->
       <path :d="e.d" :stroke="e.color" :stroke-width="e.exec ? 3 : 2" class="wire" :class="{exec: e.exec}"/>
     </g>
@@ -46,8 +47,9 @@ const tempD = computed(() => props.temp ? edgePath(props.temp.from, props.temp.t
 <style scoped>
 .bp-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 .wire { fill: none; pointer-events: none; stroke-linecap: round; }
+.wire.underlay { stroke: #090806; }
 .wire.exec { filter: drop-shadow(0 0 2px rgba(255,255,255,0.4)); }
 .wire.temp { stroke-dasharray: 6 5; opacity: 0.85; }
 .hit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
-.hit:hover + .wire { stroke-width: 4; }
+.hit:hover ~ .wire:not(.underlay) { stroke-width: 4; }
 </style>

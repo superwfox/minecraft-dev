@@ -236,8 +236,8 @@ function onClick(node: FlatNode) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: rgba(8, 8, 10, 0.6);
-  border-right: 1px solid rgba(255,255,255,0.06);
+  background: #291E0F;
+  border-right: 1px solid #867053;
   min-width: 0;
   width: 100%;
 }
@@ -248,9 +248,10 @@ function onClick(node: FlatNode) {
   padding: 10px 14px;
   font-size: 11px;
   color: rgba(255,255,255,0.45);
+  background: #33312C;
+  border-bottom: 1px solid #867053;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  letter-spacing: 0;
 }
 .tree-count {
   font-family: monospace;
@@ -291,7 +292,8 @@ function onClick(node: FlatNode) {
   align-items: center;
   gap: 6px;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  background: #33312C;
+  border-bottom: 1px solid #867053;
 }
 .search-icon {
   color: rgba(255,255,255,0.3);
@@ -300,8 +302,8 @@ function onClick(node: FlatNode) {
 .search-input {
   flex: 1;
   min-width: 0;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid transparent;
+  background: #291E0F;
+  border: 1px solid #867053;
   border-radius: 6px;
   padding: 4px 8px;
   color: rgba(255,255,255,0.85);
@@ -310,7 +312,7 @@ function onClick(node: FlatNode) {
   outline: none;
   transition: border-color 0.15s;
 }
-.search-input:focus { border-color: rgba(245,222,179,0.3); }
+.search-input:focus { border-color: #AF9876; }
 .search-input::placeholder { color: rgba(255,255,255,0.25); }
 .search-clear {
   color: rgba(255,255,255,0.4);
@@ -339,10 +341,10 @@ function onClick(node: FlatNode) {
   height: 24px;
   transition: background 0.1s;
 }
-.tree-row:hover { background: rgba(255,255,255,0.04); }
+.tree-row:hover { background: rgba(255,255,255,0.045); }
 .tree-row.active {
-  background: rgba(245,222,179,0.1);
-  color: wheat;
+  background: rgba(175,152,118,0.12);
+  color: #AF9876;
 }
 .tree-row.active::before {
   content: "";
@@ -350,13 +352,13 @@ function onClick(node: FlatNode) {
   left: 0;
   width: 2px;
   height: 100%;
-  background: wheat;
+  background: #AF9876;
 }
 .tree-row.is-category {
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 1.2px;
-  color: rgba(255,255,255,0.55);
+  letter-spacing: 0;
+  color: var(--text-secondary, #abb6ba);
   height: 26px;
   margin-top: 4px;
 }

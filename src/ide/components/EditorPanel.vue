@@ -319,7 +319,7 @@ watch(() => props.bottomGutter, (g) => {
   flex-direction: column;
   min-width: 0;
   position: relative;
-  background: #0d0d0f;
+  background: #000;
 }
 .breadcrumbs {
   display: flex;
@@ -327,17 +327,17 @@ watch(() => props.bottomGutter, (g) => {
   gap: 12px;
   padding: 7px 16px;
   font-family: "Monaco", monospace;
-  background: rgba(13, 13, 15, 0.95);
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  background: #33312C;
+  border-bottom: 1px solid #867053;
   flex-shrink: 0;
   height: 32px;
   overflow: hidden;
 }
 .crumb-name {
-  color: wheat;
+  color: #AF9876;
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.3px;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .crumb-role {
@@ -346,7 +346,7 @@ watch(() => props.bottomGutter, (g) => {
   padding: 2px 9px;
   border-radius: 5px;
   background: rgba(255,255,255,0.04);
-  letter-spacing: 0.3px;
+  letter-spacing: 0;
   white-space: nowrap;
   font-family: "ZhuoKai", "Monaco", monospace;
 }
@@ -363,11 +363,11 @@ watch(() => props.bottomGutter, (g) => {
   font-size: 10px;
   padding: 1px 8px;
   border-radius: 4px;
-  background: rgba(245,222,179,0.1);
-  color: wheat;
+  background: rgba(175,152,118,0.12);
+  color: #AF9876;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  border: 1px solid rgba(245,222,179,0.15);
+  letter-spacing: 0;
+  border: 1px solid rgba(134,112,83,0.55);
 }
 .editor-area {
   flex: 1;
@@ -402,6 +402,6 @@ watch(() => props.bottomGutter, (g) => {
 .empty-hint {
   font-size: 11px;
   color: rgba(255,255,255,0.25);
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
 }
 </style>

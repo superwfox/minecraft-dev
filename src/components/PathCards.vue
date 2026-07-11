@@ -102,11 +102,11 @@ type CardKind = {
 };
 
 const palette: Record<string, { bg: string; text: string; dot: string }> = {
-    cream:  { bg: "#f6ece0", text: "#5a4632", dot: "rgba(150,100,60,.5)"  },
-    wheat:  { bg: "#e9c88f", text: "#5a4226", dot: "rgba(120,78,38,.5)"   },
-    orange: { bg: "#e0954a", text: "#fff7ec", dot: "rgba(255,250,240,.6)" },
-    brown:  { bg: "#9a6230", text: "#f8ead8", dot: "rgba(255,245,230,.55)"},
-    cocoa:  { bg: "#6f4322", text: "#f3e2cf", dot: "rgba(255,240,222,.5)" },
+    cream:  { bg: "#d1c8b6", text: "#040402", dot: "rgba(4,4,2,.28)"       },
+    wheat:  { bg: "#c6b07d", text: "#040402", dot: "rgba(4,4,2,.34)"       },
+    orange: { bg: "#423725", text: "#f4f1ec", dot: "rgba(213,201,172,.4)"  },
+    brown:  { bg: "#262626", text: "#d1c8b6", dot: "rgba(209,200,182,.3)"  },
+    cocoa:  { bg: "#090907", text: "#d1c8b6", dot: "rgba(209,200,182,.34)" },
 };
 const colorKeys = ["wheat", "orange", "cream", "brown", "cocoa"];
 
@@ -442,7 +442,7 @@ onUnmounted(() => {
     z-index: 15;
     overflow: hidden;
     user-select: none;
-    background: rgba(8, 6, 4, 0.82);
+    background: rgba(0, 0, 0, 0.82);
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
     animation: pcFadeIn 0.3s ease-out;
@@ -463,9 +463,9 @@ onUnmounted(() => {
     pointer-events: none;
     text-align: center;
 }
-.pc-level { font-size: 12px; letter-spacing: 0.08em; color: wheat; opacity: 0.7; }
-.pc-title { font-size: 20px; color: #f3e7d4; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5); }
-.pc-sub { font-size: 12px; color: rgba(255, 245, 235, 0.45); letter-spacing: 0.03em; }
+.pc-level { font-size: 12px; letter-spacing: 0.08em; color: #c6b07d; opacity: 0.8; }
+.pc-title { font-size: 20px; color: #d1c8b6; }
+.pc-sub { font-size: 12px; color: rgba(209, 200, 182, 0.45); letter-spacing: 0.03em; }
 .pc-sub kbd {
     padding: 1px 6px; border-radius: 5px; border: 1px solid rgba(255, 240, 225, 0.3);
     background: rgba(255, 255, 255, 0.08); font-size: 11px;
@@ -477,11 +477,11 @@ onUnmounted(() => {
 }
 .pc-hint {
     display: flex; flex-direction: column; align-items: center; gap: 2px;
-    font-size: 13px; letter-spacing: 0.12em; color: rgba(255, 245, 235, 0.4);
+    font-size: 13px; letter-spacing: 0.12em; color: rgba(209, 200, 182, 0.4);
     transition: color 0.2s ease, transform 0.2s cubic-bezier(.34, 1.56, .64, 1);
 }
 .pc-hint .ar { font-size: 22px; line-height: 1; }
-.pc-hint.on { color: #8fd16a; transform: scale(1.22); }
+.pc-hint.on { color: #c6b07d; transform: scale(1.14); }
 
 .pc-fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1500; }
 
@@ -493,15 +493,16 @@ onUnmounted(() => {
 .pc-card.grabbing { transition: none; }
 .pc-card-inner {
     position: relative; width: 100%; height: 100%;
-    border-radius: 18px; padding: 20px 16px 16px;
+    border-radius: 10px; padding: 20px 16px 16px;
     display: flex; flex-direction: column; gap: 8px;
     cursor: grab; touch-action: none; will-change: transform;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    background-image: linear-gradient(155deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .06));
+    border: 1px solid rgba(209, 200, 182, 0.14);
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.38);
+    background-image: linear-gradient(155deg, rgba(244, 241, 236, .08), rgba(0, 0, 0, .04));
     transition: transform 0.55s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.4s ease;
 }
-.pc-card-inner.active { box-shadow: 0 12px 44px rgba(255, 180, 120, .28), 0 8px 24px rgba(0, 0, 0, .5); }
-.pc-card-inner.grabbing { cursor: grabbing; box-shadow: 0 16px 60px rgba(255, 180, 120, .3), 0 12px 30px rgba(0, 0, 0, .55); }
+.pc-card-inner.active { box-shadow: 0 0 0 1px rgba(198, 176, 125, .5), 0 18px 46px rgba(0, 0, 0, .48); }
+.pc-card-inner.grabbing { cursor: grabbing; box-shadow: 0 0 0 1px rgba(198, 176, 125, .7), 0 24px 60px rgba(0, 0, 0, .58); }
 .pc-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pc-card-title { position: relative; z-index: 2; font-size: 17px; font-weight: 800; line-height: 1.3; }
 .pc-card-summary {
@@ -519,20 +520,20 @@ onUnmounted(() => {
 }
 .pc-preview-box {
     width: 92vw; height: calc(100vh - 116px); max-width: 1400px;
-    background: rgba(20, 16, 12, 0.96); border: 1px solid rgba(255, 240, 225, 0.18);
-    border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;
+    background: rgba(4, 4, 2, 0.94); border: 1px solid rgba(209, 200, 182, 0.18);
+    border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
 }
 .pc-preview-head {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 10px 14px 10px 18px; color: #f3e7d4; font-size: 15px;
+    padding: 10px 14px 10px 18px; color: #d1c8b6; font-size: 15px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .pc-preview-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-preview-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .pc-tool {
     min-width: 32px; height: 30px; padding: 0 8px;
-    border: 1px solid rgba(255, 240, 225, 0.22); background: rgba(255, 255, 255, 0.06);
-    color: #f3e7d4; border-radius: 8px; font-size: 14px; line-height: 1; cursor: pointer;
+    border: 1px solid rgba(209, 200, 182, 0.22); background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6; border-radius: 4px; font-size: 14px; line-height: 1; cursor: pointer;
 }
 .pc-tool:hover { background: rgba(255, 255, 255, 0.16); }
 .pc-tool.close { font-size: 20px; border-color: transparent; background: transparent; }
@@ -580,10 +581,10 @@ onUnmounted(() => {
 }
 .pc-reject-input {
     width: min(420px, 80vw);
-    background: rgba(20, 16, 12, 0.9); border: 1px solid rgba(255, 240, 225, 0.28);
-    border-radius: 10px; padding: 10px 14px; color: #f3e7d4; font-size: 14px; outline: none;
+    background: rgba(4, 4, 2, 0.86); border: 1px solid rgba(209, 200, 182, 0.28);
+    border-radius: 4px; padding: 10px 14px; color: #f4f1ec; font-size: 14px; outline: none;
 }
-.pc-reject-input:focus { border-color: wheat; }
+.pc-reject-input:focus { border-color: #c6b07d; }
 
 .pc-foot {
     position: fixed; left: 0; right: 0; bottom: 24px; z-index: 700;
@@ -593,23 +594,23 @@ onUnmounted(() => {
 .pc-foot-spacer { flex: 1; }
 .pc-nav {
     width: 38px; height: 38px; flex-shrink: 0;
-    border: 1px solid rgba(255, 240, 225, 0.28); background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4; border-radius: 10px; font-size: 20px; line-height: 1; cursor: pointer;
+    border: 1px solid rgba(209, 200, 182, 0.28); background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6; border-radius: 4px; font-size: 20px; line-height: 1; cursor: pointer;
     transition: transform 0.15s ease, background 0.15s ease;
 }
 .pc-nav:hover:not(:disabled) { background: rgba(255, 255, 255, 0.18); transform: translateY(-1px); }
 .pc-nav:disabled { opacity: 0.25; cursor: not-allowed; }
 .pc-btn {
-    border: 1px solid rgba(255, 240, 225, 0.28); background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4; border-radius: 11px; padding: 9px 18px; font-size: 14px; cursor: pointer;
+    border: 1px solid rgba(209, 200, 182, 0.28); background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6; border-radius: 4px; padding: 8px 18px; font-size: 13px; cursor: pointer;
     transition: transform 0.15s ease, background 0.15s ease;
 }
 .pc-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.18); transform: translateY(-1px); }
 .pc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .pc-btn.ghost { background: transparent; opacity: 0.7; }
 .pc-btn.ghost:hover:not(:disabled) { opacity: 1; background: rgba(255, 255, 255, 0.06); }
-.pc-btn.primary { background: wheat; color: #1c1812; border-color: wheat; font-weight: 700; }
-.pc-btn.primary:hover:not(:disabled) { background: #f0d9a8; }
+.pc-btn.primary { background: #d5c9ac; color: #040402; border-color: #e1d8c4; font-weight: 700; }
+.pc-btn.primary:hover:not(:disabled) { background: #e1d8c4; }
 
 @media (prefers-reduced-motion: reduce) {
     .pc-card, .pc-card-inner, .pc-hint { transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear; }

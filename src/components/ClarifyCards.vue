@@ -91,12 +91,12 @@ type CardKind = {
 };
 
 const palette: Record<string, { bg: string; text: string; dot: string }> = {
-    cream:  { bg: "#f6ece0", text: "#5a4632", dot: "rgba(150,100,60,.5)"  },
-    wheat:  { bg: "#e9c88f", text: "#5a4226", dot: "rgba(120,78,38,.5)"   },
-    orange: { bg: "#e0954a", text: "#fff7ec", dot: "rgba(255,250,240,.6)" },
-    brown:  { bg: "#9a6230", text: "#f8ead8", dot: "rgba(255,245,230,.55)"},
-    cocoa:  { bg: "#6f4322", text: "#f3e2cf", dot: "rgba(255,240,222,.5)" },
-    gray:   { bg: "#b4a695", text: "#403728", dot: "rgba(255,250,242,.6)" },
+    cream:  { bg: "#d1c8b6", text: "#040402", dot: "rgba(4,4,2,.28)"       },
+    wheat:  { bg: "#c6b07d", text: "#040402", dot: "rgba(4,4,2,.34)"       },
+    orange: { bg: "#423725", text: "#f4f1ec", dot: "rgba(213,201,172,.4)"  },
+    brown:  { bg: "#262626", text: "#d1c8b6", dot: "rgba(209,200,182,.3)"  },
+    cocoa:  { bg: "#090907", text: "#d1c8b6", dot: "rgba(209,200,182,.34)" },
+    gray:   { bg: "#4a4a4a", text: "#f4f1ec", dot: "rgba(244,241,236,.32)" },
 };
 const colorKeys = ["cream", "wheat", "orange", "brown", "cocoa", "gray"];
 const sizeFactor: Record<string, number> = { s: 0.86, m: 1, l: 1.16 };
@@ -452,7 +452,7 @@ onUnmounted(() => {
     z-index: 15;
     overflow: hidden;
     user-select: none;
-    background: rgba(8, 6, 4, 0.82);
+    background: rgba(0, 0, 0, 0.82);
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
     animation: ccFadeIn 0.3s ease-out;
@@ -476,19 +476,19 @@ onUnmounted(() => {
 .cc-progress {
     font-size: 12px;
     letter-spacing: 0.08em;
-    color: wheat;
+    color: #c6b07d;
     opacity: 0.7;
 }
 .cc-question {
     font-size: 20px;
     line-height: 1.4;
-    color: #f3e7d4;
+    color: #d1c8b6;
     max-width: 640px;
     text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
 .cc-sub {
     font-size: 12px;
-    color: rgba(255, 245, 235, 0.45);
+    color: rgba(209, 200, 182, 0.45);
     letter-spacing: 0.04em;
 }
 
@@ -509,11 +509,11 @@ onUnmounted(() => {
     gap: 2px;
     font-size: 13px;
     letter-spacing: 0.12em;
-    color: rgba(255, 245, 235, 0.4);
+    color: rgba(209, 200, 182, 0.4);
     transition: color 0.2s ease, transform 0.2s cubic-bezier(.34, 1.56, .64, 1);
 }
 .cc-hint .ar { font-size: 22px; line-height: 1; }
-.cc-hint.on { color: #8fd16a; transform: scale(1.22); }
+.cc-hint.on { color: #c6b07d; transform: scale(1.14); }
 
 .cc-fx {
     position: fixed;
@@ -544,7 +544,7 @@ onUnmounted(() => {
     position: relative;
     width: 100%;
     height: 100%;
-    border-radius: 18px;
+    border-radius: 10px;
     padding: 18px 16px;
     display: flex;
     flex-direction: column;
@@ -552,13 +552,14 @@ onUnmounted(() => {
     cursor: grab;
     touch-action: none;
     will-change: transform;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    background-image: linear-gradient(155deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .06));
+    border: 1px solid rgba(209, 200, 182, 0.14);
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.38);
+    background-image: linear-gradient(155deg, rgba(244, 241, 236, .08), rgba(0, 0, 0, .04));
     transition: transform 0.55s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.4s ease;
 }
-.cc-card-inner.active { box-shadow: 0 10px 40px rgba(255, 180, 120, .2), 0 8px 24px rgba(0, 0, 0, .5); }
-.cc-card-inner.grabbing { cursor: grabbing; box-shadow: 0 16px 60px rgba(255, 180, 120, .3), 0 12px 30px rgba(0, 0, 0, .55); }
-.cc-card-inner.selected { box-shadow: 0 12px 44px rgba(143, 209, 106, .35), 0 8px 24px rgba(0, 0, 0, .5); }
+.cc-card-inner.active { box-shadow: 0 0 0 1px rgba(198, 176, 125, .5), 0 18px 46px rgba(0, 0, 0, .48); }
+.cc-card-inner.grabbing { cursor: grabbing; box-shadow: 0 0 0 1px rgba(198, 176, 125, .7), 0 24px 60px rgba(0, 0, 0, .58); }
+.cc-card-inner.selected { box-shadow: 0 0 0 2px rgba(213, 201, 172, .72), 0 18px 48px rgba(0, 0, 0, .52); }
 .cc-card-inner.custom { background-image: linear-gradient(155deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .12)); }
 
 .cc-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -577,9 +578,9 @@ onUnmounted(() => {
     z-index: 2;
     font-size: 11px;
     padding: 2px 8px;
-    border-radius: 8px;
-    background: rgba(60, 120, 40, 0.85);
-    color: #eaffd8;
+    border-radius: 4px;
+    background: #d5c9ac;
+    color: #040402;
     letter-spacing: 0.04em;
 }
 
@@ -598,15 +599,15 @@ onUnmounted(() => {
 }
 .cc-custom-input {
     width: min(360px, 80vw);
-    background: rgba(20, 16, 12, 0.9);
-    border: 1px solid rgba(255, 240, 225, 0.28);
-    border-radius: 10px;
+    background: rgba(4, 4, 2, 0.86);
+    border: 1px solid rgba(209, 200, 182, 0.28);
+    border-radius: 4px;
     padding: 10px 14px;
-    color: #f3e7d4;
+    color: #f4f1ec;
     font-size: 14px;
     outline: none;
 }
-.cc-custom-input:focus { border-color: wheat; }
+.cc-custom-input:focus { border-color: #c6b07d; }
 
 .cc-foot {
     position: fixed;
@@ -625,35 +626,35 @@ onUnmounted(() => {
 }
 .cc-foot-spacer { flex: 1; }
 .cc-btn {
-    border: 1px solid rgba(255, 240, 225, 0.28);
-    background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4;
-    border-radius: 11px;
-    padding: 9px 20px;
-    font-size: 14px;
+    border: 1px solid rgba(209, 200, 182, 0.28);
+    background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6;
+    border-radius: 4px;
+    padding: 8px 18px;
+    font-size: 13px;
     cursor: pointer;
     transition: transform 0.15s ease, background 0.15s ease;
 }
-.cc-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.18); transform: translateY(-1px); }
+.cc-btn:hover:not(:disabled) { background: rgba(209, 200, 182, 0.1); transform: translateY(-1px); }
 .cc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .cc-btn.ghost { background: transparent; opacity: 0.6; }
 .cc-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
 .cc-btn.primary {
-    background: wheat;
-    color: #1c1812;
-    border-color: wheat;
+    background: #d5c9ac;
+    color: #040402;
+    border-color: #e1d8c4;
     font-weight: 700;
 }
-.cc-btn.primary:hover:not(:disabled) { background: #f0d9a8; }
+.cc-btn.primary:hover:not(:disabled) { background: #e1d8c4; }
 
 .cc-nav {
     width: 38px;
     height: 38px;
     flex-shrink: 0;
-    border: 1px solid rgba(255, 240, 225, 0.28);
-    background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4;
-    border-radius: 10px;
+    border: 1px solid rgba(209, 200, 182, 0.28);
+    background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6;
+    border-radius: 4px;
     font-size: 20px;
     line-height: 1;
     cursor: pointer;
@@ -664,7 +665,7 @@ onUnmounted(() => {
 
 .cc-count {
     font-size: 12px;
-    color: rgba(255, 245, 235, 0.5);
+    color: rgba(209, 200, 182, 0.5);
     letter-spacing: 0.04em;
 }
 

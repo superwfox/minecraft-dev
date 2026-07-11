@@ -34,7 +34,7 @@ export function registerTahaiTheme() {
             {token: "operator", foreground: "b0b0b0"},
         ],
         colors: {
-            "editor.background": "#0d0d0f",
+            "editor.background": "#000000",
             "editor.foreground": "#d8d4cc",
             "editor.lineHighlightBackground": "#16161a",
             "editor.lineHighlightBorder": "#16161a00",
@@ -51,7 +51,7 @@ export function registerTahaiTheme() {
             "editorBracketMatch.background": "#f5deb330",
             "editorBracketMatch.border": "#f5deb360",
             "editorWhitespace.foreground": "#2a2a2e",
-            "editorGutter.background": "#0d0d0f",
+            "editorGutter.background": "#000000",
             "scrollbar.shadow": "#00000000",
             "scrollbarSlider.background": "#ffffff14",
             "scrollbarSlider.hoverBackground": "#ffffff22",
@@ -62,7 +62,7 @@ export function registerTahaiTheme() {
             "editorSuggestWidget.border": "#2a2a2e",
             "editorSuggestWidget.selectedBackground": "#f5deb320",
             "editorOverviewRuler.border": "#00000000",
-            "editorStickyScroll.background": "#0d0d0f",
+            "editorStickyScroll.background": "#000000",
             "editorStickyScrollHover.background": "#16161a",
         },
     });

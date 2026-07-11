@@ -48,6 +48,8 @@
             <div v-if="c.tags.length" class="sk-card-tags">
               <span v-for="t in c.tags" :key="t" class="sk-tag">{{ t }}</span>
             </div>
+            <button v-if="c.kind === 'skill'" type="button" class="sk-card-action"
+                    @pointerdown.stop @click.stop="selectCard(c)">add skill</button>
           </div>
         </div>
       </div>
@@ -61,7 +63,7 @@
       </button>
     </div>
 
-    <div class="sk-hint" :class="{ raised: chosen.length }">向下拖动卡片加入手牌 · 点击 / Space 查看详情</div>
+    <div class="sk-hint" :class="{ raised: chosen.length }">点击 add skill 或向下拖动加入 · 点击卡片 / Space 查看详情</div>
 
     <!-- README 弹层 -->
     <Teleport to="body">
@@ -138,12 +140,12 @@ type SkCard = {
 };
 
 const palette: Record<string, { bg: string; text: string; dot: string }> = {
-    cocoa:  { bg: "#6f4322", text: "#f3e2cf", dot: "rgba(255,240,222,.5)" },
-    wheat:  { bg: "#e9c88f", text: "#5a4226", dot: "rgba(120,78,38,.5)"   },
-    orange: { bg: "#e0954a", text: "#fff7ec", dot: "rgba(255,250,240,.6)" },
-    brown:  { bg: "#9a6230", text: "#f8ead8", dot: "rgba(255,245,230,.55)"},
-    cream:  { bg: "#f6ece0", text: "#5a4632", dot: "rgba(150,100,60,.5)"  },
-    gray:   { bg: "#b4a695", text: "#403728", dot: "rgba(255,250,242,.6)" },
+    cocoa:  { bg: "#090907", text: "#d1c8b6", dot: "rgba(209,200,182,.34)" },
+    wheat:  { bg: "#c6b07d", text: "#040402", dot: "rgba(4,4,2,.34)"       },
+    orange: { bg: "#423725", text: "#f4f1ec", dot: "rgba(213,201,172,.4)"  },
+    brown:  { bg: "#262626", text: "#d1c8b6", dot: "rgba(209,200,182,.3)"  },
+    cream:  { bg: "#d1c8b6", text: "#040402", dot: "rgba(4,4,2,.28)"       },
+    gray:   { bg: "#4a4a4a", text: "#f4f1ec", dot: "rgba(244,241,236,.32)" },
 };
 const skillColors = ["wheat", "orange", "brown", "cream", "gray"];
 const baseW = 184, baseH = 256;
@@ -286,10 +288,16 @@ function endDrag() {
     // 几乎没动 = 点击 → 预览
     if (moved < 8) { openCard(card); return; }
     // 向下拖入手牌（README 不可选 → 回弹）
-    if (zone === "collapse" && card.kind === "skill") {
-        card.exiting = "down";
-        setTimeout(() => { card.exiting = null; addSkill(card.brief!.id); }, 360);
-    }
+    if (zone === "collapse") selectCard(card);
+}
+
+function selectCard(card: SkCard) {
+    if (card.kind !== "skill" || card.exiting || isSelected(card.brief!.id)) return;
+    card.exiting = "down";
+    setTimeout(() => {
+        card.exiting = null;
+        addSkill(card.brief!.id);
+    }, 360);
 }
 
 // 从手牌移出（点 chip）→ 回扇形，入场动画
@@ -409,8 +417,8 @@ onUnmounted(() => {
     text-align: center;
     padding: 0 24px;
 }
-.sk-title { font-family: "ZhuoKai", sans-serif; font-size: 24px; color: #f3e7d4; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5); }
-.sk-sub { font-size: 13px; color: rgba(255, 245, 235, 0.5); letter-spacing: 0.03em; }
+.sk-title { font-family: "MinecrafterAlt", "ZhuoKai", sans-serif; font-size: 22px; color: #d1c8b6; }
+.sk-sub { font-size: 12px; color: rgba(209, 200, 182, 0.48); letter-spacing: 0.03em; }
 .sk-contrib { margin-top: 10px; pointer-events: auto; }
 
 .sk-edge-hints {
@@ -424,11 +432,11 @@ onUnmounted(() => {
 }
 .sk-edge-hint {
     display: flex; flex-direction: column; align-items: center; gap: 2px;
-    font-size: 13px; letter-spacing: 0.12em; color: rgba(255, 245, 235, 0.4);
+    font-size: 12px; letter-spacing: 0.1em; color: rgba(209, 200, 182, 0.4);
     transition: color 0.2s ease, transform 0.2s cubic-bezier(.34, 1.56, .64, 1);
 }
 .sk-edge-hint .ar { font-size: 22px; line-height: 1; }
-.sk-edge-hint.on { color: #8fd16a; transform: scale(1.22); }
+.sk-edge-hint.on { color: #c6b07d; transform: scale(1.14); }
 
 .sk-fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1500; }
 
@@ -446,18 +454,19 @@ onUnmounted(() => {
     position: relative;
     width: 100%;
     height: 100%;
-    border-radius: 18px;
+    border-radius: 10px;
     padding: 16px 15px;
     display: flex;
     flex-direction: column;
     cursor: grab;
     touch-action: none;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    background-image: linear-gradient(155deg, rgba(255, 255, 255, .18), rgba(0, 0, 0, .06));
+    border: 1px solid rgba(209, 200, 182, 0.14);
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
+    background-image: linear-gradient(155deg, rgba(244, 241, 236, .08), rgba(0, 0, 0, .04));
     transition: transform 0.5s cubic-bezier(.34, 1.56, .64, 1), box-shadow 0.35s ease;
 }
-.sk-card-inner.active { box-shadow: 0 12px 44px rgba(255, 180, 120, .28), 0 8px 24px rgba(0, 0, 0, .5); }
-.sk-card-inner.grabbing { cursor: grabbing; box-shadow: 0 16px 60px rgba(143, 209, 106, .3), 0 12px 30px rgba(0, 0, 0, .55); }
+.sk-card-inner.active { box-shadow: 0 0 0 1px rgba(198, 176, 125, .52), 0 18px 46px rgba(0, 0, 0, .46); }
+.sk-card-inner.grabbing { cursor: grabbing; box-shadow: 0 0 0 1px rgba(198, 176, 125, .72), 0 24px 60px rgba(0, 0, 0, .58); }
 .sk-card-inner.readme { background-image: linear-gradient(155deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .14)); }
 
 .sk-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -467,6 +476,23 @@ onUnmounted(() => {
 .sk-card-desc { font-size: 12px; line-height: 1.4; opacity: 0.78; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .sk-card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .sk-tag { font-size: 10px; padding: 1px 7px; border-radius: 7px; background: rgba(0, 0, 0, 0.18); opacity: 0.85; }
+.sk-card-action {
+    align-self: flex-start;
+    margin-top: 3px;
+    height: 26px;
+    padding: 0 9px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.08);
+    color: inherit;
+    font-family: "MinecrafterAlt", sans-serif;
+    font-size: 9px;
+    cursor: pointer;
+    opacity: 0.72;
+    transition: opacity 0.16s ease, background 0.16s ease;
+}
+.sk-card-action:hover { opacity: 1; background: rgba(255, 255, 255, 0.1); }
+.sk-card-action:focus-visible { outline: 2px solid #f4f1ec; outline-offset: 2px; }
 
 /* 已选手牌收集区 */
 .sk-tray {
@@ -480,12 +506,13 @@ onUnmounted(() => {
     flex-wrap: wrap;
     gap: 10px;
     padding: 22px 24px 18px;
-    background: linear-gradient(0deg, rgba(143, 209, 106, 0.06), transparent);
+    background: linear-gradient(0deg, rgba(198, 176, 125, 0.055), transparent);
 }
 .sk-tray-label { position: absolute; top: 4px; left: 0; right: 0; text-align: center; font-size: 12px; letter-spacing: 0.06em; opacity: 0.45; pointer-events: none; }
 .sk-chip {
     border: none;
-    border-radius: 11px;
+    border: 1px solid rgba(209, 200, 182, 0.18);
+    border-radius: 4px;
     padding: 9px 16px;
     cursor: pointer;
     font-weight: 700;
@@ -502,7 +529,7 @@ onUnmounted(() => {
     100% { transform: scale(1) translateY(0); opacity: 1; }
 }
 
-.sk-hint { position: fixed; bottom: 26px; left: 0; right: 0; text-align: center; font-size: 12px; color: rgba(255, 245, 235, 0.4); pointer-events: none; z-index: 501; transition: bottom 0.3s ease; }
+.sk-hint { position: fixed; bottom: 26px; left: 0; right: 0; text-align: center; font-size: 11px; color: rgba(209, 200, 182, 0.4); pointer-events: none; z-index: 501; transition: bottom 0.3s ease; }
 /* 有已选手牌时上移到收集区之上，避免与 chip 重叠 */
 .sk-hint.raised { bottom: calc(13vh + 22px); }
 
@@ -511,7 +538,7 @@ onUnmounted(() => {
     position: fixed;
     inset: 0;
     z-index: 80;
-    background: rgba(8, 6, 4, 0.78);
+    background: rgba(0, 0, 0, 0.72);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     display: flex;
@@ -521,14 +548,14 @@ onUnmounted(() => {
     animation: skFade 0.2s ease-out;
 }
 @keyframes skFade { from { opacity: 0; } to { opacity: 1; } }
-.sk-modal { flex-direction: column; width: min(760px, 94vw); max-height: 100%; border-radius: 18px !important; padding: 0 !important; overflow: hidden; color: #f3e7d4; }
-.sk-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid rgba(255, 240, 225, 0.12); flex-shrink: 0; }
-.sk-modal-title { font-size: 18px; font-weight: 700; color: wheat; }
-.sk-x { border: none; background: transparent; color: rgba(255, 245, 235, 0.6); font-size: 16px; cursor: pointer; padding: 4px 8px; border-radius: 8px; }
-.sk-x:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.sk-modal { flex-direction: column; width: min(760px, 94vw); max-height: 100%; border-radius: 8px !important; padding: 0 !important; overflow: hidden; color: #d1c8b6; }
+.sk-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid rgba(209, 200, 182, 0.12); flex-shrink: 0; }
+.sk-modal-title { font-size: 17px; font-weight: 700; color: #d5c9ac; }
+.sk-x { border: 1px solid rgba(209, 200, 182, 0.14); background: transparent; color: rgba(209, 200, 182, 0.6); font-size: 14px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+.sk-x:hover { border-color: rgba(209, 200, 182, 0.42); color: #f4f1ec; }
 
 .sk-md { padding: 18px 22px 24px; overflow: auto; line-height: 1.65; font-size: 14px; }
-.sk-md :deep(h1), .sk-md :deep(h2), .sk-md :deep(h3) { color: wheat; margin: 16px 0 8px; line-height: 1.3; }
+.sk-md :deep(h1), .sk-md :deep(h2), .sk-md :deep(h3) { color: #d5c9ac; margin: 16px 0 8px; line-height: 1.3; }
 .sk-md :deep(h1) { font-size: 22px; }
 .sk-md :deep(h2) { font-size: 18px; }
 .sk-md :deep(h3) { font-size: 15px; }
@@ -543,13 +570,13 @@ onUnmounted(() => {
 .sk-md :deep(table) { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 12.5px; }
 .sk-md :deep(th), .sk-md :deep(td) { border: 1px solid rgba(255, 240, 225, 0.14); padding: 6px 9px; text-align: left; }
 .sk-md :deep(th) { background: rgba(255, 255, 255, 0.05); color: wheat; }
-.sk-md :deep(a) { color: #ffd98a; }
+.sk-md :deep(a) { color: #c6b07d; }
 .sk-md :deep(hr) { border: none; border-top: 1px solid rgba(255, 240, 225, 0.12); margin: 14px 0; }
 
 .sk-detail { padding: 0 0 18px !important; }
-.sk-detail-meta { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 20px 0; font-size: 12px; color: rgba(255, 245, 235, 0.55); }
-.sk-detail-cap { padding: 10px 20px 0; font-size: 14px; line-height: 1.6; color: #f3e7d4; }
-.sk-detail-desc { padding: 6px 20px 0; font-size: 13px; line-height: 1.55; color: rgba(255, 245, 235, 0.7); }
+.sk-detail-meta { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 20px 0; font-size: 12px; color: rgba(209, 200, 182, 0.52); }
+.sk-detail-cap { padding: 10px 20px 0; font-size: 14px; line-height: 1.6; color: #d1c8b6; }
+.sk-detail-desc { padding: 6px 20px 0; font-size: 13px; line-height: 1.55; color: rgba(209, 200, 182, 0.7); }
 .sk-detail .sk-card-tags { padding: 10px 20px 0; }
 .sk-struct { padding: 14px 20px 0; }
 .sk-struct-title { font-size: 12px; color: rgba(255, 245, 235, 0.5); margin-bottom: 6px; }
@@ -561,9 +588,9 @@ onUnmounted(() => {
 .sk-struct-gen { color: #ffd98a; font-size: 11px; }
 .sk-struct-role { color: rgba(255, 245, 235, 0.55); }
 .sk-detail-actions { padding: 18px 20px 0; display: flex; justify-content: flex-end; }
-.sk-btn { border: 1px solid rgba(255, 240, 225, 0.28); background: rgba(255, 255, 255, 0.08); color: #f3e7d4; border-radius: 11px; padding: 9px 22px; font-size: 14px; cursor: pointer; transition: background 0.15s, transform 0.15s; }
+.sk-btn { border: 1px solid rgba(209, 200, 182, 0.28); background: rgba(209, 200, 182, 0.05); color: #d1c8b6; border-radius: 4px; padding: 8px 20px; font-size: 13px; cursor: pointer; transition: background 0.15s, transform 0.15s; }
 .sk-btn:hover { transform: translateY(-1px); }
-.sk-btn.primary { background: wheat; color: #1c1812; border-color: wheat; font-weight: 700; }
+.sk-btn.primary { background: #d5c9ac; color: #040402; border-color: #e1d8c4; font-weight: 700; }
 .sk-btn.ghost { background: transparent; opacity: 0.7; }
 .sk-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
 

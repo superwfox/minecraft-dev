@@ -1,6 +1,5 @@
 // 社区 skill 库前端状态：拉取 /api/skills 列表 + 记住用户已选 skill（有序，localStorage）。
-// 本期只做浏览 + 选择 UI；skillHeaders() 预留给下一期把已选 skill 注入生成后端用，现返回空对象。
-// 与 byok.ts 同构（reactive 单例 + localStorage + *Headers()）。
+// 选中的 id 由 generateHandler 作为 skillIds 传给规划接口；后端拉取完整 bundle 并注入生成上下文。
 
 import { reactive, ref } from "vue";
 
@@ -117,7 +116,7 @@ export function fetchSkills(force = false): Promise<void> {
     return inflight;
 }
 
-/** 预留：下一期把已选 skill 透传给生成后端用。本期返回空对象。 */
+/** 旧版兼容接口；当前生成链通过请求体中的 skillIds 透传，不再使用请求头。 */
 export function skillHeaders(): Record<string, string> {
     return {};
 }

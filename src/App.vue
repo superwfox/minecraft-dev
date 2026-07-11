@@ -111,6 +111,37 @@ onMounted(() => {
   box-sizing: border-box;
 }
 
+:root {
+  --surface-0: #000000;
+  --surface-1: #040402;
+  --surface-2: #1a1a18;
+  --surface-3: #262626;
+  --line: #474743;
+  --line-strong: #8c8c8c;
+  --oak: #c6b07d;
+  --oak-hover: #d5c9ac;
+  --oak-soft: rgba(198, 176, 125, 0.1);
+  --wheat: #d1c8b6;
+  --cyan: #438091;
+  --text-primary: #d1c8b6;
+  --text-secondary: rgba(209, 200, 182, 0.68);
+  --text-muted: rgba(209, 200, 182, 0.42);
+  /* Compatibility aliases for components that still use the old token names. */
+  --oak-deep: var(--surface-1);
+  --oak-surface: var(--surface-2);
+  --deepslate: var(--surface-2);
+  --oak-border: var(--line);
+  --oak-highlight: var(--line-strong);
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+  background: #000;
+  color: var(--text-primary);
+}
+
 body {
   background: #000;
   font-family: "Monaco", "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -118,15 +149,16 @@ body {
 
 .header-title {
   font-family: "MinecrafterAlt", sans-serif;
-  font-size: 24px;
-  letter-spacing: 0.04em;
+  font-size: 26px;
+  letter-spacing: 0;
+  color: #d1c8b6;
   cursor: pointer;
 }
 
 .right .link {
   font-family: "MinecrafterAlt", sans-serif;
   font-size: 14px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .qq-link {
@@ -149,10 +181,10 @@ body {
   width: 220px;
   padding: 14px 14px 10px;
   border-radius: 14px;
-  background: rgba(28, 24, 18, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
-  color: wheat;
+  background: rgba(8, 9, 10, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.58);
+  color: var(--text-primary);
   font-size: 14px;
   z-index: 60;
   opacity: 0;
@@ -182,14 +214,14 @@ body {
 }
 
 .quota-line b {
-  color: #ffe08a;
+  color: var(--line-strong);
   font-size: 17px;
 }
 
 .quota-sub {
   margin-top: 2px;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-muted);
 }
 
 .redeem-row {
@@ -204,22 +236,22 @@ body {
   padding: 6px 8px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: wheat;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-primary);
   font-size: 13px;
   outline: none;
 }
 
 .redeem-input::placeholder {
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-muted);
 }
 
 .redeem-btn {
   padding: 6px 12px;
   border-radius: 8px;
   border: none;
-  background: wheat;
-  color: #1c1812;
+  background: var(--oak);
+  color: var(--surface-1);
   font-size: 13px;
   cursor: pointer;
 }
@@ -232,11 +264,11 @@ body {
 .redeem-msg {
   margin-top: 8px;
   font-size: 12px;
-  color: #ff9a8a;
+  color: var(--line-strong);
 }
 
 .redeem-msg.ok {
-  color: #9be39b;
+  color: var(--line);
 }
 
 .recharge-btn {
@@ -245,33 +277,33 @@ body {
   padding: 8px 0;
   border-radius: 8px;
   border: none;
-  background: wheat;
-  color: #1c1812;
+  background: var(--oak);
+  color: var(--surface-1);
   font-size: 14px;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: background 0.15s ease;
 }
 .recharge-btn:hover {
-  opacity: 0.88;
+  background: var(--oak-hover);
 }
 
 .quota-logout {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-muted);
   cursor: pointer;
   text-align: right;
 }
 
 .quota-logout:hover {
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--text-primary);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 *::-webkit-scrollbar {
   width: 6px;
@@ -281,12 +313,12 @@ body {
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.18);
   border-radius: 3px;
   transition: background 0.2s;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: wheat;
+  background: rgba(255, 255, 255, 0.38);
 }
 *::-webkit-scrollbar-corner {
   background: transparent;

@@ -3,7 +3,7 @@
        :style="{left: node.pos.x + 'px', top: node.pos.y + 'px', width: NODE_W + 'px', height: (lay.height + fnExtra + escExtra) + 'px'}"
        @mousedown.stop="onBodyDown">
     <!-- 头部:可拖动移动 -->
-    <div class="bp-head" :style="{background: headBg, borderColor: headColor}" @mousedown.stop="onHeadDown">
+    <div class="bp-head" :style="{background: headBg}" @mousedown.stop="onHeadDown">
       <span class="bp-dot" :style="{background: headColor}"></span>
       <span class="bp-title">{{ def.label }}</span>
       <span class="bp-del" @mousedown.stop @click.stop="emit('remove', node.id)">×</span>
@@ -23,7 +23,7 @@
 
       <!-- 输入针脚行 -->
       <div v-for="row in lay.inputs" :key="'i'+row.pin.id" class="bp-row in" :style="{top: (row.y - HEADER_H) + 'px'}">
-        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin)}]" :style="pinStyle(row.pin, 'in')"
+        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin), connected: pinConnected(row.pin, 'in')}]" :style="pinStyle(row.pin)"
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
         <span class="pin-name">{{ row.pin.name }}</span>
@@ -37,7 +37,7 @@
       <div v-for="row in lay.outputs" :key="'o'+row.pin.id" class="bp-row out" :style="{top: (row.y - HEADER_H) + 'px'}">
         <span v-if="isParamPin(row.pin)" class="param-x" @mousedown.stop @click.stop="removeParam(row.pin)">✕</span>
         <span v-if="def.special !== 'literal'" class="pin-name">{{ row.pin.name }}</span>
-        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin)}]" :style="pinStyle(row.pin, 'out')"
+        <span class="pin" :class="[pinShape(row.pin), {dimpin: !pinUsable(row.pin), connected: pinConnected(row.pin, 'out')}]" :style="pinStyle(row.pin)"
               @mousedown.stop="emit('pindown', {nodeId: node.id, pin: row.pin, ev: $event})"
               @mouseup.stop="emit('pinup', {nodeId: node.id, pin: row.pin, ev: $event})"></span>
       </div>
@@ -111,7 +111,7 @@ const escExtra = computed(() => {
     return Math.min(140, lines * 15 + 20);
 });
 const headColor = computed(() => categoryColor(props.def.category));
-const headBg = computed(() => `linear-gradient(180deg, ${hex(headColor.value, 0.32)}, ${hex(headColor.value, 0.14)})`);
+const headBg = computed(() => `linear-gradient(180deg, ${hex(headColor.value, 0.22)}, ${hex(headColor.value, 0.08)})`);
 
 function hex(c: string, a: number): string {
     const m = c.replace("#", "");
@@ -132,12 +132,12 @@ const nodeDimmed = computed(() => {
 
 function pinShape(p: PinDef) { return p.pinKind === "exec" ? "exec" : "data"; }
 function pinColor(p: PinDef) { return p.pinKind === "exec" ? EXEC_COLOR : typeColor(p.dataType); }
-function pinStyle(p: PinDef, dir: "in" | "out") {
-    const connected = bp.isPinConnected(props.node.id, p.id, dir);
+function pinConnected(p: PinDef, dir: "in" | "out") {
+    return bp.isPinConnected(props.node.id, p.id, dir);
+}
+function pinStyle(p: PinDef) {
     const c = pinColor(p);
-    return p.pinKind === "exec"
-        ? { borderLeftColor: c, opacity: connected ? 1 : 0.85 }
-        : { borderColor: c, background: connected ? c : "transparent" };
+    return { borderColor: c, color: c };
 }
 
 const LIT_CAPABLE = new Set(["String", "int", "long", "double", "float", "short", "byte", "char", "boolean"]);
@@ -159,47 +159,50 @@ function onBodyDown(ev: MouseEvent) { emit("bodydown", { nodeId: props.node.id, 
   display: flex;
   flex-direction: column;
   border-radius: 4px;
-  background: rgba(22, 22, 26, 0.96);
-  /* Minecraft 方块浮雕:亮上左 + 暗下右 */
-  box-shadow: inset 2px 2px 0 rgba(255,255,255,0.10), inset -2px -2px 0 rgba(0,0,0,0.55),
-              0 6px 18px rgba(0,0,0,0.45);
-  border: 1px solid rgba(0,0,0,0.6);
+  background: #291E0F;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.05), inset -1px -1px 0 rgba(0,0,0,0.5), 0 10px 24px rgba(0,0,0,0.34);
+  border: 1px solid #867053;
   color: rgba(255,255,255,0.86);
   user-select: none;
   font-size: 12px;
 }
 .bp-node.selected {
-  box-shadow: inset 2px 2px 0 rgba(255,255,255,0.12), inset -2px -2px 0 rgba(0,0,0,0.55),
-              0 0 0 2px wheat, 0 8px 22px rgba(0,0,0,0.5);
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.06),
+              0 0 0 2px #AF9876, 0 12px 28px rgba(0,0,0,0.42);
 }
-.bp-node.pure { background: rgba(26, 28, 24, 0.96); }
+.bp-node.pure { background: #291E0F; }
 .bp-node.dim { opacity: 0.32; filter: grayscale(0.7); transition: opacity 0.12s, filter 0.12s; }
 
 .bp-head {
+  position: relative;
   display: flex; align-items: center; gap: 6px;
   height: 34px; flex-shrink: 0; padding: 0 8px;
-  border-bottom: 2px solid;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
   cursor: grab;
-  box-shadow: inset 0 2px 0 rgba(255,255,255,0.08);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
 }
+.bp-head::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: v-bind(headColor); }
 .bp-head:active { cursor: grabbing; }
 .bp-dot { width: 9px; height: 9px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4); flex-shrink: 0; }
-.bp-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: 0.3px; }
+.bp-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: 0; }
 .bp-del { color: rgba(255,255,255,0.35); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
 .bp-del:hover { color: #ff7a7a; }
 
-.bp-body { position: relative; flex: 1; }
+.bp-body { position: relative; flex: 1; background: #33312C; }
 .bp-row { position: absolute; display: flex; align-items: center; gap: 6px; height: 0; transform: translateY(-50%); }
 .bp-row.in { left: 10px; right: 10px; justify-content: flex-start; }
 .bp-row.out { left: 10px; right: 10px; justify-content: flex-end; }
 
-.pin { position: relative; width: 11px; height: 11px; flex-shrink: 0; cursor: crosshair; box-sizing: border-box; }
+.pin { position: relative; width: 11px; height: 11px; flex-shrink: 0; cursor: crosshair; box-sizing: border-box; background: #33312C; }
 .pin.data { border-radius: 2px; border: 2px solid; }
 .pin.exec {
-  width: 0; height: 0; background: none !important;
-  border-top: 6px solid transparent; border-bottom: 6px solid transparent;
-  border-left: 9px solid; border-radius: 0;
+  width: 12px; height: 12px; border: 2px solid; border-radius: 2px;
 }
+.pin.exec::after { content: ""; position: absolute; width: 4px; height: 4px; top: 2px; left: 2px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; transform: rotate(45deg); }
+.bp-row.in .pin:not(.connected) { box-shadow: inset 1px 1px 0 #020405, inset -1px -1px 0 rgba(255,255,255,.1); }
+.bp-row.out .pin:not(.connected) { box-shadow: inset 1px 1px 0 rgba(255,255,255,.16), inset -1px -1px 0 rgba(0,0,0,.62); }
+.pin.connected { background: currentColor; box-shadow: 0 0 0 2px rgba(255,255,255,0.08); }
+.pin.exec.connected::after { color: #071012; }
 /* 放大命中区:鼠标在端点 ±8px 内都算命中(命中盒 27px,约原来 2.5 倍),显著放宽连线判定 */
 .pin::before { content: ""; position: absolute; inset: -8px; border-radius: 5px; }
 .bp-row.in .pin { position: absolute; left: -16px; }

@@ -21,7 +21,7 @@
     <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
       <div class="gen-card-head">
         <div class="gen-card-title">▪ 项目规划</div>
-        <ThinkingMarquee v-if="marqueeOn"/>
+        <ThinkingMarquee v-if="marqueeOn" variant="compact"/>
       </div>
       <div class="gen-phases">
         <span v-for="p in phases" :key="p.key" class="gen-phase"
@@ -282,44 +282,44 @@ watch(() => genTask.streamingContent, async () => {
   padding: 5px 12px;
   font-size: 12px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px; /* 圆角矩形 */
+  color: rgba(209, 200, 182, 0.62);
+  background: rgba(209, 200, 182, 0.045);
+  border: 1px solid rgba(209, 200, 182, 0.16);
+  border-radius: 4px;
   cursor: pointer;
   transition: all 0.18s;
   white-space: nowrap;
 }
-.gen-super-toggle:hover { color: rgba(255, 255, 255, 0.85); border-color: rgba(255, 255, 255, 0.25); }
+.gen-super-toggle:hover { color: #f4f1ec; border-color: rgba(209, 200, 182, 0.38); }
 .gen-super-toggle .dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(209, 200, 182, 0.3);
   transition: all 0.18s;
 }
 .gen-super-toggle.on {
-  color: #ffcf6b;
-  background: rgba(255, 176, 46, 0.12);
-  border-color: rgba(255, 176, 46, 0.5);
+  color: #d5c9ac;
+  background: rgba(198, 176, 125, 0.09);
+  border-color: rgba(198, 176, 125, 0.5);
 }
-.gen-super-toggle.on .dot { background: #ffb02e; box-shadow: 0 0 8px #ffb02e; }
+.gen-super-toggle.on .dot { background: #c6b07d; box-shadow: 0 0 8px rgba(198, 176, 125, 0.5); }
 .gen-super-note {
   font-size: 11.5px;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(209, 200, 182, 0.4);
 }
-.gen-super-note.warn { color: rgba(255, 176, 46, 0.85); }
+.gen-super-note.warn { color: rgba(198, 176, 125, 0.85); }
 .gen-super-toggle.dbg {
   margin-left: auto;
-  color: rgba(120, 200, 255, 0.85);
-  border-color: rgba(120, 200, 255, 0.3);
-  background: rgba(120, 200, 255, 0.08);
+  color: rgba(67, 128, 145, 0.9);
+  border-color: rgba(67, 128, 145, 0.38);
+  background: rgba(67, 128, 145, 0.08);
 }
-.gen-super-toggle.dbg:hover { color: #9dd4ff; border-color: rgba(120, 200, 255, 0.55); }
+.gen-super-toggle.dbg:hover { color: #7ca9b5; border-color: rgba(67, 128, 145, 0.62); }
 .dbg-count {
   font-size: 10px;
   opacity: 0.7;
   padding: 1px 5px;
   border-radius: 4px; /* 圆角矩形 */
-  background: rgba(120, 200, 255, 0.15);
+  background: rgba(67, 128, 145, 0.16);
 }
 
 /* 规划卡头部：标题 + 跑马灯并排 */
@@ -332,7 +332,10 @@ watch(() => genTask.streamingContent, async () => {
 }
 
 /* 失败卡片 + 重试 */
-.gen-error-card { border-color: rgba(255, 122, 102, 0.35); }
+.gen-card.gen-error-card {
+  border-color: rgba(255, 122, 102, 0.55);
+  box-shadow: inset 3px 0 0 rgba(255, 122, 102, 0.72), 0 12px 32px rgba(0,0,0,0.2);
+}
 .gen-error-actions {
   display: flex;
   gap: 10px;
@@ -362,10 +365,14 @@ watch(() => genTask.streamingContent, async () => {
   flex-direction: column;
   gap: 12px;
   height: auto;
+  border-radius: 8px;
+  background: rgba(4, 4, 2, 0.88);
+  border: 1px solid rgba(209, 200, 182, 0.16);
+  box-shadow: inset 0 1px 0 rgba(244, 241, 236, 0.04), 0 16px 42px rgba(0,0,0,0.26);
 }
 .gen-card-title {
   font-size: 14px;
-  color: rgba(255,255,255,0.5);
+  color: var(--text-secondary, #abb6ba);
   user-select: none;
 }
 
@@ -376,16 +383,16 @@ watch(() => genTask.streamingContent, async () => {
 }
 .gen-phase {
   padding: 4px 16px;
-  border-radius: 10px;
+  border-radius: 4px;
   font-size: 13px;
   border: 1px solid rgba(255,255,255,0.1);
   color: rgba(255,255,255,0.3);
   transition: all 0.3s;
 }
 .gen-phase.active {
-  background: wheat;
-  color: #000;
-  border-color: wheat;
+  background: #d5c9ac;
+  color: #040402;
+  border-color: #e1d8c4;
 }
 .gen-phase.done {
   background: rgba(255,255,255,0.08);
@@ -399,7 +406,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .tag {
   padding: 3px 14px;
-  border-radius: 8px;
+  border-radius: 4px;
   font-size: 13px;
   background: rgba(255,255,255,0.06);
   color: rgba(255,255,255,0.7);
@@ -412,10 +419,10 @@ watch(() => genTask.streamingContent, async () => {
   /* 直接铺开，不做内部滚动 */
 }
 .gen-group {
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 10px;
+  border: 1px solid rgba(209, 200, 182, 0.14);
+  border-radius: 4px;
   padding: 8px 10px 6px;
-  background: rgba(255,255,255,0.015);
+  background: #090907;
 }
 .gen-group-header {
   display: flex;
@@ -428,7 +435,7 @@ watch(() => genTask.streamingContent, async () => {
 .gen-group-label {
   font-size: 12px;
   color: rgba(255,255,255,0.55);
-  letter-spacing: 0.4px;
+  letter-spacing: 0;
 }
 .gen-group-count {
   font-size: 11px;
@@ -453,7 +460,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .gen-file:hover { background: rgba(255,255,255,0.04); }
 .gen-file.done { color: rgba(255,255,255,0.8); }
-.gen-file.generating { color: wheat; }
+.gen-file.generating { color: var(--oak-highlight, #AF9876); }
 .gen-file.pending { color: rgba(255,255,255,0.3); }
 .gen-file-icon { flex: 0 0 20px; }
 .gen-file-path { color: inherit; font-family: monospace; }
@@ -463,12 +470,12 @@ watch(() => genTask.streamingContent, async () => {
   border-radius: 4px;
   background: rgba(255,255,255,0.1);
   color: rgba(255,255,255,0.7);
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
   font-family: monospace;
 }
 .gen-file-phase {
   font-size: 11px;
-  color: wheat;
+  color: var(--oak-highlight, #AF9876);
   font-family: monospace;
   margin-left: 4px;
 }
@@ -516,7 +523,7 @@ watch(() => genTask.streamingContent, async () => {
   width: 18px;
   height: 18px;
   border: 2px solid rgba(255,255,255,0.15);
-  border-top-color: wheat;
+  border-top-color: var(--oak-highlight, #AF9876);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -531,9 +538,9 @@ watch(() => genTask.streamingContent, async () => {
 .gen-download-btn {
   display: inline-block;
   padding: 12px 36px;
-  border-radius: 12px;
-  background: wheat;
-  color: #000;
+  border-radius: 4px;
+  background: #d5c9ac;
+  color: #040402;
   font-size: 16px;
   text-decoration: none;
   font-weight: 500;
@@ -542,12 +549,12 @@ watch(() => genTask.streamingContent, async () => {
 .gen-download-btn:hover { opacity: 0.85; }
 .gen-download-btn.ide {
   background: rgba(255,255,255,0.08);
-  color: wheat;
-  border: 1px solid rgba(245,222,179,0.3);
+  color: var(--oak-highlight, #AF9876);
+  border: 1px solid rgba(134,112,83,0.55);
 }
 
 .gen-error {
-  color: #999;
+  color: #ff9a8b;
   font-size: 14px;
 }
 
@@ -559,18 +566,18 @@ watch(() => genTask.streamingContent, async () => {
 .gen-append-input {
   width: 100%;
   resize: none;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(245, 222, 179, 0.18);
-  border-radius: 10px;
+  background: #090907;
+  border: 1px solid rgba(209, 200, 182, 0.18);
+  border-radius: 4px;
   padding: 10px 12px;
-  color: #f3e7d4;
+  color: #f4f1ec;
   font-size: 14px;
   line-height: 1.5;
   outline: none;
   font-family: inherit;
   transition: border-color 0.2s;
 }
-.gen-append-input:focus { border-color: rgba(245, 222, 179, 0.5); }
+.gen-append-input:focus { border-color: var(--oak-highlight, #AF9876); }
 .gen-append-input::placeholder { color: rgba(255, 255, 255, 0.3); }
 .gen-append-foot {
   display: flex;
@@ -585,10 +592,10 @@ watch(() => genTask.streamingContent, async () => {
 .gen-append-btn {
   flex-shrink: 0;
   padding: 8px 20px;
-  border-radius: 10px;
-  border: none;
-  background: wheat;
-  color: #1c1812;
+  border-radius: 4px;
+  border: 1px solid #e1d8c4;
+  background: #d5c9ac;
+  color: #040402;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;

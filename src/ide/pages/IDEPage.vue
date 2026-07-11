@@ -348,13 +348,11 @@ function stopResize() {
   inset: 80px 16px 16px;
   display: flex;
   flex-direction: column;
-  border-radius: 14px;
+  border-radius: 8px;
   overflow: hidden;
-  background: rgba(13, 13, 15, 0.92);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255,255,255,0.06);
-  box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+  background: #291E0F;
+  border: 1px solid #867053;
+  box-shadow: 0 20px 48px rgba(0,0,0,0.42);
   color: rgba(255,255,255,0.85);
 }
 
@@ -365,23 +363,23 @@ function stopResize() {
   padding: 8px 14px;
   height: 44px;
   flex-shrink: 0;
-  background: rgba(8, 8, 10, 0.6);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  background: #33312C;
+  border-bottom: 1px solid #867053;
 }
 .toolbar-left { display: flex; align-items: center; gap: 12px; }
 .toolbar-task { display: inline-flex; align-items: center; gap: 6px; font-family: "Monaco", monospace; font-size: 12px; }
-.task-label { color: rgba(255,255,255,0.35); font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; }
+.task-label { color: rgba(255,255,255,0.35); font-size: 10px; text-transform: uppercase; letter-spacing: 0; }
 .task-id { color: rgba(255,255,255,0.85); padding: 2px 8px; background: rgba(255,255,255,0.05); border-radius: 5px; }
 .toolbar-task.placeholder { color: rgba(255,255,255,0.3); font-style: italic; }
 .toolbar-dirty {
   display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: wheat;
-  padding: 3px 10px; border-radius: 12px;
-  background: rgba(245,222,179,0.08); border: 1px solid rgba(245,222,179,0.18);
+  padding: 3px 8px; border-radius: 5px;
+  background: rgba(175,152,118,0.12); border: 1px solid rgba(134,112,83,0.52);
 }
 .toolbar-pom {
   display: inline-flex; align-items: center; gap: 6px;
   font-family: "Monaco", monospace; font-size: 11px;
-  padding: 3px 10px; border-radius: 12px;
+  padding: 3px 8px; border-radius: 5px;
   background: rgba(130,170,255,0.08); border: 1px solid rgba(130,170,255,0.18);
   color: #82aaff;
 }
@@ -399,14 +397,14 @@ function stopResize() {
 .tb-btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 14px; font-size: 12px; border-radius: 7px;
-  background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85);
-  border: 1px solid rgba(255,255,255,0.08); cursor: pointer;
+  background: #291E0F; color: rgba(255,255,255,0.85);
+  border: 1px solid #867053; cursor: pointer;
   transition: all 0.15s; font-family: inherit;
 }
-.tb-btn:hover:not(:disabled) { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.18); }
+.tb-btn:hover:not(:disabled) { background: #33312C; border-color: #AF9876; }
 .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.tb-btn.primary { background: wheat; color: #0d0d0f; border-color: wheat; font-weight: 500; }
-.tb-btn.primary:hover:not(:disabled) { background: #ffe9b5; border-color: #ffe9b5; }
+.tb-btn.primary { background: #AF9876; color: #291E0F; border-color: #AF9876; font-weight: 600; }
+.tb-btn.primary:hover:not(:disabled) { background: #AF9876; border-color: #AF9876; filter: brightness(1.08); }
 
 .ide-body {
   flex: 1;
@@ -433,20 +431,20 @@ function stopResize() {
   flex: 0 0 4px; background: transparent; cursor: col-resize;
   position: relative; z-index: 5; transition: background 0.2s;
 }
-.ide-resizer:hover { background: rgba(245,222,179,0.2); }
-.ide-resizer:active { background: rgba(245,222,179,0.4); }
+.ide-resizer:hover { background: #867053; }
+.ide-resizer:active { background: #AF9876; }
 
 .ide-editor-col { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 .empty-editor { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
 .empty-art { font-size: 56px; color: rgba(245,222,179,0.12); }
 .empty-text { color: rgba(255,255,255,0.5); font-size: 14px; }
-.empty-hint { color: rgba(255,255,255,0.25); font-size: 11px; font-family: "Monaco", monospace; letter-spacing: 0.5px; }
+.empty-hint { color: rgba(255,255,255,0.25); font-size: 11px; font-family: "Monaco", monospace; letter-spacing: 0; }
 
 .ide-statusbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 14px; height: 24px; flex-shrink: 0;
-  background: rgba(245,222,179,0.06);
-  border-top: 1px solid rgba(245,222,179,0.12);
+  background: #33312C;
+  border-top: 1px solid #867053;
   font-size: 11px; font-family: "Monaco", monospace; color: rgba(255,255,255,0.7);
 }
 .sb-left, .sb-right { display: flex; align-items: center; gap: 14px; }

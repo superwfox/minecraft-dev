@@ -58,10 +58,11 @@ const vpStyle = computed(() => ({
     transformOrigin: "0 0",
 }));
 const gridStyle = computed(() => {
-    const s = 26 * scale.value;
+    const minor = 26 * scale.value;
+    const major = 104 * scale.value;
     return {
-        backgroundSize: `${s}px ${s}px, ${s}px ${s}px`,
-        backgroundPosition: `${panX.value}px ${panY.value}px, ${panX.value}px ${panY.value}px`,
+        backgroundSize: `${minor}px ${minor}px, ${minor}px ${minor}px, ${major}px ${major}px, ${major}px ${major}px`,
+        backgroundPosition: Array(4).fill(`${panX.value}px ${panY.value}px`).join(", "),
     };
 });
 
@@ -395,10 +396,12 @@ onBeforeUnmount(() => {
 <style scoped>
 .bp-canvas {
   position: relative; flex: 1; overflow: hidden;
-  background-color: #101015;
+  background-color: #3C2E1A;
   background-image:
-    linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px);
+    linear-gradient(rgba(134,112,83,.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(134,112,83,.12) 1px, transparent 1px),
+    linear-gradient(rgba(175,152,118,.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(175,152,118,.14) 1px, transparent 1px);
   cursor: default;
 }
 .bp-canvas.panning { cursor: grab; }

@@ -208,23 +208,23 @@ async function submit() {
 
 <style scoped>
 .contrib-btn {
-    border: 1px solid rgba(245, 222, 179, 0.35);
-    background: rgba(245, 222, 179, 0.1);
-    color: wheat;
-    border-radius: 11px;
+    border: 1px solid rgba(209, 200, 182, 0.24);
+    background: rgba(209, 200, 182, 0.045);
+    color: #d1c8b6;
+    border-radius: 4px;
     padding: 7px 16px;
     font-size: 13px;
     cursor: pointer;
     transition: background 0.15s, transform 0.15s;
     pointer-events: auto;
 }
-.contrib-btn:hover { background: rgba(245, 222, 179, 0.2); transform: translateY(-1px); }
+.contrib-btn:hover { border-color: rgba(198, 176, 125, 0.52); color: #d5c9ac; transform: translateY(-1px); }
 
 .cs-overlay {
     position: fixed;
     inset: 0;
     z-index: 90;
-    background: rgba(8, 6, 4, 0.8);
+    background: rgba(0, 0, 0, 0.76);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     display: flex;
@@ -236,49 +236,49 @@ async function submit() {
     flex-direction: column;
     width: min(560px, 94vw);
     max-height: 100%;
-    border-radius: 18px !important;
+    border-radius: 8px !important;
     padding: 0 !important;
     overflow: hidden;
-    color: #f3e7d4;
+    color: #d1c8b6;
 }
 .cs-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 16px 20px;
-    border-bottom: 1px solid rgba(255, 240, 225, 0.12);
+    border-bottom: 1px solid rgba(209, 200, 182, 0.12);
     flex-shrink: 0;
 }
-.cs-title { font-size: 18px; font-weight: 700; color: wheat; }
-.cs-x { border: none; background: transparent; color: rgba(255, 245, 235, 0.6); font-size: 16px; cursor: pointer; padding: 4px 8px; border-radius: 8px; }
-.cs-x:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.cs-title { font-size: 17px; font-weight: 700; color: #d5c9ac; }
+.cs-x { border: 1px solid rgba(209, 200, 182, 0.14); background: transparent; color: rgba(209, 200, 182, 0.6); font-size: 14px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+.cs-x:hover { border-color: rgba(209, 200, 182, 0.4); color: #f4f1ec; }
 
 .cs-body { padding: 18px 20px; overflow: auto; }
 
 .cs-drop {
-    border: 2px dashed rgba(245, 222, 179, 0.3);
-    border-radius: 14px;
+    border: 1px dashed rgba(209, 200, 182, 0.3);
+    border-radius: 4px;
     padding: 26px 18px;
     text-align: center;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
 }
-.cs-drop.over { border-color: wheat; background: rgba(245, 222, 179, 0.08); }
+.cs-drop.over { border-color: #c6b07d; background: rgba(198, 176, 125, 0.06); }
 .cs-file { display: none; }
-.cs-drop-main { font-size: 14px; color: #f3e7d4; margin-bottom: 6px; }
-.cs-drop-sub { font-size: 12px; color: rgba(255, 245, 235, 0.5); line-height: 1.5; }
+.cs-drop-main { font-size: 14px; color: #d1c8b6; margin-bottom: 6px; }
+.cs-drop-sub { font-size: 12px; color: rgba(209, 200, 182, 0.5); line-height: 1.5; }
 .cs-drop-sub code { background: rgba(255, 255, 255, 0.1); padding: 1px 5px; border-radius: 5px; }
-.cs-drop-sub a { color: #ffd98a; }
+.cs-drop-sub a { color: #c6b07d; }
 
-.cs-msg { margin-top: 12px; font-size: 13px; color: rgba(245, 222, 179, 0.7); }
+.cs-msg { margin-top: 12px; font-size: 13px; color: rgba(198, 176, 125, 0.72); }
 .cs-err { margin-top: 12px; font-size: 13px; color: #ff9a8a; line-height: 1.5; }
 
 .cs-preview { margin-top: 16px; }
 .cs-pv-head { display: flex; align-items: baseline; gap: 10px; }
-.cs-pv-name { font-size: 16px; font-weight: 700; color: wheat; }
-.cs-pv-id { font-size: 12px; color: rgba(255, 245, 235, 0.5); font-family: "Monaco", monospace; }
-.cs-pv-cap { font-size: 13px; line-height: 1.55; color: rgba(255, 245, 235, 0.75); margin-top: 6px; }
-.cs-pv-files { margin-top: 12px; border: 1px solid rgba(255, 240, 225, 0.1); border-radius: 10px; overflow: hidden; }
+.cs-pv-name { font-size: 16px; font-weight: 700; color: #d5c9ac; }
+.cs-pv-id { font-size: 12px; color: rgba(209, 200, 182, 0.5); font-family: "Monaco", monospace; }
+.cs-pv-cap { font-size: 13px; line-height: 1.55; color: rgba(209, 200, 182, 0.75); margin-top: 6px; }
+.cs-pv-files { margin-top: 12px; border: 1px solid rgba(209, 200, 182, 0.1); border-radius: 4px; overflow: hidden; }
 .cs-pv-files-title { font-size: 12px; color: rgba(255, 245, 235, 0.5); padding: 8px 12px; background: rgba(255, 255, 255, 0.03); }
 .cs-pv-file { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 12px; border-top: 1px solid rgba(255, 240, 225, 0.06); }
 .cs-pv-path { font-family: "Monaco", monospace; color: #f3e7d4; }
@@ -286,25 +286,25 @@ async function submit() {
 .cs-note {
     width: 100%;
     margin-top: 12px;
-    background: rgba(20, 16, 12, 0.6);
-    border: 1px solid rgba(255, 240, 225, 0.18);
-    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(209, 200, 182, 0.18);
+    border-radius: 4px;
     padding: 9px 12px;
-    color: #f3e7d4;
+    color: #f4f1ec;
     font-size: 13px;
     resize: none;
     outline: none;
 }
-.cs-note:focus { border-color: wheat; }
+.cs-note:focus { border-color: #c6b07d; }
 
 .cs-done { text-align: center; padding: 14px 8px; }
 .cs-done-icon {
     width: 48px; height: 48px; margin: 0 auto 12px;
-    border-radius: 50%; background: rgba(143, 209, 106, 0.2);
-    color: #8fd16a; font-size: 26px; line-height: 48px;
+    border-radius: 4px; background: #d5c9ac;
+    color: #040402; font-size: 26px; line-height: 48px;
 }
 .cs-done p { font-size: 13px; line-height: 1.6; color: rgba(255, 245, 235, 0.8); }
-.cs-pr-link { display: inline-block; margin-top: 14px; color: #ffd98a; font-size: 14px; text-decoration: none; }
+.cs-pr-link { display: inline-block; margin-top: 14px; color: #c6b07d; font-size: 14px; text-decoration: none; }
 .cs-pr-link:hover { text-decoration: underline; }
 
 .cs-foot {
@@ -316,10 +316,10 @@ async function submit() {
     flex-shrink: 0;
 }
 .cs-btn {
-    border: 1px solid rgba(255, 240, 225, 0.28);
-    background: rgba(255, 255, 255, 0.08);
-    color: #f3e7d4;
-    border-radius: 11px;
+    border: 1px solid rgba(209, 200, 182, 0.28);
+    background: rgba(209, 200, 182, 0.05);
+    color: #d1c8b6;
+    border-radius: 4px;
     padding: 8px 20px;
     font-size: 14px;
     cursor: pointer;
@@ -327,6 +327,6 @@ async function submit() {
 }
 .cs-btn.ghost { background: transparent; opacity: 0.7; }
 .cs-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
-.cs-btn.primary { background: wheat; color: #1c1812; border-color: wheat; font-weight: 700; }
+.cs-btn.primary { background: #d5c9ac; color: #040402; border-color: #e1d8c4; font-weight: 700; }
 .cs-btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

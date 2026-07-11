@@ -1,5 +1,5 @@
 <template>
-  <div class="tm" role="status" aria-live="polite">
+  <div class="tm" :class="`tm-${variant}`" role="status" aria-live="polite">
     <Transition name="tm-fade" mode="out-in">
       <span class="tm-word" :key="word" :data-text="word + '…'">{{ word }}…</span>
     </Transition>
@@ -8,6 +8,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
+
+withDefaults(defineProps<{ variant?: "hero" | "compact" }>(), { variant: "compact" });
 
 // 缓解等待焦虑：非流式后没有逐字思考流，用单色高光扫过这些状态词表示「仍在工作」。
 // 每个词高光扫过 3 次后停住（CSS iteration-count: 3），静置片刻再淡出切换 —— 避免高光刚露头就被下一个词打断。
@@ -36,10 +38,10 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 .tm-word {
   position: relative;
   font-family: "MinecrafterReg", "Monaco", "Menlo", monospace;
-  font-weight: 400;
+  font-weight: 500;
   font-size: 15px;
-  letter-spacing: 2px;
-  color: rgba(255, 255, 255, 0.72); /* 静态可读底色 */
+  letter-spacing: 0;
+  color: var(--text-secondary, #abb6ba);
   white-space: nowrap;
 }
 
@@ -51,7 +53,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   background: linear-gradient(
     100deg,
     transparent 42%,
-    rgba(255, 255, 255, 0.95) 50%,
+    var(--oak-highlight, #AF9876) 50%,
     transparent 58%
   );
   background-size: 240% 100%;
@@ -61,6 +63,10 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   color: transparent;
   animation: tm-shine 1.6s linear 3;
 }
+
+.tm-hero { width: 100%; min-height: 100%; justify-content: center; }
+.tm-hero .tm-word { font-size: 30px; line-height: 1.2; letter-spacing: 0; }
+.tm-compact .tm-word { font-size: 14px; letter-spacing: 0; }
 
 @keyframes tm-shine {
   0% { background-position: 200% 0; }
@@ -72,4 +78,10 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 .tm-fade-leave-active { transition: opacity 0.3s ease, transform 0.3s ease; }
 .tm-fade-enter-from { opacity: 0; transform: translateY(4px); }
 .tm-fade-leave-to { opacity: 0; transform: translateY(-4px); }
+
+@media (max-width: 760px) { .tm-hero .tm-word { font-size: 24px; } }
+@media (prefers-reduced-motion: reduce) {
+  .tm-word::after { animation: none; }
+  .tm-fade-enter-active, .tm-fade-leave-active { transition: none; }
+}
 </style>

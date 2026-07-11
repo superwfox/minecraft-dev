@@ -45,74 +45,119 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
 
 <style scoped>
 .topnav {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
+    position: relative;
     font-family: "MinecrafterAlt", sans-serif;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 1px;
+    justify-content: center;
+    height: 54px;
     text-shadow: none;
 }
 
 .topnav-tabs {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    height: 32px;
 }
 
 .tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     font-size: 15px;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     text-transform: lowercase;
-    color: rgba(255, 255, 255, 0.62);
+    position: relative;
+    color: rgba(209, 200, 182, 0.48);
     text-decoration: none;
-    padding: 4px 14px;
-    border-radius: 6px; /* 圆角矩形（原 10px 在矮元素上偏药丸感） */
-    border: 1px solid transparent;
-    transition: color 0.2s, background 0.2s, border-color 0.2s;
+    height: 32px;
+    line-height: 1;
+    padding: 0 14px;
+    transition: color 0.16s ease;
     cursor: pointer;
 }
 
-.tab:hover { color: #fff; }
+.tab::after {
+    content: "";
+    position: absolute;
+    right: 14px;
+    bottom: 1px;
+    left: 14px;
+    height: 1px;
+    background: #c6b07d;
+    opacity: 0;
+    transform: scaleX(0.35);
+    transition: opacity 0.16s ease, transform 0.16s ease;
+}
 
-/* 当前所在页：略带底色的圆角矩形 */
+.tab:hover { color: rgba(244, 241, 236, 0.82); }
+
+.tab:focus-visible {
+    outline: 1px solid rgba(255, 255, 255, 0.42);
+    outline-offset: 3px;
+}
+
 .tab.active {
-    background: rgba(245, 222, 179, 0.14);
-    color: wheat;
+    background: transparent;
+    color: #d1c8b6;
 }
 
-/* 正在请求/编译中：主题色边框 + 呼吸灯闪烁（淡入淡出） */
+.tab.active::after {
+    opacity: 1;
+    transform: scaleX(1);
+}
+
 .tab.busy {
-    animation: tabBreathe 1.4s ease-in-out infinite;
+    color: #d5c9ac;
 }
 
-@keyframes tabBreathe {
-    0%, 100% {
-        border-color: rgba(245, 222, 179, 0.25);
-        box-shadow: 0 0 0 0 rgba(245, 222, 179, 0);
-    }
-    50% {
-        border-color: rgba(245, 222, 179, 0.95);
-        box-shadow: 0 0 9px 0 rgba(245, 222, 179, 0.38);
-    }
+.tab.busy::after {
+    opacity: 0.72;
+    transform: scaleX(1);
+    animation: busyLine 1.4s ease-in-out infinite;
+}
+
+@keyframes busyLine {
+    0%, 100% { opacity: 0.34; }
+    50% { opacity: 0.9; }
 }
 
 .topnav-status {
+    position: absolute;
+    top: calc(50% + 18px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
+    max-width: 220px;
     height: 13px;
     line-height: 13px;
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    color: rgba(245, 222, 179, 0.6);
+    font-family: "Monaco", "ZhuoKai", sans-serif;
+    font-size: 10px;
+    letter-spacing: 0;
+    color: rgba(225, 225, 221, 0.48);
+    text-align: center;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 220px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .tab.busy { animation: none; border-color: rgba(245, 222, 179, 0.7); }
+    .tab.busy::after { animation: none; opacity: 0.72; }
+}
+
+@media (max-width: 820px) {
+    .topnav { height: 46px; }
+    .topnav-tabs { gap: 2px; }
+    .tab {
+        padding-inline: 8px;
+        font-size: 13px;
+    }
+    .topnav-status {
+        top: calc(50% + 16px);
+        max-width: 150px;
+        font-size: 9px;
+    }
 }
 </style>
