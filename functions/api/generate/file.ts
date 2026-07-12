@@ -1,6 +1,6 @@
 import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
-import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 const MAX_REWORK = 5;
@@ -234,9 +234,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const uid: string | undefined = (context.data as any)?.uid;
+    const pendingUsage: UsageCostEntry[] = [];
+    let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
         if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
-        const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
+        pendingUsage.push({ model: r.model, usage: r.usage });
+    };
+    const flushCharge = async () => {
+        if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        chargeFlushed = true;
+        const cost = await accumulateCosts(context.env.TASKS, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -378,6 +385,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.logs.push(doneMsg);
             await writer.write(sseEvent(encoder, { type: "log", msg: doneMsg }));
 
+            await flushCharge();
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
             await writer.write(sseEvent(encoder, {
@@ -394,6 +402,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);
+            try { await flushCharge(); } catch { /* 计费失败不覆盖文件生成结果 */ }
             await writer.close();
         }
     })();

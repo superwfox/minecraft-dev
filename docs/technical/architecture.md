@@ -192,7 +192,7 @@ sequenceDiagram
 
 ### 为什么用 KV 而非 D1？
 
-生成任务是临时性的（TTL 1 小时自动过期），不需要查询、关联或聚合。KV 的键值模型完全够用，TTL 自动清理免去手动垃圾回收。每个 endpoint 都是纯 read-modify-write 一个 JSON value。
+生成任务是临时性的（TTL 1 小时自动过期），不需要查询、关联或聚合。KV 仍只保存任务快照，TTL 自动清理免去手动垃圾回收；写入集中在状态真正变化的批次出口，usage 在单请求内聚合后结算，纯验证与非终态轮询不写任务 key。额度、订单等事务型计数后续应迁往 D1 或 Durable Objects。
 
 ### 为什么用 GitHub Actions 而非自建编译服务器？
 
@@ -234,7 +234,7 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 
 1. **结构化 API 摘要**：Generator 传入已生成文件的 `FileSummary`（类名、方法签名、事件）而非完整代码，节省约 70% token。
 2. **桶内并发**：同深度文件经 `makeSemaphore(GEN_CONCURRENCY)` 并发生成（默认 2），桶间串行保证依赖顺序。
-3. **KV 状态机**：任务状态缓存 1 小时，每端点一次写入。
+3. **KV 状态机**：任务状态缓存 1 小时；每个 bucket 最多一次任务状态写，LLM usage 每请求最多一次成本写。
 
 ## 可扩展性
 

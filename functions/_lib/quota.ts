@@ -89,6 +89,11 @@ export async function getQuota(kv: KVNamespace, uid: string): Promise<QuotaInfo>
     };
 }
 
+/** 仅检查会员档位时只读取 user key，避免额外读取当月免费额度。 */
+export async function getTier(kv: KVNamespace, uid: string): Promise<Tier> {
+    return tierOf((await getUser(kv, uid)).totalRecharged);
+}
+
 /** 扣 1 件：先扣免费，再扣充值。返回是否成功。 */
 export async function consume(kv: KVNamespace, uid: string): Promise<boolean> {
     const month = yyyymm();
@@ -128,9 +133,12 @@ export async function redeem(
 }
 
 /** 简单 IP 限流：每分钟窗口计数，超限返回 false。 */
-export async function ipAllow(kv: KVNamespace, ip: string, limit = IP_LIMIT_PER_MIN): Promise<boolean> {
+export async function ipAllow(
+    kv: KVNamespace, ip: string, scope = "api", limit = IP_LIMIT_PER_MIN,
+): Promise<boolean> {
     const window = Math.floor(Date.now() / 60000);
-    const key = `ip:${ip}:${window}`;
+    // 按资源分 key，避免 plan → clarify 等相邻阶段在 1 秒内写同一个 KV key。
+    const key = `ip:${scope}:${ip}:${window}`;
     const raw = await kv.get(key);
     const n = raw ? parseInt(raw) || 0 : 0;
     if (n >= limit) return false;
@@ -149,6 +157,11 @@ export interface UsageBreakdown {
     prompt_cache_miss_tokens?: number;
 }
 
+export interface UsageCostEntry {
+    model: string;
+    usage?: UsageBreakdown;
+}
+
 function costOf(model: string, u: UsageBreakdown): number {
     const p = MODEL_PRICING[model];
     if (!p) return 0;
@@ -163,12 +176,12 @@ function costOf(model: string, u: UsageBreakdown): number {
  * mode-1（plan 新建任务）已预扣 1 件覆盖首个 0~0.8 元区间，所以从第 2 件起按差额追扣。
  * 余额耗尽时返回 outOfQuota=true，调用方应在 state 上打标记，下次入口拒绝。
  */
-export async function accumulateCost(
+export async function accumulateCosts(
     kv: KVNamespace, uid: string, taskId: string,
-    model: string, usage?: UsageBreakdown,
+    entries: UsageCostEntry[],
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
-    if (!usage || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
-    const cost = costOf(model, usage);
+    if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
+    const cost = entries.reduce((sum, entry) => sum + (entry.usage ? costOf(entry.model, entry.usage) : 0), 0);
     if (cost <= 0) {
         const raw = await kv.get(`taskCost:${taskId}`);
         const rec: TaskCost = raw ? JSON.parse(raw) : { uid, total: 0, consumed: 0 };
@@ -189,6 +202,15 @@ export async function accumulateCost(
     }
     await kv.put(key, JSON.stringify(rec), { expirationTtl: 3 * 24 * 3600 });
     return { consumed: rec.consumed, total: rec.total, outOfQuota, delta: cost };
+}
+
+/** 单次调用兼容入口；同一请求包含多次 LLM 调用时优先使用 accumulateCosts 批量结算。 */
+export async function accumulateCost(
+    kv: KVNamespace, uid: string, taskId: string,
+    model: string, usage?: UsageBreakdown,
+): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
+    if (!usage) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
+    return accumulateCosts(kv, uid, taskId, [{ model, usage }]);
 }
 
 export async function getTaskCost(

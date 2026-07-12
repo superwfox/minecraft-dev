@@ -208,8 +208,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // 据 body.skillIds 拉取用户挂载的 skill（KV 缓存 30min），存入 state 供逐文件生成复用
     const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
-    if (skillIds.length) {
-        state.skills = await getSkillBundles(context.env, skillIds);
+    const loadedSkillIds = Array.isArray(state.skills) ? state.skills.map((s: any) => s.id) : [];
+    const sameSkills = skillIds.length === loadedSkillIds.length
+        && skillIds.every((id, i) => id === loadedSkillIds[i]);
+    if (!sameSkills) {
+        state.skills = skillIds.length ? await getSkillBundles(context.env, skillIds) : [];
     }
     const skillCtx = state.skills?.length ? skillPlannerContext(state.skills) : "";
 

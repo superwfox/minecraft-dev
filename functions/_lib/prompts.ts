@@ -464,6 +464,7 @@ files[].generatorType 必须从下列枚举中精确选择：
 极简原则（严格遵守）：
 - 只规划用户需求中明确提到或逻辑上必需的文件，不要自行扩展功能范围
 - 每个文件的 role 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
+- 用户原始需求若明确指定了某条输出的颜色或格式，必须把该要求原样写入每个相关 files[].role，供逐文件生成与审查识别例外；未明确指定时不得自行添加其他颜色
 - 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
 - 能在一个文件中实现的逻辑不要拆分成多个文件
 - 不要规划与用户需求无关的辅助类、工具类、基类、接口
@@ -485,11 +486,29 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 
 // ─── FileGen ────────────────────────────────────────────────
 
+/** FileGen 全链路共用的输出配色约束：生成、审查返工与构建修复必须保持一致。 */
+const FILEGEN_OUTPUT_STYLE_RULES = `
+输出与消息配色规范（强制；除非用户明确指定其他颜色）：
+- 先区分输出通道，不得混用 ANSI 与 Minecraft 颜色代码：
+  1) System.out.println / System.err.println：普通内容直接输出终端默认白色，不加任何颜色转义；只有需要黄色强调时才使用 ANSI 黄色，并在同一条消息末尾复位。固定对照：默认白色 = 无转义，ANSI 黄色 = \\u001B[33m，ANSI 复位 = \\u001B[0m。不得在 println 中使用 §、& 或 ChatColor。
+  2) Bukkit / Java logger 与游戏内可见消息（sendMessage、broadcast、聊天栏、标题等）：普通内容直接输出默认白色，不要为了白色添加格式；需要着色时只能使用下方 ChatColor / § 对照表中的默认色与格式。
+- Bukkit / Minecraft 固定对照：
+  · 系统层级的聊天提示、状态、说明：ChatColor.GRAY ↔ §7
+  · 重要消息或成功结果：ChatColor.YELLOW ↔ §e
+  · 失败消息：ChatColor.AQUA ↔ §b（不要擅自改成红色）
+  · 重要消息中最关键的短语：ChatColor.BOLD ↔ §l；仅局部加粗，且应叠加在 §e / ChatColor.YELLOW 等允许的颜色上；后续要取消加粗时重新应用允许的颜色（如 ChatColor.YELLOW 或 ChatColor.WHITE），不要使用 §r / ChatColor.RESET
+  · 普通输出：默认白色 = 不添加颜色代码；仅在确实需要显式白色时 ChatColor.WHITE ↔ §f
+  · 特殊语义确需紫色时可例外使用 ChatColor.LIGHT_PURPLE ↔ §d；除此之外，只有用户明确点名某种颜色时才能使用对应颜色，并且只应用到用户要求的范围
+- 未获用户明确授权时，禁止使用红、绿、金、深色系等其他颜色，也禁止斜体、下划线、删除线、随机字符等其他格式。不得把传统的“成功=绿色、失败=红色”习惯带入代码。
+- Java 源码中的 Bukkit / 游戏消息使用 ChatColor 枚举，禁止在 Java 字符串字面量中直接写 § 或 &。YAML / properties 中使用上表对应的 § 代码，禁止用 &；若必须兼容历史 & 配置，Java 读取后必须先调用 ChatColor.translateAlternateColorCodes('&', text)。
+- 用户若明确要求其他颜色或特定格式，以用户要求为准并灵活调整；这种例外不得扩散到未被指定的其他消息。`;
+
 export function fileGenPrompt(
     filePath: string,
     fileRole: string,
     projectContext: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     generatedSummaries: FileSummary[],
+    additionalContext?: string,
 ): { system: string; user: string } {
     const apiBlock = formatSummaries(generatedSummaries);
 
@@ -527,12 +546,9 @@ Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
 - **调度任务**：用 new BukkitRunnable() { @Override public void run() { ... } }.runTaskTimer(plugin, delay, period) 启动周期任务；一次性延迟用 runTaskLater；同步任务避免阻塞主线程，耗时操作用 runTaskAsynchronously
 - **plugin.yml 完整性**：必须含 name、version、main（全限定主类名）、api-version。命令必须在 commands 节点声明（每条至少 description；可选 usage/aliases/permission）。声明的权限节点必须列在 permissions 节点（含 description、default）
 - **权限检查**：通过 sender.hasPermission("plugin.cmd.xxx") 判断，未通过时 sender.sendMessage 提示并 return true
-- **消息着色（必读，违反即视为错误）**：
-  · Java 代码中：用 ChatColor 枚举（如 ChatColor.GOLD + "..."），禁止在 Java 字符串字面量中直接写 § 或 &
-  · YAML / properties 配置文件中：颜色代码统一用 § 字符（如 §a 绿色、§c 红色、§6 金色、§r 重置），禁止用 & 写颜色代码
-  · 如果出于历史原因必须在 yml 用 &，则 Java 读取后必须调用 ChatColor.translateAlternateColorCodes('&', text) 转换 —— 不允许"yml 用 & 但 Java 直接 sendMessage 该字符串"这种 bug
-  · 优先方案：yml 写 §，Java 读出直接 sendMessage，无需转换
-- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks`,
+- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks
+${additionalContext ? `\n${additionalContext}` : ""}
+${FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
 }
@@ -544,6 +560,8 @@ export function reCheckerPrompt(
     fileContent: string,
     generatedSummaries?: FileSummary[],
     projectName?: string,
+    fileRole?: string,
+    additionalContext?: string,
 ): { system: string; user: string } {
     const crossFileBlock = generatedSummaries?.length
         ? "\n\n项目中已生成文件的可用 API：" + formatSummaries(generatedSummaries) +
@@ -553,6 +571,10 @@ export function reCheckerPrompt(
     return {
         system: `你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
 检查是否存在对插件主类的直接类型引用或强制转换（如 (MainClass) getPlugin(...)、MainClass.getInstance()）。代码应通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 获取插件实例，类型为 Plugin 接口。发现此类模式视为错误。
+文件职责：${fileRole || "未提供显式颜色例外"}
+${additionalContext ?? ""}
+将违反下述输出配色规则的代码或配置视为错误；当前文件没有任何输出消息时忽略本项。
+${FILEGEN_OUTPUT_STYLE_RULES}
 只输出 JSON，格式如下：
 - 通过：{"is_ok":true,"reason":"","missing_classes":[]}
 - 不通过：{"is_ok":false,"reason":"具体错误描述","missing_classes":["ClassName"]}
@@ -580,7 +602,8 @@ export function reworkPrompt(
 ${apiBlock}
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
 你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
-禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。`,
+禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
+${FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `文件 ${filePath}（职责：${fileRole}）存在错误：${reason}\n\n原始内容：\n${originalContent}`,
     };
 }
@@ -679,7 +702,7 @@ function specializationBlock(
                     `本文件是 GUI 配对的一部分，配对文件：${pair}`,
                     "GUI 配对约定：必有两份文件——",
                     "  (A) GUI 持有类：implements org.bukkit.event.Listener, org.bukkit.inventory.InventoryHolder",
-                    "      - 通过 Bukkit.createInventory(this, size, ChatColor.* + title) 构造 Inventory",
+                    "      - 通过 Bukkit.createInventory(this, size, title) 构造 Inventory；标题默认不着色，只有文件职责明确要求时才按统一配色规范着色",
                     "      - 暴露 open(Player p) 给外部打开",
                     "      - 提供 getInventory() 返回当前 Inventory 实例",
                     "  (B) 点击监听类：implements org.bukkit.event.Listener",
@@ -876,19 +899,13 @@ export function dispatchGen(
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
 } {
-    const base = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries);
     const spec = specializationBlock(file, slice, ctx);
-    const gen = {
-        system: (spec ? base.system + "\n\n" + spec : base.system) + (skillContext ?? ""),
-        user: base.user,
-    };
+    const additionalContext = [spec, skillContext].filter((v): v is string => !!v).join("\n\n");
+    // 统一输出规范由 fileGenPrompt 放在最终尾部，确保专项规则与 skill 骨架不能覆盖它。
+    const gen = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries, additionalContext);
     const checkerSpec = checkerSpecializationBlock(file, slice);
     const checker = (path: string, content: string) => {
-        const baseChk = reCheckerPrompt(path, content, ancestorSummaries, ctx.projectName);
-        return {
-            system: checkerSpec ? baseChk.system + "\n\n" + checkerSpec : baseChk.system,
-            user: baseChk.user,
-        };
+        return reCheckerPrompt(path, content, ancestorSummaries, ctx.projectName, file.role, checkerSpec);
     };
     return { gen, checker };
 }
@@ -935,6 +952,7 @@ export function buildFixPrompt(
     buildErrors: string,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     generatedSummaries?: FileSummary[],
+    fileRole?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
 
@@ -945,7 +963,9 @@ ${apiBlock}
 Maven 编译失败。根据下方的编译错误日志修正文件，使其能通过编译。
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
 你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
-禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。`,
+禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
+文件职责：${fileRole || "未提供显式颜色例外"}
+${FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `文件 ${filePath} 编译失败。\n\n编译错误日志：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
     };
 }

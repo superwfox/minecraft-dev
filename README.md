@@ -249,7 +249,7 @@ event: { type: "result",    done, todos }      ← 解析后的结果
   logs }
 ```
 
-每个 endpoint 都是**纯 read-modify-write KV** 的形态，前端任意阶段断网/刷新都能恢复到最近一次写入。
+端点先读取任务快照，只有实际改变状态的阶段才写回；同一 bucket 的文件结果与 usage 在请求出口各批量落盘一次，`verify` 成功与非终态构建轮询不再产生任务写入。前端断网/刷新可恢复到最近一次批次快照。
 
 ### 4.8 GitHub Actions 构建桥
 
@@ -331,7 +331,7 @@ functions/api/generate/clarify.ts    180
 | 单文件 review | pro 模型 JSON 模式，~8~15 s |
 | Planner 出蓝图 | reasoner `high`，~20~40 s |
 | Cloudflare Pages Functions 子请求计数 | 每个桶 ~`并发数 × (1 gen + ≤5 rework + 1 review + 1 summary)` |
-| KV 写入次数 | 每个端点 1 次，全程 ~10~15 次 |
+| KV 写入次数 | 默认单文件 bucket 为 1 次任务状态写 + 1 次批量成本写；完整任务随文件数、澄清与构建轮询变化 |
 | 模型成本（约） | 单次端到端 ¥0.05 ~ ¥0.20，取决于澄清轮次和 rework 次数 |
 
 并发上限 `GEN_CONCURRENCY=2` 是经过试验的甜点：再高会触发 DeepSeek RPM 限速 + CF 子请求计数告警，再低则端到端时长翻倍。
@@ -353,6 +353,7 @@ CF 端需要的环境变量与绑定：
 - `GITHUB_PAT` —— 对 `superwfox/minecraft-dev-workflow` 仓库有 `repo + workflow` 权限的 PAT
 - `GEN_CONCURRENCY` —— 可选，默认 2
 - KV namespace 绑定名 `TASKS`
+- `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
 
 ---
 

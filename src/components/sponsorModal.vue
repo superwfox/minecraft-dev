@@ -197,10 +197,10 @@ function onPaid() {
         if (now > baseline) {
             success.value = { added: now - baseline };
             clearInterval(pollTimer); pollTimer = null;
-        } else if (ticks >= 40) { // 约 3-4 分钟后停轮询（仍可手动刷新）
+        } else if (ticks >= 20) { // 约 5 分钟后停轮询（仍可手动刷新）
             clearInterval(pollTimer); pollTimer = null;
         }
-    }, 5000);
+    }, 15000);
 }
 
 function close() {

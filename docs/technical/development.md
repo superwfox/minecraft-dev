@@ -63,6 +63,8 @@ npm run dev
 
 生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
 
+生产环境建议另外配置变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding。配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`；未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
+
 ## 项目结构
 
 ```

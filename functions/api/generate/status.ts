@@ -14,13 +14,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const raw = await context.env.TASKS.get(taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    let discoveredRun = false;
 
     if (!state.runId && state.buildBranch) {
         const runId = await findRunByBranch(token, state.buildBranch, "");
         if (runId) {
             state.runId = runId;
             state.logs.push(`构建 run #${runId} 已找到`);
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            discoveredRun = true;
         }
     }
 
@@ -33,6 +34,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const { status, conclusion } = await getRunStatus(token, state.runId);
 
     if (status !== "completed") {
+        // 仅在首次发现 runId 时落一次；若本次已完成，则与终态合并为下方一次写入。
+        if (discoveredRun) {
+            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        }
         return new Response(JSON.stringify({ status: "building", runStatus: status }), {
             headers: { "Content-Type": "application/json" },
         });

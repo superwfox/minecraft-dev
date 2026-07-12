@@ -11,6 +11,10 @@ import { getQuota, consume, ipAllow } from "../_lib/quota";
 interface Env {
     SESSION_SECRET: string;
     TASKS: KVNamespace;
+    /** 可选的 Cloudflare Rate Limiting binding；未配置时仅昂贵写端点回退 KV。 */
+    API_RATE_LIMITER?: {
+        limit(options: { key: string }): Promise<{ success: boolean }>;
+    };
 }
 
 // 需要登录的（贵）端点
@@ -18,9 +22,21 @@ function needsAuth(path: string): boolean {
     return path.startsWith("/api/generate/") || path === "/api/chat" || path === "/api/stream" || path === "/api/skills/submit";
 }
 
-// 需要 IP 限流的端点（避开 IDE 高频的 /api/maven/jar 与 /api/voice-auth）
-function needsIpLimit(path: string): boolean {
+// 需要软限流的端点（Rate Limiting binding 不产生 TASKS KV 读写）。
+function needsRateLimit(path: string): boolean {
     return needsAuth(path) || path === "/api/sponsor/request" || path === "/api/auth/callback";
+}
+
+// 未配置 binding 时只保护真正会触发 LLM / GitHub 写操作的端点。
+// status / verify / download 等轮询、只读端点不再为限流固定消耗一读一写。
+function needsKvFallbackLimit(path: string): boolean {
+    return path === "/api/chat"
+        || path === "/api/stream"
+        || path === "/api/skills/submit"
+        || path === "/api/sponsor/request"
+        || path === "/api/auth/callback"
+        || ["plan", "clarify", "grade", "bucket", "file", "fix", "build"]
+            .some(name => path === `/api/generate/${name}`);
 }
 
 function json(obj: any, status: number): Response {
@@ -30,39 +46,50 @@ function json(obj: any, status: number): Response {
 export const onRequest: PagesFunction<Env> = async (context) => {
     const { request, env } = context;
     const path = new URL(request.url).pathname;
+    let session: any = null;
 
-    // 1) IP 限流（KV 兜底；生产建议叠加 Cloudflare WAF Rate Limiting）
-    if (needsIpLimit(path)) {
-        const ip = request.headers.get("CF-Connecting-IP") || "0.0.0.0";
-        if (!(await ipAllow(env.TASKS, ip))) {
-            return json({ error: "请求过于频繁，请稍后再试" }, 429);
-        }
-    }
-
-    // 2) 登录闸门 + 额度
+    // 1) 登录闸门：先验证会话，避免未登录请求先消耗 KV 限流计数。
     if (needsAuth(path)) {
-        const session = await verifySession(getSessionCookie(request), env.SESSION_SECRET);
+        session = await verifySession(getSessionCookie(request), env.SESSION_SECRET);
         if (!session) {
             return json({ error: "请先登录", code: "AUTH_REQUIRED" }, 401);
         }
         // 透传 uid / login 给下游 handler（扣费/限额需要 uid；skill 上传 PR @mention 需要 login）
         (context.data as any).uid = session.uid;
         (context.data as any).login = session.login;
+    }
 
-        // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
-        if (path === "/api/generate/plan") {
-            let body: any = {};
-            try { body = await request.clone().json(); } catch { /* ignore */ }
-            if (!body.taskId) {
-                const q = await getQuota(env.TASKS, session.uid);
-                if (q.remaining <= 0) {
-                    return json({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
-                }
-                // 先校验额度，仅在任务创建成功后才扣费（避免瞬时失败 + 前端重试重复扣）
-                const res = await context.next();
-                if (res.ok) await consume(env.TASKS, session.uid);
-                return res;
+    // 2) 优先使用 Cloudflare 原生 Rate Limiting binding；缺失时仅昂贵端点回退 KV。
+    if (needsRateLimit(path)) {
+        const ip = request.headers.get("CF-Connecting-IP") || "0.0.0.0";
+        const limiterKey = session?.uid ? `user:${session.uid}` : `ip:${ip}`;
+        let allowed = true;
+        if (env.API_RATE_LIMITER) {
+            try {
+                allowed = (await env.API_RATE_LIMITER.limit({ key: limiterKey })).success;
+            } catch {
+                if (needsKvFallbackLimit(path)) allowed = await ipAllow(env.TASKS, ip, path);
             }
+        } else if (needsKvFallbackLimit(path)) {
+            allowed = await ipAllow(env.TASKS, ip, path);
+        }
+        if (!allowed) return json({ error: "请求过于频繁，请稍后再试" }, 429);
+    }
+
+    // 3) 新建任务额度：仅在 task 创建成功后扣 1 件。
+    if (session && path === "/api/generate/plan") {
+        // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
+        let body: any = {};
+        try { body = await request.clone().json(); } catch { /* ignore */ }
+        if (!body.taskId) {
+            const q = await getQuota(env.TASKS, session.uid);
+            if (q.remaining <= 0) {
+                return json({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
+            }
+            // 先校验额度，仅在任务创建成功后才扣费（避免瞬时失败 + 前端重试重复扣）
+            const res = await context.next();
+            if (res.ok) await consume(env.TASKS, session.uid);
+            return res;
         }
     }
 

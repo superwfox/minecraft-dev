@@ -1,6 +1,6 @@
 import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
-import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 const MAX_REWORK = 3;
@@ -347,9 +347,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const uid: string | undefined = (context.data as any)?.uid;
+    const pendingUsage: UsageCostEntry[] = [];
+    let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
         if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
-        const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
+        pendingUsage.push({ model: r.model, usage: r.usage });
+    };
+    const flushCharge = async () => {
+        if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        chargeFlushed = true;
+        const cost = await accumulateCosts(context.env.TASKS, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -450,8 +457,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             state.fileStatuses[target.path] = "error";
                         } else {
                             state.fileStatuses[target.path] = "done";
-                            // 增量持久化:本文件完成即入库 + 落 KV。半路被 CF 杀掉也不丢进度,
-                            // 前端重试同一桶时已 done 的文件会被 pending 过滤跳过,继续往下做。
+                            // 本批结果先合并到内存，批次出口统一落一次 KV，避免同一 task key
+                            // 在 1 秒内重复/并发 put。默认模式每批仅一个文件，恢复粒度不变。
                             state.generatedFiles.push({ path: r.path, content: r.content, apiSummary: r.apiSummary });
                             for (const nf of r.newFiles) {
                                 if (!state.generatedFiles.find((g: any) => g.path === nf.path)) {
@@ -460,7 +467,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                                 }
                             }
                             state.currentFileIndex = state.generatedFiles.length;
-                            try { await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 }); } catch { /* 落盘失败不阻断本批 */ }
                         }
                         results.push(r);
                     } catch (taskErr: any) {
@@ -495,6 +501,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 dbg("result:replan", { path: replanTriggered.path, reason: replanTriggered.reason, errors: errors.length });
                 state.status = "error";
                 state.error = replanTriggered.reason ?? "审查未通过";
+                await flushCharge();
                 await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, replan: true,
@@ -505,11 +512,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 return;
             }
 
-            // 本批文件已在各自完成时增量入库 + 落 KV（见上方 generateAndCheckFile 成功分支）
-            // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶
+            // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶。
+            // usage 与任务状态均在此批量结算，各自最多一次 KV 写入。
             const bucketDone = pending.length <= targets.length;
             if (bucketDone) state.currentBucket = bucketIndex + 1;
             state.currentFileIndex = state.generatedFiles.length;
+            await flushCharge();
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
             dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
@@ -538,6 +546,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         } finally {
             dbg("process:finally", { hb: hbCount });
             clearInterval(heartbeat);
+            try { await flushCharge(); } catch { /* 计费失败不覆盖主流程结果 */ }
             await writer.close();
         }
     })();

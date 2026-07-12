@@ -117,12 +117,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!llm.byok && uid && taskId && usage) {
             try {
                 const cost = await accumulateCost(context.env.TASKS, uid, taskId, model, usage);
+                // taskCost 已持久化正常成本；只有额度耗尽才需要改任务状态。
+                if (!cost.outOfQuota) return;
                 const raw = await context.env.TASKS.get(taskId);
                 if (raw) {
                     const st = JSON.parse(raw);
                     st.totalCost = cost.total;
                     st.consumedQuota = cost.consumed;
-                    if (cost.outOfQuota) st.quotaExhausted = true;
+                    st.quotaExhausted = true;
                     await context.env.TASKS.put(taskId, JSON.stringify(st), { expirationTtl: 3600 });
                 }
             } catch { /* ignore */ }

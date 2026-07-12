@@ -9,7 +9,7 @@
 // GLM 与 DeepSeek 均为 OpenAI 兼容 chat/completions，所以请求体与 SSE 解析可复用，
 // 这里只切换 { url, key, 模型名 }。
 
-import { getQuota } from "./quota";
+import { getTier } from "./quota";
 
 export type LLMTier = "pro" | "flash";
 
@@ -53,8 +53,8 @@ export async function resolveLLM(context: { request: Request; env: Env; data: an
         const uid: string | undefined = context.data?.uid;
         if (uid) {
             try {
-                const q = await getQuota(context.env.TASKS, uid);
-                if (q.tier !== "none") {
+                const tier = await getTier(context.env.TASKS, uid);
+                if (tier !== "none") {
                     return { url: GLM_URL, apiKey: userKey, byok: true, modelFor: (t) => GLM_MODELS[t] };
                 }
             } catch { /* 校验异常 → 退回共享 */ }

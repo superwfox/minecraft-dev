@@ -356,8 +356,14 @@ export async function resumeGenerate() {
     const p = genTask.phase;
     if (!genTask.taskId || ["idle", "done", "error"].includes(p)) return;
 
-    // 构建阶段：直接回到构建 + 轮询
-    if (["uploading", "building", "polling", "fixing"].includes(p)) {
+    // 已触发构建的阶段只恢复轮询，避免刷新后重复建分支、重复触发 workflow。
+    if (["building", "polling"].includes(p)) {
+        try { await buildWithRetry(undefined, undefined, true); }
+        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
+        return;
+    }
+    // uploading / fixing 的服务端请求可能尚未完成，沿用原恢复策略。
+    if (["uploading", "fixing"].includes(p)) {
         try { await buildWithRetry(); }
         catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
         return;
@@ -700,22 +706,32 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
 
 type BuildMeta = { javaVersion?: string; projectName?: string; packageName?: string };
 
-async function buildWithRetry(initialFiles?: { path: string; content: string }[], meta?: BuildMeta) {
+async function buildWithRetry(
+    initialFiles?: { path: string; content: string }[],
+    meta?: BuildMeta,
+    resumeExistingBuild = false,
+) {
     for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-        setPhase("uploading", "正在上传到 GitHub 并触发构建...");
-        const payload: any = { taskId: genTask.taskId };
-        // 首次构建带上 IDE 的最新内容 + 元数据（供 KV 任务过期后重建）；
-        // 后续 fix 后重建用 KV 里已被 fix 改过的版本
-        if (attempt === 0 && initialFiles) {
-            payload.files = initialFiles;
-            if (meta) payload.meta = meta;
+        const reuseExisting = resumeExistingBuild && attempt === 0;
+        if (reuseExisting) {
+            setPhase("building", "正在恢复已有构建的状态...");
+            genTask.logs.push("↻ 页面恢复：继续等待已有构建，不重复触发 workflow");
+        } else {
+            setPhase("uploading", "正在上传到 GitHub 并触发构建...");
+            const payload: any = { taskId: genTask.taskId };
+            // 首次构建带上 IDE 的最新内容 + 元数据（供 KV 任务过期后重建）；
+            // 后续 fix 后重建用 KV 里已被 fix 改过的版本
+            if (attempt === 0 && initialFiles) {
+                payload.files = initialFiles;
+                if (meta) payload.meta = meta;
+            }
+            const buildResult = await post("/api/generate/build", payload);
+            // 从 IDE 进来的场景：填上 GenerateProgress 头部要展示的 meta
+            if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
+            if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
+            if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
+            genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
         }
-        const buildResult = await post("/api/generate/build", payload);
-        // 从 IDE 进来的场景：填上 GenerateProgress 头部要展示的 meta
-        if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
-        if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
-        if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
-        genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
 
         setPhase("building", "正在等待 GitHub Actions 构建...");
         const buildOk = await pollBuildStatus();
@@ -740,9 +756,12 @@ async function buildWithRetry(initialFiles?: { path: string; content: string }[]
 
 /** Poll build status. Returns true on success, false on failure. */
 async function pollBuildStatus(): Promise<boolean> {
-    const maxAttempts = 60;
-    for (let i = 0; i < maxAttempts; i++) {
-        await new Promise(r => setTimeout(r, 5000));
+    const deadline = Date.now() + 10 * 60_000;
+    let i = 0;
+    while (Date.now() < deadline) {
+        // 前三次快速感知启动，随后逐步退避；隐藏标签页进一步降频。
+        const delay = document.hidden ? 30_000 : i < 3 ? 5_000 : i < 9 ? 10_000 : 15_000;
+        await new Promise(r => setTimeout(r, delay));
 
         const result = await get(`/api/generate/status?taskId=${genTask.taskId}`);
 
@@ -756,6 +775,7 @@ async function pollBuildStatus(): Promise<boolean> {
         if (i % 3 === 0) {
             genTask.logs.push(`构建中... (${result.runStatus || "queued"})`);
         }
+        i++;
     }
     throw new Error("构建超时");
 }

@@ -73,14 +73,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!llm.byok && uid && taskId && usage) {
         // 不阻塞响应：waitUntil 后台累积
         context.waitUntil(accumulateCost(context.env.TASKS, uid, taskId, model, usage).then(async (cost) => {
-            // 回写 state.totalCost / consumedQuota，方便前端展示
+            // taskCost 已是成本真源；正常请求不再重复读写整份任务。
+            // 仅额度首次耗尽时回写拦截标记。
+            if (!cost.outOfQuota) return;
             const raw = await context.env.TASKS.get(taskId);
             if (!raw) return;
             try {
                 const st = JSON.parse(raw);
                 st.totalCost = cost.total;
                 st.consumedQuota = cost.consumed;
-                if (cost.outOfQuota) st.quotaExhausted = true;
+                st.quotaExhausted = true;
                 await context.env.TASKS.put(taskId, JSON.stringify(st), { expirationTtl: 3600 });
             } catch { /* ignore */ }
         }));

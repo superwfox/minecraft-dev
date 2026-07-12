@@ -1,7 +1,7 @@
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
-import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
+import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 
 interface Env {
@@ -142,9 +142,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const uid: string | undefined = (context.data as any)?.uid;
+    const pendingUsage: UsageCostEntry[] = [];
+    let chargeFlushed = false;
     const charge = async (r: AICallResult) => {
         if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
-        const cost = await accumulateCost(context.env.TASKS, uid, taskId, r.model, r.usage);
+        pendingUsage.push({ model: r.model, usage: r.usage });
+    };
+    const flushCharge = async () => {
+        if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        chargeFlushed = true;
+        const cost = await accumulateCosts(context.env.TASKS, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -238,7 +245,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `↻ 修复 ${filePath}...` }));
                 state.logs.push(`↻ 修复 ${filePath}...`);
 
-                const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries);
+                const fileRole = state.plan?.find((f: any) => f.path === filePath)?.role
+                    ?? fileEntry.role
+                    ?? "";
+                const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries, fileRole);
                 const fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
                 await charge(fixRes);
                 const fixedContent = stripFences(fixRes.content);
@@ -265,6 +275,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.error = null;
             delete state.runId;
             delete state.buildBranch;
+            await flushCharge();
             await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
 
             await writer.write(sseEvent(encoder, { type: "log", msg: `● 修复完成，共修复 ${fixedCount} 个文件` }));
@@ -278,6 +289,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);
+            try { await flushCharge(); } catch { /* 计费失败不覆盖修复结果 */ }
             await writer.close();
         }
     })();
