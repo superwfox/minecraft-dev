@@ -217,6 +217,15 @@ function seededRandom(seed: number) {
 }
 
 const ambientRandom = seededRandom(0x0B51D1A);
+const AMBIENT_PIXEL_PALETTE = [
+    [190, 163, 103], // wheat
+    [164, 137, 82],  // muted wheat
+    [145, 94, 45],   // ochre
+    [105, 68, 39],   // deep ochre
+    [126, 112, 88],  // warm gray
+    [78, 77, 72],    // graphite
+    [48, 50, 49],    // deep gray
+] as const;
 const ambientPixels = Array.from({length: 124}, (_, id) => {
     // Scatter the same block particles across the complete triangular cone.
     const progress = 0.03 + Math.sqrt(ambientRandom()) * 0.83;
@@ -226,22 +235,22 @@ const ambientPixels = Array.from({length: 124}, (_, id) => {
     const jitter = (ambientRandom() - 0.5) * (0.012 + progress * 0.018);
     const x = Math.min(0.94, Math.max(0.012, shortAxis + (longAxis - shortAxis) * crossSection + jitter));
     const y = Math.min(0.94, Math.max(0.012, longAxis - (longAxis - shortAxis) * crossSection - jitter));
-    const size = Math.round(4 + (1 - progress) * 7 + ambientRandom() * 4);
+    const width = Math.round(5 + (1 - progress) * 9 + ambientRandom() * 5);
+    const height = Math.round(2 + (1 - progress) * 2 + ambientRandom() * 2);
     const alpha = (0.055 + Math.pow(1 - progress, 1.38) * (0.36 + ambientRandom() * 0.18)).toFixed(3);
-    const gray = Math.round(126 + ambientRandom() * 62);
-    const edge = Math.min(214, gray + 28);
+    const color = AMBIENT_PIXEL_PALETTE[Math.floor(ambientRandom() * AMBIENT_PIXEL_PALETTE.length)];
     const lift = 5 + ambientRandom() * 9;
-    const turn = Math.round((ambientRandom() * 2 - 1) * 105);
+    const turn = Math.round((ambientRandom() * 2 - 1) * 38);
 
     return {
         id,
         style: {
             "--x": `${(x * 100).toFixed(2)}%`,
             "--y": `${(y * 100).toFixed(2)}%`,
-            "--size": `${size}px`,
+            "--pixel-width": `${width}px`,
+            "--pixel-height": `${height}px`,
             "--alpha": alpha,
-            "--pixel-color": `rgb(${gray} ${gray} ${gray})`,
-            "--pixel-edge": `rgb(${edge} ${edge} ${edge})`,
+            "--pixel-color": `rgb(${color[0]} ${color[1]} ${color[2]})`,
             "--delay": `${(-ambientRandom() * 7.5).toFixed(2)}s`,
             "--duration": `${(5.1 + ambientRandom() * 3.4).toFixed(2)}s`,
             "--lift-start": `${(lift * 0.45).toFixed(1)}px`,
@@ -614,13 +623,10 @@ watch(() => genTask.phase, (p) => {
 .wedge-swap-leave-to { opacity: 0; }
 .wedge-pixel {
   position: absolute;
-  width: var(--size);
-  height: var(--size);
-  box-sizing: border-box;
-  border: 1px solid var(--pixel-edge);
-  border-radius: 1px;
+  width: var(--pixel-width);
+  height: var(--pixel-height);
+  border-radius: 0.5px;
   background: var(--pixel-color);
-  box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.18), inset -1px -1px 0 rgba(0, 0, 0, 0.48);
   opacity: var(--alpha);
   animation: wedgePixel var(--duration) cubic-bezier(0.22, 0.7, 0.26, 1) var(--delay) infinite;
   will-change: transform, opacity;

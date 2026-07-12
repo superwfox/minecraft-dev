@@ -9,7 +9,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 
-withDefaults(defineProps<{ variant?: "hero" | "compact" }>(), { variant: "compact" });
+const props = withDefaults(defineProps<{ variant?: "hero" | "compact" }>(), { variant: "compact" });
 
 // 缓解等待焦虑：非流式后没有逐字思考流，用单色高光扫过这些状态词表示「仍在工作」。
 // 每个词高光扫过 3 次后停住（CSS iteration-count: 3），静置片刻再淡出切换 —— 避免高光刚露头就被下一个词打断。
@@ -18,12 +18,12 @@ const word = ref(WORDS[0]);
 let i = 0;
 let timer: any = null;
 
-// 单次扫光 1.6s × 3 = 4.8s；再留 0.9s 静置 → 5.7s 切换（此时高光早已扫完，切换点干净）
+// Hero 以四分之一速度播放：6.4s × 3 + 3.6s 静置 = 22.8s；compact 保持原节奏。
 onMounted(() => {
   timer = setInterval(() => {
     i = (i + 1) % WORDS.length;
     word.value = WORDS[i];
-  }, 5700);
+  }, props.variant === "hero" ? 22800 : 5700);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
 </script>
@@ -65,7 +65,12 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 }
 
 .tm-hero { width: 100%; min-height: 100%; justify-content: center; }
-.tm-hero .tm-word { font-size: 30px; line-height: 1.2; letter-spacing: 0; }
+.tm-hero .tm-word {
+  font-size: clamp(68px, 8vw, 112px);
+  line-height: 0.86;
+  letter-spacing: -0.035em;
+}
+.tm-hero .tm-word::after { animation-duration: 6.4s; }
 .tm-compact .tm-word { font-size: 14px; letter-spacing: 0; }
 
 @keyframes tm-shine {
@@ -79,7 +84,9 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
 .tm-fade-enter-from { opacity: 0; transform: translateY(4px); }
 .tm-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 
-@media (max-width: 760px) { .tm-hero .tm-word { font-size: 24px; } }
+@media (max-width: 760px) {
+  .tm-hero .tm-word { font-size: clamp(48px, 13vw, 72px); }
+}
 @media (prefers-reduced-motion: reduce) {
   .tm-word::after { animation: none; }
   .tm-fade-enter-active, .tm-fade-leave-active { transition: none; }
