@@ -63,6 +63,8 @@ npm run dev
 
 生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
 
+生成任务与单任务成本在生产环境优先使用变量名为 `DB` 的 D1 绑定。本地 `npm run dev` 未绑定 D1 时会自动回退本地 `TASKS` KV，不影响开发流程。
+
 生产环境可选择变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding；配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`。Pages + Git 集成更推荐在域名上建立 WAF Rate Limiting rule，并在 Pages 的 Production 环境变量中设置 `EDGE_RATE_LIMITING=true`，同样会关闭 KV 限流兜底。两者均未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
 
 ## 项目结构
@@ -143,6 +145,15 @@ git push -u origin master
    - **Settings** → **Functions** → **KV namespace bindings**
    - Variable name: `TASKS`
    - KV namespace: `TASKS`
+
+### 4.1 创建 D1 任务数据库
+
+1. **D1 SQL Database** → **Create database**
+2. 在 Pages 项目的 **Settings** → **Bindings** 中新增 D1 database binding
+3. Variable name 固定为 `DB`
+4. 在 D1 Console 执行 `migrations/0001_generation_tasks.sql`
+
+D1 仅承载高频生成任务状态和单任务成本；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。
 
 ### 5. 部署
 

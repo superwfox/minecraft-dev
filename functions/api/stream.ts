@@ -1,9 +1,10 @@
 // Cloudflare Pages Function: POST /api/stream
 // 流式请求，SSE 透传 DeepSeek 的 stream 响应。
-// 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 taskCost:<taskId>。
+// 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 D1 任务成本。
 
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
+import { getTask, putTask } from "../_lib/taskStore";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -22,7 +23,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // 任务级额度耗尽时直接拒绝
     if (taskId) {
-        const stateRaw = await context.env.TASKS.get(taskId);
+        const stateRaw = await getTask(context.env, taskId);
         if (stateRaw) {
             try {
                 const st = JSON.parse(stateRaw);
@@ -116,16 +117,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         // 流结束后累积成本（BYOK 自带 key 时跳过）
         if (!llm.byok && uid && taskId && usage) {
             try {
-                const cost = await accumulateCost(context.env.TASKS, uid, taskId, model, usage);
+                const cost = await accumulateCost(context.env, uid, taskId, model, usage);
                 // taskCost 已持久化正常成本；只有额度耗尽才需要改任务状态。
                 if (!cost.outOfQuota) return;
-                const raw = await context.env.TASKS.get(taskId);
+                const raw = await getTask(context.env, taskId);
                 if (raw) {
                     const st = JSON.parse(raw);
                     st.totalCost = cost.total;
                     st.consumedQuota = cost.consumed;
                     st.quotaExhausted = true;
-                    await context.env.TASKS.put(taskId, JSON.stringify(st), { expirationTtl: 3600 });
+                    await putTask(context.env, taskId, JSON.stringify(st));
                 }
             } catch { /* ignore */ }
         }

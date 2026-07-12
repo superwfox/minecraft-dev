@@ -4,6 +4,7 @@
 
 import { accumulateCost } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
+import { getTask, putTask } from "../_lib/taskStore";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -22,7 +23,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // 任务级额度耗尽时直接拒绝
     if (taskId) {
-        const stateRaw = await context.env.TASKS.get(taskId);
+        const stateRaw = await getTask(context.env, taskId);
         if (stateRaw) {
             try {
                 const st = JSON.parse(stateRaw);
@@ -72,18 +73,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (!llm.byok && uid && taskId && usage) {
         // 不阻塞响应：waitUntil 后台累积
-        context.waitUntil(accumulateCost(context.env.TASKS, uid, taskId, model, usage).then(async (cost) => {
+        context.waitUntil(accumulateCost(context.env, uid, taskId, model, usage).then(async (cost) => {
             // taskCost 已是成本真源；正常请求不再重复读写整份任务。
             // 仅额度首次耗尽时回写拦截标记。
             if (!cost.outOfQuota) return;
-            const raw = await context.env.TASKS.get(taskId);
+            const raw = await getTask(context.env, taskId);
             if (!raw) return;
             try {
                 const st = JSON.parse(raw);
                 st.totalCost = cost.total;
                 st.consumedQuota = cost.consumed;
                 st.quotaExhausted = true;
-                await context.env.TASKS.put(taskId, JSON.stringify(st), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(st));
             } catch { /* ignore */ }
         }));
     }

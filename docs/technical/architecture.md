@@ -14,7 +14,8 @@ graph TB
     subgraph "Cloudflare Pages"
         Frontend[Vue 3 前端]
         Functions[Pages Functions]
-        KV[KV 存储 TASKS]
+        D1[D1 生成任务库 DB]
+        KV[KV 用户额度与缓存 TASKS]
     end
 
     subgraph "外部服务"
@@ -28,6 +29,7 @@ graph TB
     Browser --> Frontend
     Browser --> Functions
     IDE --> Functions
+    Functions --> D1
     Functions --> KV
     Functions --> DeepSeek
     Functions --> XFYun
@@ -75,7 +77,7 @@ src/
 
 **职责**：API 端点、AI 调用封装、任务状态管理、密钥安全保护、Maven 仓库代理。
 
-**技术栈**：TypeScript、Cloudflare Workers Runtime、KV 存储。
+**技术栈**：TypeScript、Cloudflare Workers Runtime、D1、KV。
 
 ```
 functions/
@@ -112,7 +114,7 @@ sequenceDiagram
     participant U as 用户
     participant F as 前端
     participant API as Pages Functions
-    participant KV as KV
+    participant D1 as D1
     participant AI as DeepSeek
 
     U->>F: 输入需求
@@ -120,7 +122,7 @@ sequenceDiagram
     API->>AI: 完整性判定
     AI-->>F: { complete } / { hint }
     F->>API: POST /api/generate/plan（建 taskId）
-    API->>KV: 写入 clarifying 状态
+    API->>D1: 写入 clarifying 状态
     loop 多轮澄清（≤5）
         F->>API: POST /api/generate/clarify（SSE）
         API->>AI: Reasoner 流式
@@ -135,14 +137,14 @@ sequenceDiagram
 sequenceDiagram
     participant F as 前端
     participant API as Pages Functions
-    participant KV as KV
+    participant D1 as D1
     participant AI as DeepSeek
     participant GH as GitHub
 
     F->>API: POST /api/generate/plan（带 taskId）
     API->>AI: Planner（Reasoner）→ mainBlueprint + files[generatorType, depends]
     API->>API: topoSort + computeDepths → 深度桶（MainGen 最后桶）
-    API->>KV: 保存 plan / buckets
+    API->>D1: 保存 plan / buckets
     API-->>F: plan + buckets
 
     loop 每个深度桶（桶间串行）
@@ -157,7 +159,7 @@ sequenceDiagram
             API->>AI: 重写（≤5 次）
         end
         API->>AI: Summarizer 抽 FileSummary
-        API->>KV: 回填 generatedFiles
+        API->>D1: 回填 generatedFiles
         API-->>F: result{ completed, done, replan? }
     end
 
@@ -190,9 +192,9 @@ sequenceDiagram
 | CDN | 全球加速 | 单独配置 |
 | Functions | 内置 Serverless | 自建 API |
 
-### 为什么用 KV 而非 D1？
+### 为什么使用 D1 + KV 混合存储？
 
-生成任务是临时性的（TTL 1 小时自动过期），不需要查询、关联或聚合。KV 仍只保存任务快照，TTL 自动清理免去手动垃圾回收；写入集中在状态真正变化的批次出口，usage 在单请求内聚合后结算，纯验证与非终态轮询不写任务 key。额度、订单等事务型计数后续应迁往 D1 或 Durable Objects。
+生成任务快照和任务成本是整条流水线中最频繁的读写，存入 D1 并以主键索引访问；大 JSON 按块拆分，避免 D1 单行大小限制，逻辑 TTL 到期后由新任务创建时分批清理。用户资料、月额度、订单、赞助和 Skill 缓存仍保留在 KV，因为它们低频且天然适合键值读取。旧 KV 任务在首次访问时惰性迁移，D1 未绑定或暂时不可用时则安全回退 KV。
 
 ### 为什么用 GitHub Actions 而非自建编译服务器？
 
@@ -205,7 +207,7 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 - 每个请求都在限制内完成（尤其桶请求一次性流式输出，避免长连接超时）；
 - 前端在每步之间更新 UI，实时看到进度；
 - 某步失败可重试（replan / fix），不必从头开始；
-- KV 全状态机 + 前端 localStorage 保证刷新可恢复。
+- D1 任务状态机 + 前端 localStorage 保证刷新可恢复。
 
 ## 安全设计
 
@@ -234,7 +236,7 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 
 1. **结构化 API 摘要**：Generator 传入已生成文件的 `FileSummary`（类名、方法签名、事件）而非完整代码，节省约 70% token。
 2. **桶内并发**：同深度文件经 `makeSemaphore(GEN_CONCURRENCY)` 并发生成（默认 2），桶间串行保证依赖顺序。
-3. **KV 状态机**：任务状态缓存 1 小时；每个 bucket 最多一次任务状态写，LLM usage 每请求最多一次成本写。
+3. **D1 状态机**：任务状态逻辑有效期 1 小时；每个 bucket 最多一次分块状态写，LLM usage 每请求最多一次原子成本累计。
 
 ## 可扩展性
 

@@ -15,14 +15,14 @@
 | 输出 | 可直接部署的 Maven 插件项目 + 编译好的 `.jar` |
 | 核心引擎 | DeepSeek `deepseek-v4-pro` (Reasoner, `reasoning_effort=high`) + `deepseek-v4-flash` |
 | 部署形态 | Cloudflare Pages（前端静态资源 + Pages Functions Workers） |
-| 状态后端 | Cloudflare KV，TTL = 3600 s |
+| 状态后端 | Cloudflare D1（生成任务/任务成本）+ KV（用户额度与缓存） |
 | 编译产物 | GitHub Actions → Maven artifact → 通过 Worker 代理下载 |
 
 ---
 
 ## 2. 整体定位为 Agent 系统
 
-TAHAI 不是一个"对 LLM 套个壳"的工具，而是一个**带规划器（Planner）、多个专职生成器（Generators）、审查器（Reviewer）、修复器（Fixer）的多智能体协作系统**。整条流水线由前端发起、KV 持久化、SSE 流式回灌进度，任一阶段都可独立重入。
+TAHAI 不是一个"对 LLM 套个壳"的工具，而是一个**带规划器（Planner）、多个专职生成器（Generators）、审查器（Reviewer）、修复器（Fixer）的多智能体协作系统**。整条流水线由前端发起、D1 持久化生成任务、SSE 流式回灌进度，任一阶段都可独立重入。
 
 ### 2.1 Agent 角色一览
 
@@ -81,7 +81,7 @@ MainGen           主类（extends JavaPlugin），强制最后一桶
       │ complete
       ▼
 ┌──────────────┐  /api/generate/plan (mode 1: 仅建 taskId)
-│ taskId 创建  │ → 写入 KV (clarifying 状态)
+│ taskId 创建  │ → 写入 D1 (clarifying 状态)
 └─────┬────────┘
       │
       ▼
@@ -171,7 +171,7 @@ function computeDepths(files): Map<path, depth> {
 
 - 同一深度的文件之间**保证不互相调用**（同深度内若两个 leaf 都需要 helper，Planner 被要求把 helper 下沉为它们的共同依赖）。
 - **同深度桶内可并发生成**：`functions/api/generate/bucket.ts` 用 `makeSemaphore(GEN_CONCURRENCY)` 控制并发上限（默认 2，可通过 CF 环境变量覆盖）。
-- 桶完成后，所有新文件的 `FileSummary` 注入 KV，下一桶的 `dispatchGen()` 在 prompt 中能看到上一桶的完整 API。
+- 桶完成后，所有新文件的 `FileSummary` 注入 D1 任务状态，下一桶的 `dispatchGen()` 在 prompt 中能看到上一桶的完整 API。
 
 > 这里的设计**精确卡在 Cloudflare Workers 免费档约束上**：单请求 10s CPU 上限 + 50 子请求上限。一次桶请求一次性提交、流式输出，避免长连接超时；并发=2 平衡 DeepSeek 限速与 CF 子请求计数。
 
@@ -232,9 +232,9 @@ event: { type: "result",    done, todos }      ← 解析后的结果
 - 刷新后视觉状态完整恢复
 - 但若 phase 处于 `planning / clarifying / generating / ...` 中断态，强制回到 `error` 提示"刷新中断，请重新生成"——避免 UI 卡在等待已死掉的 SSE 或 Promise resolver。
 
-### 4.7 服务端 KV 状态机
+### 4.7 服务端 D1 状态机
 
-整个任务的状态都活在一个 KV value 里（`TASKS.put(taskId, state, ttl=3600)`），状态机字段：
+生成任务状态以 JSON 分块写入 D1 的 `generation_tasks` 与 `generation_task_chunks`，逻辑有效期为 1 小时；旧 KV 任务会在首次访问时惰性迁移。状态机字段：
 
 ```ts
 { taskId, status,
@@ -331,7 +331,7 @@ functions/api/generate/clarify.ts    180
 | 单文件 review | pro 模型 JSON 模式，~8~15 s |
 | Planner 出蓝图 | reasoner `high`，~20~40 s |
 | Cloudflare Pages Functions 子请求计数 | 每个桶 ~`并发数 × (1 gen + ≤5 rework + 1 review + 1 summary)` |
-| KV 写入次数 | 默认单文件 bucket 为 1 次任务状态写 + 1 次批量成本写；完整任务随文件数、澄清与构建轮询变化 |
+| D1 写入 | 默认单文件 bucket 为 1 次分块任务状态写 + 1 次原子成本累计；不再占用任务 KV 写额度 |
 | 模型成本（约） | 单次端到端 ¥0.05 ~ ¥0.20，取决于澄清轮次和 rework 次数 |
 
 并发上限 `GEN_CONCURRENCY=2` 是经过试验的甜点：再高会触发 DeepSeek RPM 限速 + CF 子请求计数告警，再低则端到端时长翻倍。
@@ -353,6 +353,7 @@ CF 端需要的环境变量与绑定：
 - `GITHUB_PAT` —— 对 `superwfox/minecraft-dev-workflow` 仓库有 `repo + workflow` 权限的 PAT
 - `GEN_CONCURRENCY` —— 可选，默认 2
 - KV namespace 绑定名 `TASKS`
+- D1 database 绑定名 `DB`（生产任务状态与任务成本）
 - `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
 - `EDGE_RATE_LIMITING=true` —— 使用域名级 WAF Rate Limiting 时设置；关闭代码内 KV 限流兜底
 
@@ -367,7 +368,7 @@ CF 端需要的环境变量与绑定：
 | 错误处理 | 失败重试整个流程 | rework / dynamic-gen / replan / fix 四级回路 |
 | 模糊需求 | 直接出代码，结果与预期偏差大 | 多轮 Reasoner 澄清 + TodoList 显式确认 |
 | 并发 | 串行生成 | 拓扑桶内并发，桶间串行 |
-| 状态恢复 | 刷新即丢 | KV 全状态机 + 前端 localStorage |
+| 状态恢复 | 刷新即丢 | D1 任务状态机 + 前端 localStorage |
 | 模型选择 | 一律最强模型 | 规划/审查/修复用 reasoner，生成/摘要用 flash，控成本 |
 
 ---

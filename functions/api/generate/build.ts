@@ -1,6 +1,7 @@
 import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom } from "../../_lib/pomGuard";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 interface Env {
     GITHUB_PAT: string;
@@ -11,7 +12,7 @@ const TAHAI_TAG = "§eTAHAI§r";
 
 /**
  * 在 plugin.yml 的 author 字段后追加 TAHAI 水印。幂等：已含 TAHAI 直接返回。
- * 注意：只改上传到 GitHub 的内容，不改 KV state.generatedFiles[*].content，
+ * 注意：只改上传到 GitHub 的内容，不改任务 state.generatedFiles[*].content，
  * 这样用户在 IDE 文件树里看到的还是干净版本。
  */
 function injectTahaiAuthor(content: string): string {
@@ -52,12 +53,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const hasIncoming = Array.isArray(incomingFiles) && incomingFiles.length > 0;
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     let state: any;
     if (raw) {
         state = JSON.parse(raw);
     } else if (hasIncoming) {
-        // KV 任务已过期（TTL 1h），但 IDE 本地仍有文件：凭 IDE 传来的内容 + 元数据重建任务。
+        // 任务已过期（逻辑 TTL 1h），但 IDE 本地仍有文件：凭 IDE 传来的内容 + 元数据重建任务。
         // javaVersion 是触发 workflow 的必需项，缺失时默认 21（现代 Paper）。
         state = {
             taskId,
@@ -74,7 +75,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
     }
 
-    // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖 KV 里的 generatedFiles
+    // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖任务里的 generatedFiles
     // （chat 阶段定型后，用户在 IDE 改动 / 新增 / 删除 不会回写后端；
     // 这里走 build 才回写一次，保证产物 == IDE 内容）
     if (hasIncoming) {
@@ -89,7 +90,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 apiSummary: prev?.apiSummary ?? null,
             };
         });
-        // 元数据兜底：KV 存在但缺 javaVersion 时也用 meta 补
+        // 元数据兜底：任务存在但缺 javaVersion 时也用 meta 补
         if (meta?.javaVersion && !state.javaVersion) state.javaVersion = meta.javaVersion;
         if (meta?.projectName && !state.projectName) state.projectName = meta.projectName;
         if (meta?.packageName && !state.packageName) state.packageName = meta.packageName;
@@ -114,7 +115,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.status = "error";
             state.error = r.reason;
             state.logs.push(`× 安全校验拦截：${r.reason}`);
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
             return json({ error: r.reason, code: "POM_BLOCKED" }, 400);
         }
     }
@@ -125,7 +126,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     try {
         const { sha } = await getDefaultBranchSha(token);
         const branch = `build-${taskId}`;
-        // 删除可能残留的同名分支（上次构建失败未清理 + KV 过期重建），让创建幂等
+        // 删除可能残留的同名分支（上次构建失败未清理 + 任务过期重建），让创建幂等
         await deleteBranch(token, branch);
         await createBranch(token, sha, branch);
         state.buildBranch = branch;
@@ -133,7 +134,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         const treeFiles: { path: string; blobSha: string }[] = [];
         for (const file of state.generatedFiles) {
-            // 上传给 GitHub 时按需修补 plugin.yml 水印；不污染 KV state
+            // 上传给 GitHub 时按需修补 plugin.yml 水印；不污染持久化任务 state
             const content = file.path.endsWith("plugin.yml")
                 ? injectTahaiAuthor(file.content)
                 : file.content;
@@ -161,7 +162,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         state.status = "building";
-        await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        await putTask(context.env, taskId, JSON.stringify(state));
 
         // 通过所有校验且 GitHub 提交成功后再 increment daily 计数
         if (uid) await userBuildIncrement(context.env.TASKS, uid, userBuildUsed);
@@ -179,7 +180,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.status = "error";
         state.error = e.message;
         state.logs.push("× 构建启动失败: " + e.message);
-        await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        await putTask(context.env, taskId, JSON.stringify(state));
         return new Response(JSON.stringify({ error: e.message }), { status: 500 });
     }
 };

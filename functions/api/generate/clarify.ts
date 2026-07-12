@@ -1,6 +1,7 @@
 import { plannerClarifyPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const CLARIFY_MODEL = "deepseek-v4-pro";
@@ -56,7 +57,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const answers = body.answers as Record<string, string | string[]> | undefined;
     const extraPrompt = body.extraPrompt as string | undefined;
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -93,7 +94,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (state.clarifyRounds.length >= MAX_CLARIFY_ROUNDS) {
                 state.clarifyDone = true;
                 state.logs.push(`● 澄清轮次达到上限 ${MAX_CLARIFY_ROUNDS}，强制结束`);
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, { type: "result", done: true, todos: [] }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 await writer.close();
@@ -111,7 +112,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const callRes = await callReasoner(llm.url, llm.apiKey, llm.modelFor("pro"), system, user);
             const content = callRes.content;
             if (!llm.byok && uid && callRes.usage) {
-                const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), callRes.usage);
+                const cost = await accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), callRes.usage);
                 state.totalCost = cost.total;
                 state.consumedQuota = cost.consumed;
                 if (cost.outOfQuota) state.quotaExhausted = true;
@@ -125,7 +126,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     type: "log", msg: "× 澄清阶段解析失败，强制进入规划",
                 }));
                 state.clarifyDone = true;
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, { type: "result", done: true, todos: [] }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 await writer.close();
@@ -134,7 +135,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             if (parsed.needMoreInput) {
                 state.logs.push(`! 需求过于模糊，请求用户补充`);
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, {
                     type: "result", needMoreInput: true, hint: parsed.hint || "请补充更具体的功能描述",
                 }));
@@ -153,7 +154,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`● 澄清完成，共 ${state.clarifyRounds.length} 轮`);
             }
 
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
 
             await writer.write(sseEvent(encoder, { type: "result", done, todos }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

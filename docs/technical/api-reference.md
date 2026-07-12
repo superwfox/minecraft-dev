@@ -95,12 +95,12 @@ GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
 
 双模式端点。
 
-**模式 1：创建任务**（不传 `taskId`）—— 仅创建 KV 任务、写入 `userPrompt`/`coreType`/`version`，进入 `clarifying` 状态，**不调用 Planner**。
+**模式 1：创建任务**（不传 `taskId`）—— 仅创建 D1 任务、写入 `userPrompt`/`coreType`/`version`，进入 `clarifying` 状态，**不调用 Planner**。
 
 请求：`{ "userPrompt": "...", "coreType": "PAPER", "version": "1.21" }`
 响应：`{ "taskId": "1710556800000-abc123" }`
 
-**模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-v4-pro`（thinking），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 KV。
+**模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-v4-pro`（thinking），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 D1。
 
 请求：`{ "taskId": "1710556800000-abc123" }`
 
@@ -132,7 +132,7 @@ GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
 - `mainBlueprint` 缺失或非法（`isValidBlueprint`）返回 422
 - 每个文件必须带合法 `generatorType`（`GENERATOR_TYPES` 之一），否则 422
 - `plan` 经拓扑排序（`order` 单调），并计算 `bucket` 深度；**`MainGen` 强制放最后一桶**
-- 任务状态写入 KV，TTL 1 小时
+- 任务状态写入 D1，逻辑有效期 1 小时
 
 ### POST /api/generate/clarify
 
@@ -189,7 +189,7 @@ GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
 - 并发上限 `GEN_CONCURRENCY`（环境变量，默认 2）
 - 每文件经 reChecker 审查；`missing_classes` 非空时动态补生（`MAX_DYNAMIC_GEN = 3`）；其他错误 rework（`MAX_REWORK = 5`）
 - 单文件 5 次未过、桶内任意文件抛异常、或整桶执行失败 → 始终发出 `result`（`replan=true`），避免前端拿到 null
-- 桶完成后所有文件的 `FileSummary` 回填 KV，供下一桶注入
+- 桶完成后所有文件的 `FileSummary` 回填 D1 任务状态，供下一桶注入
 
 ### POST /api/generate/file（legacy）
 
@@ -261,8 +261,8 @@ data: [DONE]
 **请求**：`GET /api/generate/download?taskId=...`
 **响应**：`application/zip`，`Content-Disposition: attachment; filename="{projectName}.zip"`
 
-- 从 KV 读 `artifactId`，调 GitHub API 下载
-- 下载后清理 KV 记录与临时分支
+- 从 D1 读 `artifactId`，调 GitHub API 下载
+- 下载后清理 D1 记录与临时分支
 - GitHub artifact API 返回 302，需手动处理避免 auth 头泄露
 
 ## 错误处理
@@ -292,3 +292,7 @@ data: [DONE]
 需在 Cloudflare 创建 KV 命名空间并以变量名 `TASKS` 绑定到 Pages 项目。本地开发 `wrangler pages dev --kv TASKS` 会自动创建本地 KV。
 
 可选绑定 `API_RATE_LIMITER` 使用 Cloudflare Rate Limiting API。存在该绑定时，中间件按登录用户（匿名入口按 IP）限流且不访问 KV。若改用域名级 WAF Rate Limiting，请设置 Production 环境变量 `EDGE_RATE_LIMITING=true` 关闭 KV 兜底。两者均缺失时仅昂贵写端点使用 `TASKS` 兜底，`status`、`verify`、`download` 等端点不会为限流产生 KV 操作。
+
+## D1 绑定
+
+生产环境以变量名 `DB` 绑定 D1 数据库，并执行 `migrations/0001_generation_tasks.sql` 初始化表结构。D1 只保存生成任务和单任务成本；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。

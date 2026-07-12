@@ -3,6 +3,7 @@ import { getSkillBundles } from "../../_lib/skills";
 import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
+import { cleanupExpiredTasks, getTask, putTask } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const PLANNER_MODEL = "deepseek-v4-pro";
@@ -158,7 +159,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             skills,
             logs: ["任务已创建，进入澄清阶段"],
         };
-        await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        const uid: string = (context.data as any)?.uid || "";
+        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
         return new Response(JSON.stringify({ taskId }), {
             headers: { "Content-Type": "application/json" },
         });
@@ -166,7 +169,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // ─── Mode 2: finalize plan using reasoner + clarify answers ───
     const taskId = body.taskId as string;
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -234,10 +237,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const data = await resp.json() as any;
     const content = stripFences(data.choices?.[0]?.message?.content ?? "");
 
-    // 计费：累积 Planner 调用成本到 taskCost:<taskId>（BYOK 自带 key 时跳过）
+    // 计费：累积 Planner 调用成本到 D1 任务记录（BYOK 自带 key 时跳过）
     const uid: string | undefined = (context.data as any)?.uid;
     if (!llm.byok && uid && data.usage) {
-        const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), data.usage);
+        const cost = await accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), data.usage);
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -319,7 +322,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     state.currentBucket = 0;
     state.logs.push(`Planner 完成，${sortedFiles.length} 个文件分布在 ${totalBuckets} 个深度桶`);
 
-    await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+    await putTask(context.env, taskId, JSON.stringify(state));
 
     return new Response(JSON.stringify({
         taskId,

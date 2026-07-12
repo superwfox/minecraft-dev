@@ -3,6 +3,7 @@ import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -125,7 +126,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const llm = await resolveLLM(context);
     const token = context.env.GITHUB_PAT;
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -151,7 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const flushCharge = async () => {
         if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
         chargeFlushed = true;
-        const cost = await accumulateCosts(context.env.TASKS, uid, taskId, pendingUsage.splice(0));
+        const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -276,7 +277,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             delete state.runId;
             delete state.buildBranch;
             await flushCharge();
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
 
             await writer.write(sseEvent(encoder, { type: "log", msg: `● 修复完成，共修复 ${fixedCount} 个文件` }));
             state.logs.push(`● 修复完成，共修复 ${fixedCount} 个文件`);

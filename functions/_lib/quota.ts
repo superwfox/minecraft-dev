@@ -1,4 +1,11 @@
-// 额度与限流（基于 KV，复用 TASKS 命名空间，键各自前缀隔离）。
+import {
+    addTaskCostInD1,
+    getTaskCostFromD1,
+    setTaskCostConsumedInD1,
+    type TaskStoreEnv,
+} from "./taskStore";
+
+// 用户额度与限流继续使用 KV；高频任务成本优先存入 D1。
 //
 // 模型：
 //   - 免费额度：每月 FREE_MONTHLY 件，每月 1 号清零（key free:<uid>:<yyyymm>）
@@ -177,46 +184,66 @@ function costOf(model: string, u: UsageBreakdown): number {
  * 余额耗尽时返回 outOfQuota=true，调用方应在 state 上打标记，下次入口拒绝。
  */
 export async function accumulateCosts(
-    kv: KVNamespace, uid: string, taskId: string,
+    env: TaskStoreEnv, uid: string, taskId: string,
     entries: UsageCostEntry[],
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
     if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
     const cost = entries.reduce((sum, entry) => sum + (entry.usage ? costOf(entry.model, entry.usage) : 0), 0);
     if (cost <= 0) {
-        const raw = await kv.get(`taskCost:${taskId}`);
+        const d1Rec = await getTaskCostFromD1(env, taskId);
+        if (d1Rec) return { ...d1Rec, outOfQuota: false, delta: 0 };
+        const raw = await env.TASKS.get(`taskCost:${taskId}`);
         const rec: TaskCost = raw ? JSON.parse(raw) : { uid, total: 0, consumed: 0 };
         return { consumed: rec.consumed, total: rec.total, outOfQuota: false, delta: 0 };
     }
 
+    const d1Rec = await addTaskCostInD1(env, taskId, uid, cost);
+    if (d1Rec) {
+        let consumed = d1Rec.consumed;
+        let outOfQuota = false;
+        const target = Math.floor(d1Rec.total / COST_PER_QUOTA);
+        while (consumed < target) {
+            const ok = await consume(env.TASKS, uid);
+            if (!ok) { outOfQuota = true; break; }
+            consumed++;
+        }
+        if (consumed !== d1Rec.consumed) {
+            await setTaskCostConsumedInD1(env, taskId, consumed);
+        }
+        return { consumed, total: d1Rec.total, outOfQuota, delta: cost };
+    }
+
     const key = `taskCost:${taskId}`;
-    const raw = await kv.get(key);
+    const raw = await env.TASKS.get(key);
     const rec: TaskCost = raw ? JSON.parse(raw) : { uid, total: 0, consumed: 0 };
     rec.total += cost;
 
     let outOfQuota = false;
     const target = Math.floor(rec.total / COST_PER_QUOTA);
     while (rec.consumed < target) {
-        const ok = await consume(kv, uid);
+        const ok = await consume(env.TASKS, uid);
         if (!ok) { outOfQuota = true; break; }
         rec.consumed++;
     }
-    await kv.put(key, JSON.stringify(rec), { expirationTtl: 3 * 24 * 3600 });
+    await env.TASKS.put(key, JSON.stringify(rec), { expirationTtl: 3 * 24 * 3600 });
     return { consumed: rec.consumed, total: rec.total, outOfQuota, delta: cost };
 }
 
 /** 单次调用兼容入口；同一请求包含多次 LLM 调用时优先使用 accumulateCosts 批量结算。 */
 export async function accumulateCost(
-    kv: KVNamespace, uid: string, taskId: string,
+    env: TaskStoreEnv, uid: string, taskId: string,
     model: string, usage?: UsageBreakdown,
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
     if (!usage) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
-    return accumulateCosts(kv, uid, taskId, [{ model, usage }]);
+    return accumulateCosts(env, uid, taskId, [{ model, usage }]);
 }
 
 export async function getTaskCost(
-    kv: KVNamespace, taskId: string,
+    env: TaskStoreEnv, taskId: string,
 ): Promise<{ total: number; consumed: number }> {
-    const raw = await kv.get(`taskCost:${taskId}`);
+    const d1Rec = await getTaskCostFromD1(env, taskId);
+    if (d1Rec) return d1Rec;
+    const raw = await env.TASKS.get(`taskCost:${taskId}`);
     if (!raw) return { total: 0, consumed: 0 };
     try {
         const r = JSON.parse(raw);

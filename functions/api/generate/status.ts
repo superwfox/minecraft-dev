@@ -1,4 +1,5 @@
 import { getRunStatus, getArtifactInfo, findRunByBranch, deleteBranch } from "../../_lib/github";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 interface Env {
     GITHUB_PAT: string;
@@ -11,7 +12,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!taskId) return new Response("Missing taskId", { status: 400 });
 
     const token = context.env.GITHUB_PAT;
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
     let discoveredRun = false;
@@ -36,7 +37,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (status !== "completed") {
         // 仅在首次发现 runId 时落一次；若本次已完成，则与终态合并为下方一次写入。
         if (discoveredRun) {
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
         }
         return new Response(JSON.stringify({ status: "building", runStatus: status }), {
             headers: { "Content-Type": "application/json" },
@@ -64,7 +65,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         deleteBranch(token, state.buildBranch).catch(() => { });
     }
 
-    await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+    await putTask(context.env, taskId, JSON.stringify(state));
 
     return new Response(JSON.stringify({
         status: state.status,

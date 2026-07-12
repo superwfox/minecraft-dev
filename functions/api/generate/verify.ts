@@ -1,3 +1,5 @@
+import { getTask, putTask } from "../../_lib/taskStore";
+
 interface Env {
     TASKS: KVNamespace;
 }
@@ -5,7 +7,7 @@ interface Env {
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, fixMissing } = await context.request.json() as any;
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -19,7 +21,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.plan.push({ ...entry });
         }
         state.logs.push(`↻ ${missing.length} 个缺失文件已加入重试队列`);
-        await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+        await putTask(context.env, taskId, JSON.stringify(state));
     }
 
     return new Response(JSON.stringify({

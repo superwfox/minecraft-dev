@@ -2,6 +2,7 @@ import { graderPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/complexity";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
@@ -55,7 +56,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const taskId = body.taskId as string;
     const correction = body.correction as string | undefined;
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -89,7 +90,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const callRes = await callReasoner(llm.url, llm.apiKey, llm.modelFor("pro"), system, user);
 
             if (!llm.byok && uid && callRes.usage) {
-                const cost = await accumulateCost(context.env.TASKS, uid, taskId, llm.modelFor("pro"), callRes.usage);
+                const cost = await accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), callRes.usage);
                 state.totalCost = cost.total;
                 state.consumedQuota = cost.consumed;
                 if (cost.outOfQuota) state.quotaExhausted = true;
@@ -102,7 +103,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 // 分级解析失败：兜底当直接级走原路径，避免卡死（仍受现有 plannerPrompt 极简约束）
                 state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null };
                 state.logs.push("× 分级解析失败，按直接级继续");
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -123,7 +124,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 chosenPathId: null,
             };
             state.logs.push(`复杂度分级：${level}${parsed.level_reason ? "（" + parsed.level_reason + "）" : ""}`);
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
 
             await writer.write(sseEvent(encoder, gateRequired
                 ? { type: "result", direct: false, level, paths }
@@ -132,7 +133,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         } catch (e: any) {
             // 出错兜底：重置 grade 为非门控并落库（避免上一轮 gateRequired 残留导致 plan 误判 400），按直接级继续
             state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null };
-            try { await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 }); } catch { /* ignore */ }
+            try { await putTask(context.env, taskId, JSON.stringify(state)); } catch { /* ignore */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 分级错误: ${e.message}` }));
             await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

@@ -2,6 +2,7 @@ import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGen
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { getTask, putTask } from "../../_lib/taskStore";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -334,7 +335,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         concurrency = Math.max(2, parseInt(context.env.GEN_CONCURRENCY || "") || SUPER_CONCURRENCY);
     }
 
-    const raw = await context.env.TASKS.get(taskId);
+    const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
     // 挂了 skill 的任务：prompt 更大、文件更多，强制串行，避免大 prompt × 并发撞 CF Worker 限制
@@ -356,7 +357,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const flushCharge = async () => {
         if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
         chargeFlushed = true;
-        const cost = await accumulateCosts(context.env.TASKS, uid, taskId, pendingUsage.splice(0));
+        const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) state.quotaExhausted = true;
@@ -419,7 +420,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {
                 state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
@@ -457,8 +458,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             state.fileStatuses[target.path] = "error";
                         } else {
                             state.fileStatuses[target.path] = "done";
-                            // 本批结果先合并到内存，批次出口统一落一次 KV，避免同一 task key
-                            // 在 1 秒内重复/并发 put。默认模式每批仅一个文件，恢复粒度不变。
+                            // 本批结果先合并到内存，批次出口统一落一次 D1，减少整份任务重复写入。
+                            // 默认模式每批仅一个文件，恢复粒度不变。
                             state.generatedFiles.push({ path: r.path, content: r.content, apiSummary: r.apiSummary });
                             for (const nf of r.newFiles) {
                                 if (!state.generatedFiles.find((g: any) => g.path === nf.path)) {
@@ -502,7 +503,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = replanTriggered.reason ?? "审查未通过";
                 await flushCharge();
-                await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, replan: true,
                     path: replanTriggered.path, reason: replanTriggered.reason,
@@ -513,12 +514,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶。
-            // usage 与任务状态均在此批量结算，各自最多一次 KV 写入。
+            // usage 与任务状态均在此批量结算，各自最多一次 D1 写入。
             const bucketDone = pending.length <= targets.length;
             if (bucketDone) state.currentBucket = bucketIndex + 1;
             state.currentFileIndex = state.generatedFiles.length;
             await flushCharge();
-            await context.env.TASKS.put(taskId, JSON.stringify(state), { expirationTtl: 3600 });
+            await putTask(context.env, taskId, JSON.stringify(state));
 
             dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
             await writer.write(sseEvent(encoder, {
