@@ -217,15 +217,15 @@ function seededRandom(seed: number) {
 }
 
 const ambientRandom = seededRandom(0x0B51D1A);
-const ambientPixels = Array.from({length: 68}, (_, id) => {
-    // Two fading dotted rays describe the wedge. There is deliberately no filled light field.
-    const progress = 0.03 + Math.pow(ambientRandom(), 1.34) * 0.83;
-    const edgeJitter = (ambientRandom() - 0.5) * (0.02 + progress * 0.025);
-    const onWideEdge = id % 2 === 0;
+const ambientPixels = Array.from({length: 124}, (_, id) => {
+    // Scatter the same block particles across the complete triangular cone.
+    const progress = 0.03 + Math.sqrt(ambientRandom()) * 0.83;
     const longAxis = progress * 0.94;
     const shortAxis = progress * 0.31;
-    const x = Math.min(0.94, Math.max(0.012, (onWideEdge ? longAxis : shortAxis) + edgeJitter));
-    const y = Math.min(0.94, Math.max(0.012, (onWideEdge ? shortAxis : longAxis) - edgeJitter));
+    const crossSection = ambientRandom();
+    const jitter = (ambientRandom() - 0.5) * (0.012 + progress * 0.018);
+    const x = Math.min(0.94, Math.max(0.012, shortAxis + (longAxis - shortAxis) * crossSection + jitter));
+    const y = Math.min(0.94, Math.max(0.012, longAxis - (longAxis - shortAxis) * crossSection - jitter));
     const size = Math.round(4 + (1 - progress) * 7 + ambientRandom() * 4);
     const alpha = (0.055 + Math.pow(1 - progress, 1.38) * (0.36 + ambientRandom() * 0.18)).toFixed(3);
     const gray = Math.round(126 + ambientRandom() * 62);
@@ -581,7 +581,7 @@ watch(() => genTask.phase, (p) => {
   align-items: stretch;
 }
 
-/* The light cone is defined only by pixel distribution; the canvas stays pure black. */
+/* The cone is filled entirely by block particles; the canvas stays pure black. */
 .ambient-field {
   position: fixed;
   inset: 0;
@@ -1200,7 +1200,7 @@ watch(() => genTask.phase, (p) => {
 }
 
 @media (max-width: 700px) {
-  .wedge-pixel:nth-child(n + 43) { display: none; }
+  .wedge-pixel:nth-child(n + 83) { display: none; }
   .pixel-wedge { opacity: 0.82; }
 }
 
@@ -1216,7 +1216,7 @@ watch(() => genTask.phase, (p) => {
   .send-btn > span { display: none; }
   .more-input-row { align-items: stretch; flex-direction: column; }
   .more-input-row .floor-btn { width: 100%; margin-top: 0; }
-  .wedge-pixel:nth-child(n + 31) { display: none; }
+  .wedge-pixel:nth-child(n + 61) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
