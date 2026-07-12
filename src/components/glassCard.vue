@@ -37,7 +37,7 @@
   column-gap: 24px;
   transform: translateX(-50%);
   isolation: isolate;
-  overflow: hidden;
+  overflow: visible;
   background: transparent;
   backdrop-filter: blur(32px) saturate(92%);
   -webkit-backdrop-filter: blur(32px) saturate(92%);
