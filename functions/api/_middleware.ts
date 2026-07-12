@@ -15,6 +15,8 @@ interface Env {
     API_RATE_LIMITER?: {
         limit(options: { key: string }): Promise<{ success: boolean }>;
     };
+    /** 使用域名级 WAF Rate Limiting 时设为 true，关闭 KV 限流兜底。 */
+    EDGE_RATE_LIMITING?: string;
 }
 
 // 需要登录的（贵）端点
@@ -63,14 +65,15 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     if (needsRateLimit(path)) {
         const ip = request.headers.get("CF-Connecting-IP") || "0.0.0.0";
         const limiterKey = session?.uid ? `user:${session.uid}` : `ip:${ip}`;
+        const edgeLimiterEnabled = /^(1|true|yes)$/i.test(env.EDGE_RATE_LIMITING || "");
         let allowed = true;
         if (env.API_RATE_LIMITER) {
             try {
                 allowed = (await env.API_RATE_LIMITER.limit({ key: limiterKey })).success;
             } catch {
-                if (needsKvFallbackLimit(path)) allowed = await ipAllow(env.TASKS, ip, path);
+                if (!edgeLimiterEnabled && needsKvFallbackLimit(path)) allowed = await ipAllow(env.TASKS, ip, path);
             }
-        } else if (needsKvFallbackLimit(path)) {
+        } else if (!edgeLimiterEnabled && needsKvFallbackLimit(path)) {
             allowed = await ipAllow(env.TASKS, ip, path);
         }
         if (!allowed) return json({ error: "请求过于频繁，请稍后再试" }, 429);

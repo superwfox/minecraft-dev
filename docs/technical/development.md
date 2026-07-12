@@ -63,7 +63,7 @@ npm run dev
 
 生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
 
-生产环境建议另外配置变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding。配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`；未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
+生产环境可选择变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding；配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`。Pages + Git 集成更推荐在域名上建立 WAF Rate Limiting rule，并在 Pages 的 Production 环境变量中设置 `EDGE_RATE_LIMITING=true`，同样会关闭 KV 限流兜底。两者均未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
 
 ## 项目结构
 

@@ -291,4 +291,4 @@ data: [DONE]
 
 需在 Cloudflare 创建 KV 命名空间并以变量名 `TASKS` 绑定到 Pages 项目。本地开发 `wrangler pages dev --kv TASKS` 会自动创建本地 KV。
 
-可选绑定 `API_RATE_LIMITER` 使用 Cloudflare Rate Limiting API。存在该绑定时，中间件按登录用户（匿名入口按 IP）限流且不访问 KV；缺失时仅昂贵写端点使用 `TASKS` 兜底，`status`、`verify`、`download` 等端点不会为限流产生 KV 操作。
+可选绑定 `API_RATE_LIMITER` 使用 Cloudflare Rate Limiting API。存在该绑定时，中间件按登录用户（匿名入口按 IP）限流且不访问 KV。若改用域名级 WAF Rate Limiting，请设置 Production 环境变量 `EDGE_RATE_LIMITING=true` 关闭 KV 兜底。两者均缺失时仅昂贵写端点使用 `TASKS` 兜底，`status`、`verify`、`download` 等端点不会为限流产生 KV 操作。

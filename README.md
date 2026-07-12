@@ -354,6 +354,7 @@ CF 端需要的环境变量与绑定：
 - `GEN_CONCURRENCY` —— 可选，默认 2
 - KV namespace 绑定名 `TASKS`
 - `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
+- `EDGE_RATE_LIMITING=true` —— 使用域名级 WAF Rate Limiting 时设置；关闭代码内 KV 限流兜底
 
 ---
 
