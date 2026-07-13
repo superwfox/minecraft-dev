@@ -1,17 +1,13 @@
 <template>
   <GlassCard>
     <div class="header">
-      <div class="logo-wrap">
+      <div
+        ref="logoWrap"
+        class="logo-wrap"
+        @pointerenter="openQuota"
+        @pointerleave="scheduleQuotaClose"
+      >
         <img class="header-icon" :src="logoSrc" alt="icon" @click="goHome">
-        <!-- hover 浮层：剩余额度 + 订单兑换（仅登录后） -->
-        <div v-if="authState.user" class="quota-pop">
-          <div class="quota-line">剩余额度：<b>{{ authState.quota?.remaining ?? 0 }}</b></div>
-          <div class="quota-sub" v-if="authState.quota">
-            免费 {{ authState.quota.freeRemaining }} · 充值 {{ authState.quota.paidBalance }}
-          </div>
-          <button class="recharge-btn" @click="openSponsor">充值额度</button>
-          <div class="quota-logout" @click="doLogout">退出登录</div>
-        </div>
       </div>
       <span class="header-title" @click="goHome">tahai</span>
     </div>
@@ -35,12 +31,29 @@
       </a>
     </div>
   </GlassCard>
+  <Teleport to="body">
+    <div
+      v-if="authState.user"
+      class="quota-pop"
+      :class="{ open: quotaOpen }"
+      :style="quotaPopStyle"
+      @pointerenter="cancelQuotaClose"
+      @pointerleave="scheduleQuotaClose"
+    >
+      <div class="quota-line">剩余额度：<b>{{ authState.quota?.remaining ?? 0 }}</b></div>
+      <div class="quota-sub" v-if="authState.quota">
+        免费 {{ authState.quota.freeRemaining }} · 充值 {{ authState.quota.paidBalance }}
+      </div>
+      <button class="recharge-btn" @click="openSponsor">充值额度</button>
+      <div class="quota-logout" @click="doLogout">退出登录</div>
+    </div>
+  </Teleport>
   <router-view/>
   <SponsorModal/>
 </template>
 
 <script setup lang="ts">
-import {provide, ref, onMounted, computed} from "vue";
+import {provide, ref, onMounted, onBeforeUnmount, computed} from "vue";
 import GlassCard from "./components/glassCard.vue";
 import SponsorModal from "./components/sponsorModal.vue";
 import TopNav from "./components/TopNav.vue";
@@ -55,12 +68,62 @@ const centerText = ref("");
 provide("centerText", centerText);
 
 const logoSrc = computed(() => currentLogo());
+const logoWrap = ref<HTMLElement | null>(null);
+const quotaOpen = ref(false);
+const quotaPosition = ref({ top: 0, left: 0 });
+const quotaPopStyle = computed(() => ({
+  top: `${quotaPosition.value.top}px`,
+  left: `${quotaPosition.value.left}px`,
+}));
+
+const QUOTA_WIDTH = 220;
+const QUOTA_GAP = 8;
+const VIEWPORT_GUTTER = 12;
+let quotaCloseTimer: number | undefined;
+
+function updateQuotaPosition() {
+  const anchor = logoWrap.value;
+  if (!anchor) return;
+
+  const rect = anchor.getBoundingClientRect();
+  const width = Math.min(QUOTA_WIDTH, window.innerWidth - VIEWPORT_GUTTER * 2);
+  const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - width - VIEWPORT_GUTTER);
+  quotaPosition.value = {
+    top: rect.bottom + QUOTA_GAP,
+    left: Math.min(Math.max(rect.left, VIEWPORT_GUTTER), maxLeft),
+  };
+}
+
+function cancelQuotaClose() {
+  if (quotaCloseTimer === undefined) return;
+  window.clearTimeout(quotaCloseTimer);
+  quotaCloseTimer = undefined;
+}
+
+function openQuota() {
+  if (!authState.user) return;
+  cancelQuotaClose();
+  updateQuotaPosition();
+  quotaOpen.value = true;
+}
+
+function scheduleQuotaClose() {
+  cancelQuotaClose();
+  quotaCloseTimer = window.setTimeout(() => {
+    quotaOpen.value = false;
+    quotaCloseTimer = undefined;
+  }, 180);
+}
 
 function openSponsor() {
+  cancelQuotaClose();
+  quotaOpen.value = false;
   showSponsorModal.value = true;
 }
 
 function doLogout() {
+  cancelQuotaClose();
+  quotaOpen.value = false;
   logout();
 }
 
@@ -68,6 +131,12 @@ restoreSession();
 onMounted(() => {
   startSessionPersistence();
   fetchMe();
+  window.addEventListener("resize", updateQuotaPosition);
+});
+
+onBeforeUnmount(() => {
+  cancelQuotaClose();
+  window.removeEventListener("resize", updateQuotaPosition);
 });
 </script>
 
@@ -174,11 +243,8 @@ body {
 }
 
 .quota-pop {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin-top: 8px;
-  width: 220px;
+  position: fixed;
+  width: min(220px, calc(100vw - 24px));
   padding: 14px 14px 10px;
   border-radius: 14px;
   background: rgba(8, 9, 10, 0.94);
@@ -186,9 +252,10 @@ body {
   box-shadow: 0 16px 42px rgba(0, 0, 0, 0.58);
   color: var(--text-primary);
   font-size: 14px;
-  z-index: 60;
+  z-index: 90;
   opacity: 0;
   visibility: hidden;
+  pointer-events: none;
   transform: translateY(-4px);
   transition: opacity 0.15s, transform 0.15s, visibility 0.15s;
 }
@@ -203,9 +270,10 @@ body {
   height: 8px;
 }
 
-.logo-wrap:hover .quota-pop {
+.quota-pop.open {
   opacity: 1;
   visibility: visible;
+  pointer-events: auto;
   transform: translateY(0);
 }
 
