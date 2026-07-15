@@ -105,7 +105,7 @@
       <div class="gen-append">
         <textarea v-model="appendText" class="gen-append-input" rows="3"
                   placeholder="描述要追加 / 修改的功能，AI 将在当前项目上增量实现并重新编译（如：再加一条 /heal 命令）"
-                  @keydown.enter.exact.prevent="submitAppend"></textarea>
+                  @keydown.enter.exact="onAppendEnter"></textarea>
         <div class="gen-append-foot">
           <span class="gen-append-hint">增量基于当前生成版本 · Enter 提交</span>
           <button class="gen-append-btn" :disabled="!appendText.trim()" @click="submitAppend">追加并重建</button>
@@ -128,6 +128,7 @@ import {ref, computed, watch, nextTick} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
 import type {GeneratorType, GenFile} from "../logic/generateState";
 import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
+import {isImeComposing} from "../logic/keyboard";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
 
 // 后台活跃阶段（无逐字流）显示跑马灯
@@ -168,6 +169,12 @@ function submitAppend() {
     if (!t) return;
     appendText.value = "";
     appendFeature(t);
+}
+
+function onAppendEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    submitAppend();
 }
 
 const generatorLabels: Record<GeneratorType, string> = {

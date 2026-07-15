@@ -77,7 +77,7 @@
         <div class="more-input-row">
           <input v-model="extraInput" class="more-input-field"
                  placeholder="补充你的需求描述..."
-                 @keydown.enter="sendExtra"/>
+                 @keydown.enter="onExtraEnter"/>
           <button class="floor-btn" :disabled="!extraInput.trim()" @click="sendExtra">
             提交补充
           </button>
@@ -102,7 +102,7 @@
             <textarea ref="composerEl" class="composer-input" v-model="inputText"
                       :placeholder="composerPlaceholder" :disabled="composerDisabled"
                       rows="2"
-                      @keydown.enter.exact.prevent="send"></textarea>
+                      @keydown.enter.exact="onComposerEnter"></textarea>
           </div>
           <div class="composer-actions">
             <button class="action-btn voice-btn" :class="{recording: isRecording}"
@@ -171,6 +171,7 @@ import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../lo
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting, restoreGenTask} from "../logic/generateState";
 import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
+import {isImeComposing} from "../logic/keyboard";
 import {Layers3, Mic, RotateCcw, Send, Square, X} from "lucide-vue-next";
 
 const centerText = inject<Ref<string>>("centerText")!;
@@ -441,11 +442,23 @@ async function send() {
     }
 }
 
+function onComposerEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    void send();
+}
+
 function sendExtra() {
     const t = extraInput.value.trim();
     if (!t) return;
     extraInput.value = "";
     submitExtraPrompt(t);
+}
+
+function onExtraEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    sendExtra();
 }
 
 function onRefresh() {

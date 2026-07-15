@@ -54,7 +54,7 @@
         <textarea ref="inputRef" v-model="input" class="open-input"
                   :placeholder="streaming ? '生成中...' : '描述你想做的（创建 / 修改 / 询问），Shift+Enter 换行'"
                   :disabled="streaming"
-                  @keydown.enter.exact.prevent="send"
+                  @keydown.enter.exact="onInputEnter"
                   rows="1"/>
         <button class="open-send" :disabled="!input.trim() || streaming" @click="send">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
@@ -68,6 +68,7 @@
 
 <script setup lang="ts">
 import {ref, watch, nextTick} from "vue";
+import {isImeComposing} from "../../logic/keyboard";
 
 export type ChatFileAction = { path: string; action: "create" | "edit"; content: string };
 export type ChatMessage = {
@@ -118,6 +119,12 @@ function send() {
     if (!t || props.streaming) return;
     input.value = "";
     emit("send", t);
+}
+
+function onInputEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    send();
 }
 
 watch(() => props.state, async (v) => {
