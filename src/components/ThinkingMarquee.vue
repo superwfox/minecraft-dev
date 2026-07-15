@@ -1,6 +1,6 @@
 <template>
-  <div ref="rootEl" class="tm" :class="`tm-${variant}`" role="status" aria-live="polite" aria-atomic="true">
-    <Transition name="tm-fade" mode="out-in">
+  <div class="tm" :class="`tm-${variant}`" role="status" aria-live="polite" aria-atomic="true">
+    <Transition name="tm-fade" mode="out-in" @after-enter="fitHeroWord">
       <span ref="wordEl" class="tm-word" :key="word" :data-text="word + '…'"
             :style="heroWordStyle">{{ word }}…</span>
     </Transition>
@@ -11,68 +11,72 @@
 import {computed, nextTick, onMounted, onUnmounted, ref, watch} from "vue";
 
 const props = withDefaults(defineProps<{ variant?: "hero" | "compact" }>(), { variant: "compact" });
+const emit = defineEmits<{
+  (event: "size-change", size: {width: number; height: number}): void;
+}>();
 
 // 缓解等待焦虑：非流式后没有逐字思考流，用单色高光扫过这些状态词表示「仍在工作」。
-// 每个词高光扫过 3 次后停住（CSS iteration-count: 3），静置片刻再淡出切换 —— 避免高光刚露头就被下一个词打断。
+// 每个词总共停留 2.5s；Hero 使用更大的字号，并把实测尺寸通知外层聊天框。
 const WORDS = ["working", "thinking", "deliberating", "fostering", "leafing"];
+const WORD_INTERVAL_MS = 2500;
+const HERO_FONT_SIZE = 136;
+const HERO_MIN_FONT_SIZE = 32;
+const HERO_BOX_INLINE_PADDING = 64;
+const HERO_BOX_BLOCK_PADDING = 32;
 const word = ref(WORDS[0]);
-const rootEl = ref<HTMLElement | null>(null);
 const wordEl = ref<HTMLElement | null>(null);
-const heroFontSize = ref(68);
+const heroFontSize = ref(HERO_FONT_SIZE);
 const heroWordStyle = computed(() => props.variant === "hero"
   ? {fontSize: `${heroFontSize.value}px`}
   : undefined
 );
 let i = 0;
 let timer: any = null;
-let resizeObserver: ResizeObserver | null = null;
 
 async function fitHeroWord() {
   if (props.variant !== "hero") return;
+
+  // 每次换词先恢复目标字号，再只在当前视口装不下时按比例缩小。
+  heroFontSize.value = HERO_FONT_SIZE;
   await nextTick();
 
-  const root = rootEl.value;
   const el = wordEl.value;
-  if (!root || !el) return;
+  if (!el) return;
 
-  const rootStyle = getComputedStyle(root);
-  const availableWidth = root.clientWidth
-    - parseFloat(rootStyle.paddingLeft)
-    - parseFloat(rootStyle.paddingRight)
-    - 6;
-  const availableHeight = root.clientHeight
-    - parseFloat(rootStyle.paddingTop)
-    - parseFloat(rootStyle.paddingBottom)
-    - 4;
-  const rect = el.getBoundingClientRect();
-  const currentSize = parseFloat(getComputedStyle(el).fontSize);
-  if (availableWidth <= 0 || availableHeight <= 0 || rect.width <= 0 || rect.height <= 0 || currentSize <= 0) return;
-
-  const scale = Math.min(availableWidth / rect.width, availableHeight / rect.height);
-  const nextSize = Math.max(32, Math.min(112, currentSize * scale));
-  if (Math.abs(nextSize - heroFontSize.value) > 0.1) {
-    heroFontSize.value = Math.floor(nextSize * 10) / 10;
+  const maxBoxWidth = Math.max(280, Math.min(1280, window.innerWidth - 24));
+  const maxWordWidth = maxBoxWidth - HERO_BOX_INLINE_PADDING;
+  const naturalRect = el.getBoundingClientRect();
+  if (naturalRect.width > maxWordWidth) {
+    heroFontSize.value = Math.max(
+      HERO_MIN_FONT_SIZE,
+      Math.floor(HERO_FONT_SIZE * maxWordWidth / naturalRect.width * 10) / 10,
+    );
+    await nextTick();
   }
+
+  const fittedRect = el.getBoundingClientRect();
+  emit("size-change", {
+    width: Math.min(maxBoxWidth, Math.ceil(fittedRect.width + HERO_BOX_INLINE_PADDING)),
+    height: Math.ceil(fittedRect.height + HERO_BOX_BLOCK_PADDING),
+  });
 }
 
-// Hero 以四分之一速度播放：6.4s × 3 + 3.6s 静置 = 22.8s；compact 保持原节奏。
 onMounted(() => {
   timer = setInterval(() => {
     i = (i + 1) % WORDS.length;
     word.value = WORDS[i];
-  }, props.variant === "hero" ? 22800 : 5700);
+  }, WORD_INTERVAL_MS);
 
-  if (props.variant === "hero" && rootEl.value) {
-    resizeObserver = new ResizeObserver(() => { void fitHeroWord(); });
-    resizeObserver.observe(rootEl.value);
+  if (props.variant === "hero") {
     void fitHeroWord();
     void document.fonts?.ready.then(() => fitHeroWord());
+    window.addEventListener("resize", fitHeroWord);
   }
 });
 watch(word, () => { void fitHeroWord(); });
 onUnmounted(() => {
   if (timer) clearInterval(timer);
-  resizeObserver?.disconnect();
+  window.removeEventListener("resize", fitHeroWord);
 });
 </script>
 
@@ -109,15 +113,14 @@ onUnmounted(() => {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  animation: tm-shine 1.6s linear 3;
+  animation: tm-shine 0.7s linear 3;
 }
 
 .tm-hero {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
   min-width: 0;
   min-height: 0;
-  padding: 4px 6px;
   box-sizing: border-box;
   justify-content: center;
 }
@@ -126,7 +129,6 @@ onUnmounted(() => {
   line-height: 1.08;
   letter-spacing: -0.035em;
 }
-.tm-hero .tm-word::after { animation-duration: 6.4s; }
 .tm-compact .tm-word { font-size: 14px; letter-spacing: 0; }
 
 @keyframes tm-shine {
@@ -136,13 +138,10 @@ onUnmounted(() => {
 
 /* 词间淡入淡出（out-in：旧词淡出后新词淡入，无硬切） */
 .tm-fade-enter-active,
-.tm-fade-leave-active { transition: opacity 0.3s ease, transform 0.3s ease; }
+.tm-fade-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
 .tm-fade-enter-from { opacity: 0; transform: translateY(4px); }
 .tm-fade-leave-to { opacity: 0; transform: translateY(-4px); }
 
-@media (max-width: 760px) {
-  .tm-hero { padding-inline: 4px; }
-}
 @media (prefers-reduced-motion: reduce) {
   .tm-word::after { animation: none; }
   .tm-fade-enter-active, .tm-fade-leave-active { transition: none; }

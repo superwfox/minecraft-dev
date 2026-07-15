@@ -94,8 +94,10 @@
       </div>
 
       <!-- Thinking 与输入框共享同一占位，工作态直接替换输入框 -->
-      <div class="composer-stage">
-        <div v-if="aiWorking" class="focus-marquee"><ThinkingMarquee variant="hero"/></div>
+      <div class="composer-stage" :class="{'is-working': aiWorking}" :style="workingStageStyle">
+        <div v-if="aiWorking" class="focus-marquee" :style="workingBoxStyle">
+          <ThinkingMarquee variant="hero" @size-change="onWorkingSize"/>
+        </div>
 
         <div v-else class="composer" :class="{ disabled: composerDisabled }">
           <div class="composer-input-shell">
@@ -183,6 +185,7 @@ const sending = ref(false);
 const composerEl = ref<HTMLTextAreaElement | null>(null);
 const reasonBodyEl = ref<HTMLElement | null>(null); // 思考流容器，用于自动粘底
 const showResetModal = ref(false);
+const workingSize = ref({width: 640, height: 180});
 
 // 思考流自动跟随到底部:内容增长时,若用户本就贴着底部就跟随滚到底;
 // 若用户上翻查看历史(距底 > 60px)则不打扰。pinned 判定在 DOM 更新前读取旧位置,更新后再滚。
@@ -325,6 +328,18 @@ const aiWorking = computed(() =>
     || (["clarifying", "grading", "planning"].includes(genTask.phase)
         && !clarifyWaiting.value && !pathGateWaiting.value)
 );
+const workingStageStyle = computed(() => aiWorking.value ? {
+    height: `${workingSize.value.height}px`,
+    flexBasis: `${workingSize.value.height}px`,
+} : undefined);
+const workingBoxStyle = computed(() => ({
+    width: `${workingSize.value.width}px`,
+    height: `${workingSize.value.height}px`,
+}));
+
+function onWorkingSize(size: {width: number; height: number}) {
+    workingSize.value = size;
+}
 const showRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
 
 // 已选 skill：输入框上方的紧凑上下文条
@@ -684,9 +699,15 @@ watch(() => genTask.phase, (p) => {
   height: 116px;
   flex: 0 0 116px;
 }
+.composer-stage.is-working {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: height 0.24s ease, flex-basis 0.24s ease;
+}
 .focus-marquee {
-  width: 100%;
-  height: 100%;
+  flex: 0 0 auto;
+  max-width: calc(100vw - 24px);
   min-height: 0;
   box-sizing: border-box;
   border: 1px solid var(--line);
@@ -698,9 +719,10 @@ watch(() => genTask.phase, (p) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 14px;
+  padding: 16px 32px;
   --oak-border: var(--line-bright);
   --oak-highlight: #d5c9ac;
+  transition: width 0.24s ease, height 0.24s ease;
 }
 .focus-error {
   text-align: center;
@@ -745,6 +767,7 @@ watch(() => genTask.phase, (p) => {
   flex-direction: column;
   gap: 12px;
   padding: 2px;
+  font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 .qa-item {
   display: flex;
@@ -1215,7 +1238,7 @@ watch(() => genTask.phase, (p) => {
 
 @media (max-height: 760px) {
   .chat-page.is-focus { padding-top: 88px; }
-  .composer-stage { height: 112px; flex-basis: 112px; }
+  .composer-stage:not(.is-working) { height: 112px; flex-basis: 112px; }
 }
 
 @media (max-width: 700px) {
@@ -1225,7 +1248,8 @@ watch(() => genTask.phase, (p) => {
 
 @media (max-width: 520px) {
   .chat-page.is-focus { padding: 96px 12px 32px; }
-  .composer-stage { height: 110px; flex-basis: 110px; }
+  .composer-stage:not(.is-working) { height: 110px; flex-basis: 110px; }
+  .focus-marquee { padding-inline: 32px; }
   .composer { gap: 8px; }
   .composer-input-shell { padding: 10px 11px 8px; }
   .composer-input { font-size: 14px; }

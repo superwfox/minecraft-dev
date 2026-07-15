@@ -164,6 +164,7 @@ function confirm() {
     flex-direction: column;
     gap: 14px;
     padding: 18px;
+    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 .clarify-header {
     display: flex;

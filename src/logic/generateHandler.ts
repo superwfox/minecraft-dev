@@ -745,7 +745,7 @@ async function buildWithRetry(
 
             const fixResult = await streamBuildFix(genTask.taskId);
             if (!fixResult || fixResult.fixed === 0) {
-                throw new Error("自动修复未能修正任何文件，构建失败");
+                throw new Error(fixResult?.reason || "自动修复未能修正任何文件，构建失败");
             }
             genTask.logs.push(`● 已修复 ${fixResult.fixed} 个文件，重新构建...`);
         } else {

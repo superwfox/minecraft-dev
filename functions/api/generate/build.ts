@@ -1,6 +1,6 @@
 import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
-import { checkPom } from "../../_lib/pomGuard";
+import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import { getTask, putTask } from "../../_lib/taskStore";
 
 interface Env {
@@ -110,6 +110,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // ── (b) pom.xml 安全 scrub：阻断恶意 pom 在 CI 内执行任意代码 ──
     const pomFile = state.generatedFiles.find((f: any) => f.path.endsWith("pom.xml"));
     if (pomFile) {
+        const normalized = normalizePomRepositories(pomFile.content);
+        if (normalized.changes.length > 0) {
+            pomFile.content = normalized.content;
+            state.logs.push(`▸ 已修正 pom.xml：${normalized.changes.join("；")}`);
+        }
         const r = checkPom(pomFile.content);
         if (!r.ok) {
             state.status = "error";

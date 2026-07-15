@@ -546,9 +546,9 @@ Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
 - **调度任务**：用 new BukkitRunnable() { @Override public void run() { ... } }.runTaskTimer(plugin, delay, period) 启动周期任务；一次性延迟用 runTaskLater；同步任务避免阻塞主线程，耗时操作用 runTaskAsynchronously
 - **plugin.yml 完整性**：必须含 name、version、main（全限定主类名）、api-version。命令必须在 commands 节点声明（每条至少 description；可选 usage/aliases/permission）。声明的权限节点必须列在 permissions 节点（含 description、default）
 - **权限检查**：通过 sender.hasPermission("plugin.cmd.xxx") 判断，未通过时 sender.sendMessage 提示并 return true
-- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks
 ${additionalContext ? `\n${additionalContext}` : ""}
-${FILEGEN_OUTPUT_STYLE_RULES}`,
+${FILEGEN_OUTPUT_STYLE_RULES}
+- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
 }
@@ -808,7 +808,7 @@ function specializationBlock(
                     `- groupId 取自包名前两段（如 ${ctx.packageName.split(".").slice(0, 2).join(".")}），artifactId=${ctx.projectName}`,
                     `- maven-compiler-plugin 的 source/target 设为 ${ctx.javaVersion}`,
                     `- 加入 ${ctx.coreType.toLowerCase()}-api 依赖，version 与 MC ${ctx.version} 匹配（Paper 推荐 io.papermc.paper:paper-api:${ctx.version}-R0.1-SNAPSHOT，Spigot 推荐 org.spigotmc:spigot-api 对应版本）；scope 为 provided`,
-                    "- 加入 papermc / spigotmc 仓库（按 coreType）",
+                    "- 加入 papermc / spigotmc 仓库（按 coreType）；Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/，禁止使用已返回 403 的旧地址 https://papermc.io/repo/repository/maven-public/",
                     "- 配置 maven-shade-plugin 输出 shaded jar（artifactId 名）",
                 ].join("\n");
             }
@@ -955,17 +955,21 @@ export function buildFixPrompt(
     fileRole?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
+    const isPom = filePath.toLowerCase().endsWith("pom.xml");
+    const fileRules = isPom
+        ? `这是 Maven pom.xml。只修正仓库、依赖、版本或构建插件配置，不得输出 Java。Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/。`
+        : `你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
+禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
+文件职责：${fileRole || "未提供显式颜色例外"}
+${FILEGEN_OUTPUT_STYLE_RULES}`;
 
     return {
-        system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件代码修正器。
+        system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件构建修正器。
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
 Maven 编译失败。根据下方的编译错误日志修正文件，使其能通过编译。
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
-你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
-禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
-文件职责：${fileRole || "未提供显式颜色例外"}
-${FILEGEN_OUTPUT_STYLE_RULES}`,
+${fileRules}`,
         user: `文件 ${filePath} 编译失败。\n\n编译错误日志：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
     };
 }

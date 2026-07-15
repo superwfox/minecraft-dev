@@ -456,6 +456,7 @@ onUnmounted(() => {
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
     animation: ccFadeIn 0.3s ease-out;
+    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 @keyframes ccFadeIn { from { opacity: 0; } to { opacity: 1; } }
 

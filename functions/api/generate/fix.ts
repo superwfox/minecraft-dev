@@ -4,6 +4,7 @@ import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { getTask, putTask } from "../../_lib/taskStore";
+import { normalizePomRepositories } from "../../_lib/pomGuard";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -95,28 +96,64 @@ function extractSummaries(generatedFiles: any[]): FileSummary[] {
     });
 }
 
-/** Parse Maven error log to identify which source files have errors */
+function cleanLogLine(line: string): string {
+    return line
+        .replace(/^\d{4}-\d{2}-\d{2}T\S+Z\s+/, "")
+        .replace(/^\[ERROR\]\s*/, "")
+        .trim();
+}
+
+function stableErrorFingerprint(log: string): string {
+    const stable = log
+        .split("\n")
+        .map(cleanLogLine)
+        .filter(Boolean)
+        .join("\n")
+        .replace(/\s+/g, " ");
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < stable.length; i++) {
+        hash ^= stable.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function sameContent(a: string, b: string): boolean {
+    const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
+    return normalize(a) === normalize(b);
+}
+
+/** Parse Maven error log to identify the exact generated file that owns each error. */
 function parseErrorFiles(log: string): Map<string, string[]> {
     const errors = new Map<string, string[]>();
     const lines = log.split("\n");
 
     for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        // Match Maven error lines like: [ERROR] /path/File.java:[line,col] error: ...
-        const match = line.match(/\[ERROR\]\s+.*?(src\/main\/java\/\S+\.java):\[?\d+[,\d]*\]?\s*(.*)/);
+        const line = cleanLogLine(lines[i]).replace(/\\/g, "/");
+        // Covers Maven compiler paths with GitHub timestamps, Unix/Windows prefixes,
+        // and both :[line,col] and :line:col locations.
+        const match = line.match(/([^\s]*?src\/main\/(?:java|resources)\/[^:\s]+?\.(?:java|xml|ya?ml|properties))(?::\[?\d+(?:,\d+)?\]?|:\d+(?::\d+)?)(?:\s+(.*))?/i);
         if (match) {
-            const filePath = match[1];
-            const errorMsg = match[2];
+            const srcIndex = match[1].toLowerCase().indexOf("src/main/");
+            const filePath = match[1].slice(srcIndex);
+            const errorMsg = match[2] || line;
             if (!errors.has(filePath)) errors.set(filePath, []);
             errors.get(filePath)!.push(errorMsg);
             // Capture follow-up lines (symbol, location etc.)
-            for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-                const follow = lines[j].trim();
-                if (follow.startsWith("symbol:") || follow.startsWith("location:")) {
+            for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+                const follow = cleanLogLine(lines[j]);
+                if (/^(symbol|location|required|found):/i.test(follow)) {
                     errors.get(filePath)!.push(follow);
                 } else break;
             }
         }
+    }
+
+    // Dependency/repository/model resolution failures are owned by pom.xml, not by
+    // every Java source file. The supplied debug log hit this branch: the legacy
+    // papermc.io repository returned 403 before compilation even started.
+    if (/(?:Could not collect dependencies|Failed to read artifact descriptor|Could not transfer artifact|DependencyResolutionException|Non-resolvable parent POM|PluginResolutionException)/i.test(log)) {
+        errors.set("pom.xml", lines.map(cleanLogLine).filter(Boolean));
     }
     return errors;
 }
@@ -193,6 +230,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 已获取错误日志 (${errorSection.split("\n").length} 行)` }));
+            const fingerprint = stableErrorFingerprint(errorSection);
+            await writer.write(sseEvent(encoder, {
+                type: "debug",
+                scope: "build-fix",
+                msg: "fix:error-section",
+                runId: state.runId,
+                fingerprint,
+                lines: errorSection.split("\n").length,
+                errorSection: errorSection.slice(0, 8000),
+            }));
 
             // Parse which files need fixing
             const errorMap = parseErrorFiles(errorSection);
@@ -208,15 +255,43 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
             }
 
-            // If no specific files matched, try to fix all java files using full error log
+            // Never rewrite every Java file when the build log has no source owner.
+            // That fallback caused expensive, unrelated rewrites and repeated builds.
             if (filesToFix.length === 0) {
-                const javaFiles = state.generatedFiles.filter((f: any) => f.path.endsWith(".java"));
-                if (javaFiles.length > 0) {
-                    filesToFix.push(...javaFiles.map((f: any) => f.path));
-                    await writer.write(sseEvent(encoder, { type: "log", msg: `! 无法精确定位错误文件，将检查所有 ${filesToFix.length} 个 Java 文件` }));
-                }
+                const reason = "无法从构建日志定位可安全修改的文件，已停止自动修复；不会重写全部 Java 文件";
+                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
+                await writer.write(sseEvent(encoder, {
+                    type: "debug", scope: "build-fix", msg: "fix:no-target", fingerprint,
+                    parsedPaths: [...errorMap.keys()],
+                }));
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
             } else {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 需要修复 ${filesToFix.length} 个文件: ${filesToFix.map(f => f.split("/").pop()).join(", ")}` }));
+            }
+
+            const previousFix = Array.isArray(state.buildFixHistory)
+                ? state.buildFixHistory[state.buildFixHistory.length - 1]
+                : null;
+            if (previousFix?.fingerprint === fingerprint) {
+                const reason = `构建错误与上轮完全一致 (${fingerprint})，已停止重复返工`;
+                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
+                await writer.write(sseEvent(encoder, {
+                    type: "debug", scope: "build-fix", msg: "fix:repeated-error",
+                    fingerprint, previousRunId: previousFix.runId, targets: filesToFix,
+                }));
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint, repeated: true }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
             }
 
             const summaries = extractSummaries(state.generatedFiles);
@@ -229,6 +304,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             };
 
             let fixedCount = 0;
+            const changedFiles: string[] = [];
+            const skippedFiles: string[] = [];
             for (const filePath of filesToFix) {
                 const fileEntry = state.generatedFiles.find((f: any) => f.path === filePath);
                 if (!fileEntry) continue;
@@ -246,20 +323,70 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `↻ 修复 ${filePath}...` }));
                 state.logs.push(`↻ 修复 ${filePath}...`);
 
+                // The common legacy Paper repository failure is deterministic and
+                // should not spend an LLM call or risk rewriting unrelated XML.
+                if (filePath.endsWith("pom.xml")) {
+                    const normalized = normalizePomRepositories(fileEntry.content);
+                    if (normalized.changes.length > 0) {
+                        fileEntry.content = normalized.content;
+                        fixedCount++;
+                        changedFiles.push(filePath);
+                        const msg = `● pom.xml 已确定性修正：${normalized.changes.join("；")}`;
+                        await writer.write(sseEvent(encoder, { type: "log", msg }));
+                        state.logs.push(msg);
+                        continue;
+                    }
+                }
+
                 const fileRole = state.plan?.find((f: any) => f.path === filePath)?.role
                     ?? fileEntry.role
                     ?? "";
                 const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries, fileRole);
                 const fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
                 await charge(fixRes);
-                const fixedContent = stripFences(fixRes.content);
+                const fixedContent = stripFences(fixRes.content).trim();
+
+                if (!fixedContent || sameContent(fixedContent, fileEntry.content)) {
+                    skippedFiles.push(filePath);
+                    const reason = !fixedContent ? "模型返回空内容" : "返回内容与原文件相同";
+                    await writer.write(sseEvent(encoder, { type: "log", msg: `! ${filePath.split("/").pop()} 未产生修改：${reason}` }));
+                    await writer.write(sseEvent(encoder, {
+                        type: "debug", scope: "build-fix", msg: "fix:unchanged",
+                        path: filePath, reason, responseLength: fixRes.content.length,
+                    }));
+                    continue;
+                }
 
                 fileEntry.content = fixedContent;
                 fixedCount++;
+                changedFiles.push(filePath);
 
                 const msg = `● ${filePath.split("/").pop()} 修复完成`;
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
                 state.logs.push(msg);
+            }
+
+            state.buildFixHistory = [
+                ...(Array.isArray(state.buildFixHistory) ? state.buildFixHistory : []),
+                { fingerprint, runId: state.runId, targets: filesToFix, changedFiles, skippedFiles, at: Date.now() },
+            ].slice(-4);
+
+            await writer.write(sseEvent(encoder, {
+                type: "debug", scope: "build-fix", msg: "fix:result",
+                fingerprint, targets: filesToFix, changedFiles, skippedFiles, fixedCount,
+            }));
+
+            if (fixedCount === 0) {
+                const reason = "自动修复未产生任何有效文件变更，已停止重新构建";
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await flushCharge();
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint, skippedFiles }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
             }
 
             // Delete the failed build branch on GitHub so rebuild can create a fresh one
@@ -282,7 +409,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: `● 修复完成，共修复 ${fixedCount} 个文件` }));
             state.logs.push(`● 修复完成，共修复 ${fixedCount} 个文件`);
 
-            await writer.write(sseEvent(encoder, { type: "result", fixed: fixedCount }));
+            await writer.write(sseEvent(encoder, { type: "result", fixed: fixedCount, fingerprint, changedFiles, skippedFiles }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 修复失败: ${e.message}` }));

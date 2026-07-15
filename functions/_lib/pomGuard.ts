@@ -84,6 +84,23 @@ const DEP_COORD_BLACKLIST = [
 const PRIVATE_HOST_RE = /^(localhost|metadata\.google\.internal)$/i;
 
 export interface PomCheckResult { ok: boolean; reason?: string; }
+export interface PomNormalizeResult { content: string; changes: string[]; }
+
+/**
+ * 修正已知失效但仍会被模型生成的公共仓库地址。
+ * 这是确定性迁移，不依赖 LLM，且只改仓库 URL，不触碰依赖或构建插件。
+ */
+export function normalizePomRepositories(content: string): PomNormalizeResult {
+    const changes: string[] = [];
+    const normalized = content.replace(
+        /https?:\/\/papermc\.io\/repo\/repository\/maven-public\/?/gi,
+        () => {
+            changes.push("PaperMC 仓库已迁移到 repo.papermc.io");
+            return "https://repo.papermc.io/repository/maven-public/";
+        },
+    );
+    return { content: normalized, changes: [...new Set(changes)] };
+}
 
 function isBlacklistedGroup(groupId: string): boolean {
     return DEP_GROUP_BLACKLIST.some(g => groupId === g || groupId.startsWith(g + "."));

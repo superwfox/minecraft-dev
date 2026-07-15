@@ -142,12 +142,21 @@ onBeforeUnmount(() => {
 
 <style>
 @font-face {
-  font-family: "ZhuoKai";
+  font-family: "Jiangxizhuokai";
   src: url("/jiangxizhuokai_full.woff2") format("woff2");
   font-weight: normal;
   font-style: normal;
   font-display: swap;
   /* 全量字体，不再限制码位范围（原 unicode-range 是 subset 时代的残留白名单） */
+}
+
+/* 兼容仍使用旧 family 名称的现有组件，二者复用同一字体资源。 */
+@font-face {
+  font-family: "ZhuoKai";
+  src: url("/jiangxizhuokai_full.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
 }
 
 @font-face {
@@ -213,7 +222,7 @@ body,
 
 body {
   background: #000;
-  font-family: "Monaco", "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "Monaco", "Jiangxizhuokai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 .header-title {
