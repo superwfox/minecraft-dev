@@ -59,7 +59,7 @@
              @pointerdown="pvDown" @wheel.prevent="pvWheel">
           <div class="pc-preview-content" :style="pvStyle" v-html="previewSvg"></div>
         </div>
-        <div class="pc-preview-hint">滚轮缩放 · 按住拖动平移 · Esc 关闭</div>
+        <div class="pc-preview-hint">双指/滚轮平移 · 捏合或 Ctrl/⌘ + 滚轮缩放 · 按住拖动平移 · Esc 关闭</div>
       </div>
     </div>
 
@@ -313,9 +313,23 @@ function zoomAt(cx: number, cy: number, factor: number) {
     pvScale.value = ns;
 }
 function pvWheel(e: WheelEvent) {
-    const r = pvCanvas.value?.getBoundingClientRect();
-    if (!r) return;
-    zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+    const canvas = pvCanvas.value;
+    if (!canvas) return;
+
+    // 触控板双指滑动和鼠标滚轮都会产生 wheel 事件；默认用于平移。
+    // 触控板捏合在 Chromium/Safari 中会带 ctrlKey，键盘修饰滚轮也沿用缩放。
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvas.clientHeight : 1;
+    const dx = e.deltaX * unit;
+    const dy = e.deltaY * unit;
+    if (!e.ctrlKey && !e.metaKey) {
+        pvX.value -= dx;
+        pvY.value -= dy;
+        return;
+    }
+
+    const r = canvas.getBoundingClientRect();
+    const limitedDelta = Math.max(-60, Math.min(60, dy));
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-limitedDelta * 0.01));
 }
 function zoomBtn(inOut: number) {
     const c = pvCanvas.value;
