@@ -1,7 +1,7 @@
 import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput, superConcurrency } from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
-import { byokHeaders } from "./byok";
+import { fetchWithByokFallback } from "./byok";
 import { selected } from "./skills";
 import { parseResponse } from "../ide/composables/useIDEChat";
 
@@ -45,9 +45,9 @@ function isGeneratingPhase(phase: GenPhase) {
 async function post(url: string, body: any, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const resp = await fetch(url, {
+            const resp = await fetchWithByokFallback(url, {
                 method: "POST",
-                headers: { "Content-Type": "application/json", ...byokHeaders() },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
             if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
@@ -255,9 +255,9 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
 
 /** SSE streaming file generation (legacy single-file flow，仅供补缺/重新规划使用) */
 async function streamFileGeneration(taskId: string): Promise<any> {
-    const resp = await fetch("/api/generate/file", {
+    const resp = await fetchWithByokFallback("/api/generate/file", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -277,9 +277,9 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
     const ctrl = new AbortController();
-    const resp = await fetch("/api/generate/bucket", {
+    const resp = await fetchWithByokFallback("/api/generate/bucket", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId, bucketIndex, superConcurrency: superConcurrency.value }),
         signal: ctrl.signal,
     });
@@ -294,9 +294,9 @@ async function streamClarify(
     extraPrompt?: string,
 ): Promise<any> {
     clarifyAbort = new AbortController();
-    const resp = await fetch("/api/generate/clarify", {
+    const resp = await fetchWithByokFallback("/api/generate/clarify", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId, answers, extraPrompt }),
         signal: clarifyAbort.signal,
     });
@@ -307,9 +307,9 @@ async function streamClarify(
 /** SSE streaming 复杂度分级（可带 correction 重画） */
 async function streamGrade(taskId: string, correction?: string): Promise<any> {
     gradeAbort = new AbortController();
-    const resp = await fetch("/api/generate/grade", {
+    const resp = await fetchWithByokFallback("/api/generate/grade", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId, correction }),
         signal: gradeAbort.signal,
     });
@@ -319,9 +319,9 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
 
 /** SSE streaming build fix */
 async function streamBuildFix(taskId: string): Promise<any> {
-    const resp = await fetch("/api/generate/fix", {
+    const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -843,9 +843,9 @@ export async function appendFeature(appendText: string) {
             }).join("\n\n");
         const user = `【当前项目文件清单】\n${fileList}\n\n【当前所有文件内容】\n${fileBodies}\n\n【追加需求】\n${text}`;
 
-        const resp = await fetch("/api/stream", {
+        const resp = await fetchWithByokFallback("/api/stream", {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...byokHeaders() },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: "deepseek-v4-pro",
                 taskId: genTask.taskId || undefined,

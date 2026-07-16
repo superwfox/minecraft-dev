@@ -67,6 +67,7 @@
           <div class="sp-byok-head">外接 API · 自带 GLM Key<span class="sp-byok-badge">银牌+</span></div>
           <div class="sp-byok-tip">
             填入你的智谱 <b>GLM</b> API Key 后，生成将走你自己的 key、<b>不计平台额度</b>（构建次数上限仍受限）。
+            兼容通用 API Key 与 Coding Plan Key，系统会自动识别端点。
             Key 仅保存在本地浏览器，不会上传留存。
           </div>
           <div class="sp-byok-row">
@@ -76,7 +77,9 @@
           </div>
           <label class="sp-byok-toggle" :class="{ off: !byok.enabled }">
             <input type="checkbox" :checked="byok.enabled" :disabled="!byok.key" @change="toggleByok"/>
-            <span>{{ byok.enabled ? "已启用 · 正用你的 GLM key 生成" : (byok.key ? "未启用（用平台额度）" : "先保存 Key 再启用") }}</span>
+            <span>{{ byok.enabled
+              ? (byok.endpoint === "coding" ? "已启用 · 正用 Coding Plan Key 生成" : "已启用 · 正用你的 GLM Key 生成")
+              : (byok.key ? "未启用（用平台额度）" : "先保存 Key 再启用") }}</span>
           </label>
         </div>
 
@@ -111,7 +114,9 @@ const byokKeyInput = ref(byok.key);
 const byokSaved = ref(false);
 
 function saveByokKey() {
-    byok.key = byokKeyInput.value.trim();
+    const nextKey = byokKeyInput.value.trim();
+    if (nextKey !== byok.key) byok.endpoint = "standard";
+    byok.key = nextKey;
     byok.provider = "glm";
     byok.enabled = !!byok.key; // 有 key 即默认启用；清空即停用
     saveByok();

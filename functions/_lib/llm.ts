@@ -1,6 +1,7 @@
 // LLM provider 适配层：解析本次请求该用哪家模型。
 //
 // BYOK（自带 key）：请求头 X-LLM-Provider: glm + X-LLM-Key: <用户的 GLM key>，
+// X-LLM-Endpoint: coding 时改用 Coding Plan 专属端点，其他值走通用端点。
 // 且用户为「银牌+」（totalRecharged ≥ 25）才生效。生效时：
 //   - 用用户的 GLM key + GLM 端点；
 //   - byok=true → 调用方据此跳过计费/额度（accumulateCost / consume）。
@@ -15,6 +16,7 @@ export type LLMTier = "pro" | "flash";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const GLM_CODING_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 
 const DEEPSEEK_MODELS: Record<LLMTier, string> = {
     pro: "deepseek-v4-pro",
@@ -47,6 +49,7 @@ export function tierFromModel(model: string | undefined): LLMTier {
 export async function resolveLLM(context: { request: Request; env: Env; data: any }): Promise<LLMProvider> {
     const provider = (context.request.headers.get("X-LLM-Provider") || "").trim().toLowerCase();
     const userKey = (context.request.headers.get("X-LLM-Key") || "").trim();
+    const endpoint = (context.request.headers.get("X-LLM-Endpoint") || "").trim().toLowerCase();
 
     if (provider === "glm" && userKey) {
         // 后端校验：仅银牌+（totalRecharged≥25）可用 BYOK，防止前端绕过白嫖该特性
@@ -55,7 +58,12 @@ export async function resolveLLM(context: { request: Request; env: Env; data: an
             try {
                 const tier = await getTier(context.env.TASKS, uid);
                 if (tier !== "none") {
-                    return { url: GLM_URL, apiKey: userKey, byok: true, modelFor: (t) => GLM_MODELS[t] };
+                    return {
+                        url: endpoint === "coding" ? GLM_CODING_URL : GLM_URL,
+                        apiKey: userKey,
+                        byok: true,
+                        modelFor: (t) => GLM_MODELS[t],
+                    };
                 }
             } catch { /* 校验异常 → 退回共享 */ }
         }

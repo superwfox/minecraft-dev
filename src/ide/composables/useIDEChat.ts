@@ -1,6 +1,6 @@
 import {reactive, ref} from "vue";
 import {useIDEStore} from "./useIDEStore";
-import {byokHeaders} from "../../logic/byok";
+import {fetchWithByokFallback} from "../../logic/byok";
 
 export type IDEFileAction = { path: string; action: "create" | "edit"; content: string };
 export type IDEMessage = {
@@ -144,9 +144,9 @@ async function send(userText: string) {
     state.streamingText = "";
 
     try {
-        const resp = await fetch("/api/stream", {
+        const resp = await fetchWithByokFallback("/api/stream", {
             method: "POST",
-            headers: {"Content-Type": "application/json", ...byokHeaders()},
+            headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
                 model: "deepseek-v4-flash",
                 taskId: store.state.taskId || undefined,
@@ -258,9 +258,9 @@ ${truncate(opts.snippet, 3000)}
 【任务】${opts.taskHint}${opts.customQuestion ? `\n【追加说明】${opts.customQuestion}` : ""}`;
 
     const store = useIDEStore();
-    const resp = await fetch("/api/stream", {
+    const resp = await fetchWithByokFallback("/api/stream", {
         method: "POST",
-        headers: {"Content-Type": "application/json", ...byokHeaders()},
+        headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
             model: "deepseek-v4-flash",
             taskId: store.state.taskId || undefined,

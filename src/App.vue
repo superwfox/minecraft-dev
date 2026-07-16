@@ -48,6 +48,14 @@
       <div class="quota-logout" @click="doLogout">退出登录</div>
     </div>
   </Teleport>
+  <Teleport to="body">
+    <Transition name="byok-notice">
+      <div v-if="byokNotice.visible" class="byok-notice" role="alert">
+        <span>{{ byokNotice.message }}</span>
+        <button type="button" aria-label="关闭提示" @click="dismissByokNotice">×</button>
+      </div>
+    </Transition>
+  </Teleport>
   <router-view/>
   <SponsorModal/>
 </template>
@@ -60,6 +68,7 @@ import TopNav from "./components/TopNav.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
 import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
+import {byokNotice, dismissByokNotice} from "./logic/byok";
 
 const router = useRouter();
 const goHome = () => router.push("/");
@@ -376,6 +385,55 @@ body {
 
 .quota-logout:hover {
   color: var(--text-primary);
+}
+
+.byok-notice {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(620px, calc(100vw - 28px));
+  padding: 12px 14px;
+  border: 1px solid rgba(198, 176, 125, 0.42);
+  border-radius: 12px;
+  background: rgba(18, 17, 13, 0.96);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.58);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.55;
+  transform: translateX(-50%);
+}
+
+.byok-notice span {
+  flex: 1;
+}
+
+.byok-notice button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.byok-notice button:hover {
+  color: var(--text-primary);
+}
+
+.byok-notice-enter-active,
+.byok-notice-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.byok-notice-enter-from,
+.byok-notice-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-8px);
 }
 
 * {

@@ -1,4 +1,4 @@
-import { byokHeaders } from "../logic/byok";
+import { fetchWithByokFallback } from "../logic/byok";
 
 export type ChatMsg = {
     role: string;
@@ -30,9 +30,9 @@ async function askDeepSeek(prompt: string, preset: string): Promise<string> {
         { role: "system", content: preset },
         { role: "user", content: prompt },
     ];
-    const response = await fetch("/api/chat", {
+    const response = await fetchWithByokFallback("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -53,9 +53,9 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
         { role: "system", content: preset },
         { role: "user", content: prompt },
     ];
-    const response = await fetch("/api/stream", {
+    const response = await fetchWithByokFallback("/api/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
         signal,
     });
@@ -110,9 +110,9 @@ export async function precheckPrompt(prompt: string): Promise<{ complete: boolea
         { role: "system", content: PRECHECK_PRESET },
         { role: "user", content: prompt },
     ];
-    const response = await fetch("/api/chat", {
+    const response = await fetchWithByokFallback("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...byokHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-pro", messages }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -138,9 +138,9 @@ export function consistChat(
     const messages: ChatMsg[] = [...history, { role: "user", content: prompt }];
 
     const done = (async () => {
-        const response = await fetch("/api/stream", {
+        const response = await fetchWithByokFallback("/api/stream", {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...byokHeaders() },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
             signal: controller.signal,
         });
