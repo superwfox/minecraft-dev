@@ -244,6 +244,8 @@ onMounted(async () => {
             javaVersion: genTask.javaVersion,
             projectName: genTask.projectName,
             packageName: genTask.packageName,
+            coreType: genTask.coreType,
+            version: genTask.version,
         });
     }
     window.addEventListener("keydown", onKey);
@@ -295,6 +297,8 @@ async function onCompile() {
         javaVersion: genTask.javaVersion || stored.javaVersion || "",
         projectName: genTask.projectName || stored.projectName || "",
         packageName: genTask.packageName || stored.packageName || "",
+        coreType: genTask.coreType || stored.coreType || "Paper",
+        version: genTask.version || stored.version || "1.21",
     };
     // 回写一次，保证后续仍可用
     saveMeta(state.taskId, meta);
@@ -305,6 +309,8 @@ async function onCompile() {
     genTask.projectName = meta.projectName;
     genTask.packageName = meta.packageName;
     genTask.javaVersion = meta.javaVersion;
+    genTask.coreType = meta.coreType;
+    genTask.version = meta.version;
     genTask.files = state.files.map(f => ({
         path: f.path,
         role: f.role || "",

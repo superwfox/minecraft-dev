@@ -67,7 +67,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             projectName: meta?.projectName || "",
             packageName: meta?.packageName || "",
             coreType: meta?.coreType || "Paper",
-            version: meta?.version || "",
+            version: meta?.version || "1.21",
             generatedFiles: [],
             logs: ["▸ 服务端任务已过期，使用 IDE 本地内容重建构建"],
         };
@@ -84,17 +84,32 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         );
         state.generatedFiles = incomingFiles.map((f: any) => {
             const prev = prevByPath.get(f.path);
+            const content = String(f.content ?? "");
             return {
                 path: f.path,
-                content: String(f.content ?? ""),
-                apiSummary: prev?.apiSummary ?? null,
+                content,
+                apiSummary: prev?.content === content ? (prev.apiSummary ?? null) : null,
             };
         });
-        // 元数据兜底：任务存在但缺 javaVersion 时也用 meta 补
-        if (meta?.javaVersion && !state.javaVersion) state.javaVersion = meta.javaVersion;
-        if (meta?.projectName && !state.projectName) state.projectName = meta.projectName;
-        if (meta?.packageName && !state.packageName) state.packageName = meta.packageName;
+        // IDE 携带的元数据与本次文件快照同属一个来源，应覆盖陈旧任务状态。
+        if (meta?.javaVersion) state.javaVersion = meta.javaVersion;
+        if (meta?.projectName) state.projectName = meta.projectName;
+        if (meta?.packageName) state.packageName = meta.packageName;
+        if (meta?.coreType) state.coreType = meta.coreType;
+        if (meta?.version) state.version = meta.version;
         state.logs.push(`▸ 已从 IDE 同步 ${state.generatedFiles.length} 个文件到构建仓`);
+    }
+
+    // 只有 fix 端点刚生成候选后的无文件重建才延续同一轮修复状态；
+    // 初次构建、IDE 手动构建和增量构建都开启新的诊断周期。
+    const continuingRepair = !hasIncoming && state.status === "fixed" && !!state.pendingFixSnapshot;
+    if (!continuingRepair) {
+        state.repairAttempts = 0;
+        state.fixStagnation = 0;
+        state.buildFixHistory = [];
+        delete state.pendingFixSnapshot;
+        delete state.lastBuildDiagnostics;
+        delete state.lastBuildProgress;
     }
 
     // ── (a) 单用户每日构建上限：粗粒度防刷 ──

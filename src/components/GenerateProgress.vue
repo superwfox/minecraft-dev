@@ -149,6 +149,8 @@ function downloadDebug() {
         projectName: genTask.projectName,
         exportedAt: new Date().toISOString(),
         logs: genTask.logs,
+        buildDiagnostics: genTask.buildDiagnostics,
+        buildHistory: genTask.buildHistory,
         debug: genTask.debugLog,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });

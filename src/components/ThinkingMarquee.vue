@@ -16,9 +16,9 @@ const emit = defineEmits<{
 }>();
 
 // 缓解等待焦虑：非流式后没有逐字思考流，用单色高光扫过这些状态词表示「仍在工作」。
-// 每个词总共停留 2.5s；Hero 使用更大的字号，并把实测尺寸通知外层聊天框。
+// 每个词总共停留 5s；Hero 使用更大的字号，并把实测尺寸通知外层聊天框。
 const WORDS = ["working", "thinking", "deliberating", "fostering", "leafing"];
-const WORD_INTERVAL_MS = 2500;
+const WORD_INTERVAL_MS = 5000;
 const HERO_FONT_SIZE = 136;
 const HERO_MIN_FONT_SIZE = 32;
 const HERO_BOX_INLINE_PADDING = 64;
@@ -113,7 +113,7 @@ onUnmounted(() => {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  animation: tm-shine 0.7s linear 3;
+  animation: tm-shine 1.4s linear 3;
 }
 
 .tm-hero {

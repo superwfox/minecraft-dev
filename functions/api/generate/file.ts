@@ -3,6 +3,7 @@ import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompt
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { getTask, putTask } from "../../_lib/taskStore";
+import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
@@ -158,7 +159,19 @@ async function generateSingleFile(
         generatorType: inferGeneratorType(className, filePath),
     };
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
-    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx);
+    const apiContractInput = {
+        coreType: ctx.coreType,
+        version: ctx.version,
+        externalDeps: state.grade?.vector?.external_deps ?? [],
+        generatedFiles: [
+            ...(state.generatedFiles ?? []),
+            ...summaries
+                .filter((summary) => !(state.generatedFiles ?? []).some((file: any) => file.path === summary.path))
+                .map((summary) => ({ path: summary.path, apiSummary: summary })),
+        ],
+    };
+    const apiContractCtx = buildApiContractContext(apiContractInput);
+    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx);
 
     const gen = dispatched.gen;
     const initialGen = await callAIStream(llm, gen.system, gen.user, writer, encoder);
@@ -172,11 +185,16 @@ async function generateSingleFile(
         await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${filePath}...` }));
         state.logs.push(`▸ 审查 ${filePath}...`);
 
-        const check = dispatched.checker(filePath, content);
-        const reviewRes = await callAI(llm, check.system, check.user, true, true);
-        await charge(reviewRes);
         let review: any;
-        try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+        const knownApiIssues = findKnownApiIssues(apiContractInput, content);
+        if (knownApiIssues.length) {
+            review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
+        } else {
+            const check = dispatched.checker(filePath, content);
+            const reviewRes = await callAI(llm, check.system, check.user, true, true);
+            await charge(reviewRes);
+            try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+        }
 
         if (review.is_ok) {
             await writer.write(sseEvent(encoder, { type: "log", msg: `● ${filePath} 审查通过` }));
@@ -191,7 +209,7 @@ async function generateSingleFile(
         state.logs.push(msg);
 
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
-        const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries);
+        const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries, apiContractCtx);
         const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
         await charge(rwRes);
         content = stripFences(rwRes.content);
@@ -262,7 +280,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
     const slice = computeSlice(target, blueprint);
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
-    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx);
+    const apiContractInput = {
+        coreType: ctx.coreType,
+        version: ctx.version,
+        externalDeps: state.grade?.vector?.external_deps ?? [],
+        generatedFiles: [
+            ...(state.generatedFiles ?? []),
+            ...summaries
+                .filter((summary) => !(state.generatedFiles ?? []).some((file: any) => file.path === summary.path))
+                .map((summary) => ({ path: summary.path, apiSummary: summary })),
+        ],
+    };
+    const apiContractCtx = buildApiContractContext(apiContractInput);
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx);
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -293,11 +323,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${target.path}...` }));
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
-                const check = dispatched.checker(target.path, content);
-                const reviewRes = await callAI(llm, check.system, check.user, true, true);
-                await charge(reviewRes);
                 let review: any;
-                try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+                const knownApiIssues = findKnownApiIssues(apiContractInput, content);
+                if (knownApiIssues.length) {
+                    review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
+                } else {
+                    const check = dispatched.checker(target.path, content);
+                    const reviewRes = await callAI(llm, check.system, check.user, true, true);
+                    await charge(reviewRes);
+                    try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+                }
 
                 if (review.is_ok) {
                     await writer.write(sseEvent(encoder, { type: "log", msg: `● ${target.path} 审查通过` }));
@@ -351,7 +386,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(reworkMsg);
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
-                const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries);
+                const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries, apiContractCtx);
                 const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
                 await charge(rwRes);
                 content = stripFences(rwRes.content);

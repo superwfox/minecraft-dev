@@ -5,6 +5,17 @@ import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../..
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { getTask, putTask } from "../../_lib/taskStore";
 import { normalizePomRepositories } from "../../_lib/pomGuard";
+import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import {
+    compareDiagnostics,
+    diagnosticsFingerprint,
+    errorLogExcerpt,
+    formatDiagnostics,
+    parseBuildDiagnostics,
+    rollbackCandidates,
+    type BuildDiagnostic,
+    type DiagnosticProgress,
+} from "../../_lib/buildDiagnostics";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -15,6 +26,7 @@ interface Env {
 interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
 
 const FIX_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 delta，慢但活着不误杀）
+const MAX_REPAIR_ATTEMPTS = 3;
 
 async function callAIStream(
     llm: LLMProvider, system: string, user: string,
@@ -96,78 +108,37 @@ function extractSummaries(generatedFiles: any[]): FileSummary[] {
     });
 }
 
-function cleanLogLine(line: string): string {
-    return line
-        .replace(/^\d{4}-\d{2}-\d{2}T\S+Z\s+/, "")
-        .replace(/^\[ERROR\]\s*/, "")
-        .trim();
-}
-
-function stableErrorFingerprint(log: string): string {
-    const stable = log
-        .split("\n")
-        .map(cleanLogLine)
-        .filter(Boolean)
-        .join("\n")
-        .replace(/\s+/g, " ");
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < stable.length; i++) {
-        hash ^= stable.charCodeAt(i);
-        hash = Math.imul(hash, 0x01000193);
-    }
-    return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
 function sameContent(a: string, b: string): boolean {
     const normalize = (value: string) => value.replace(/\r\n/g, "\n").trim();
     return normalize(a) === normalize(b);
 }
 
-/** Parse Maven error log to identify the exact generated file that owns each error. */
-function parseErrorFiles(log: string): Map<string, string[]> {
-    const errors = new Map<string, string[]>();
-    const lines = log.split("\n");
+function matchesPath(filePath: string, diagnosticPath: string): boolean {
+    return filePath === diagnosticPath || filePath.endsWith(diagnosticPath) || diagnosticPath.endsWith(filePath);
+}
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = cleanLogLine(lines[i]).replace(/\\/g, "/");
-        // Covers Maven compiler paths with GitHub timestamps, Unix/Windows prefixes,
-        // and both :[line,col] and :line:col locations.
-        const match = line.match(/([^\s]*?src\/main\/(?:java|resources)\/[^:\s]+?\.(?:java|xml|ya?ml|properties))(?::\[?\d+(?:,\d+)?\]?|:\d+(?::\d+)?)(?:\s+(.*))?/i);
-        if (match) {
-            const srcIndex = match[1].toLowerCase().indexOf("src/main/");
-            const filePath = match[1].slice(srcIndex);
-            const errorMsg = match[2] || line;
-            if (!errors.has(filePath)) errors.set(filePath, []);
-            errors.get(filePath)!.push(errorMsg);
-            // Capture follow-up lines (symbol, location etc.)
-            for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
-                const follow = cleanLogLine(lines[j]);
-                if (/^(symbol|location|required|found):/i.test(follow)) {
-                    errors.get(filePath)!.push(follow);
-                } else break;
-            }
-        }
-    }
-
-    // Dependency/repository/model resolution failures are owned by pom.xml, not by
-    // every Java source file. The supplied debug log hit this branch: the legacy
-    // papermc.io repository returned 403 before compilation even started.
-    if (/(?:Could not collect dependencies|Failed to read artifact descriptor|Could not transfer artifact|DependencyResolutionException|Non-resolvable parent POM|PluginResolutionException)/i.test(log)) {
-        errors.set("pom.xml", lines.map(cleanLogLine).filter(Boolean));
-    }
-    return errors;
+function progressSummary(progress: DiagnosticProgress | null, rolledBackFiles: string[]): string {
+    if (!progress) return "首次修复：逐条处理当前诊断。";
+    const parts = [
+        `上轮已解决 ${progress.resolved.length} 条`,
+        `仍存在 ${progress.persisted.length} 条`,
+        `新增 ${progress.introduced.length} 条`,
+    ];
+    if (rolledBackFiles.length) parts.push(`已回滚无收益文件：${rolledBackFiles.join(", ")}`);
+    return parts.join("；") + "。仍存在的诊断必须优先消除，不得重新引入已解决问题。";
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { taskId } = await context.request.json() as any;
-    const llm = await resolveLLM(context);
+    const body = await context.request.json() as any;
+    const taskId = body.taskId as string;
+    const mode: "repair" | "inspect" = body.mode === "inspect" ? "inspect" : "repair";
     const token = context.env.GITHUB_PAT;
 
     const raw = await getTask(context.env, taskId);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
-    if (state.quotaExhausted) {
+    if (mode === "repair" && state.quotaExhausted) {
         return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
             status: 402, headers: { "Content-Type": "application/json" },
         });
@@ -179,15 +150,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
+    // 最终 inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
+    const llm: LLMProvider | null = mode === "repair" ? await resolveLLM(context) : null;
+
     const uid: string | undefined = (context.data as any)?.uid;
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge = async (r: AICallResult) => {
-        if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
+        if (!llm || llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         pendingUsage.push({ model: r.model, usage: r.usage });
     };
     const flushCharge = async () => {
-        if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        if (chargeFlushed || !llm || llm.byok || !uid || pendingUsage.length === 0) return;
         chargeFlushed = true;
         const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
@@ -214,86 +188,157 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (!failedJob) throw new Error("未找到构建 Job");
 
             const fullLog = await getJobLogs(token, failedJob.id);
+            const errorSection = errorLogExcerpt(fullLog);
+            const diagnostics = parseBuildDiagnostics(fullLog);
+            const fingerprint = diagnosticsFingerprint(diagnostics);
 
-            // Extract only the Maven error section (last ~200 lines or [ERROR] lines)
-            const logLines = fullLog.split("\n");
-            const errorSection = logLines
-                .filter(l => l.includes("[ERROR]") || l.includes("symbol:") || l.includes("location:"))
-                .slice(-100)
-                .join("\n");
-
-            if (!errorSection.trim()) {
-                await writer.write(sseEvent(encoder, { type: "log", msg: "! 未能从日志中提取编译错误" }));
-                await writer.write(sseEvent(encoder, { type: "result", fixed: 0 }));
+            if (!diagnostics.length) {
+                const reason = "未能从构建日志提取可处理的编译或依赖诊断";
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
 
-            await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 已获取错误日志 (${errorSection.split("\n").length} 行)` }));
-            const fingerprint = stableErrorFingerprint(errorSection);
-            await writer.write(sseEvent(encoder, {
-                type: "debug",
-                scope: "build-fix",
-                msg: "fix:error-section",
-                runId: state.runId,
-                fingerprint,
-                lines: errorSection.split("\n").length,
-                errorSection: errorSection.slice(0, 8000),
-            }));
+            await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 已提取 ${diagnostics.length} 条构建诊断` }));
 
-            // Parse which files need fixing
-            const errorMap = parseErrorFiles(errorSection);
-            const filesToFix: string[] = [];
+            const pendingSnapshot = state.pendingFixSnapshot as {
+                attempt: number;
+                runId: number;
+                diagnostics: BuildDiagnostic[];
+                changedFiles: string[];
+                files: { path: string; content: string; apiSummary?: any }[];
+            } | undefined;
+            const progress = pendingSnapshot
+                ? compareDiagnostics(pendingSnapshot.diagnostics, diagnostics)
+                : null;
+            const rolledBackFiles = pendingSnapshot
+                ? rollbackCandidates(pendingSnapshot.diagnostics, diagnostics, pendingSnapshot.changedFiles)
+                : [];
 
-            // Match error file paths against generated files
-            for (const gf of state.generatedFiles) {
-                for (const [errPath] of errorMap) {
-                    if (gf.path === errPath || gf.path.endsWith(errPath) || errPath.endsWith(gf.path)) {
-                        filesToFix.push(gf.path);
+            if (rolledBackFiles.length && pendingSnapshot) {
+                for (const snapshot of pendingSnapshot.files) {
+                    if (!rolledBackFiles.includes(snapshot.path)) continue;
+                    const fileEntry = state.generatedFiles.find((file: any) => file.path === snapshot.path);
+                    if (fileEntry) {
+                        fileEntry.content = snapshot.content;
+                        fileEntry.apiSummary = snapshot.apiSummary ?? null;
+                    }
+                }
+                const msg = `↶ 已回滚 ${rolledBackFiles.length} 个未解决旧错误的改动: ${rolledBackFiles.map((path: string) => path.split("/").pop()).join(", ")}`;
+                state.logs.push(msg);
+                await writer.write(sseEvent(encoder, { type: "log", msg }));
+            }
+
+            if (pendingSnapshot && progress) {
+                state.fixStagnation = progress.resolved.length > 0 ? 0 : (Number(state.fixStagnation) || 0) + 1;
+                const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
+                for (let i = history.length - 1; i >= 0; i--) {
+                    if (history[i]?.attempt === pendingSnapshot.attempt && !history[i]?.evaluatedRunId) {
+                        history[i] = {
+                            ...history[i],
+                            evaluatedRunId: state.runId,
+                            progress,
+                            rolledBackFiles,
+                            status: progress.status,
+                        };
                         break;
+                    }
+                }
+                state.buildFixHistory = history.slice(-6);
+                const msg = `▸ 上轮结果：已解决 ${progress.resolved.length} 条，仍存在 ${progress.persisted.length} 条，新增 ${progress.introduced.length} 条`;
+                state.logs.push(msg);
+                await writer.write(sseEvent(encoder, { type: "log", msg }));
+                delete state.pendingFixSnapshot;
+            }
+
+            const effectiveDiagnostics = diagnostics.filter((item) => !rolledBackFiles.includes(item.path));
+            if (pendingSnapshot && rolledBackFiles.length) {
+                for (const item of pendingSnapshot.diagnostics) {
+                    if (rolledBackFiles.includes(item.path) && !effectiveDiagnostics.some((existing) => existing.key === item.key)) {
+                        effectiveDiagnostics.push(item);
                     }
                 }
             }
 
-            // Never rewrite every Java file when the build log has no source owner.
-            // That fallback caused expensive, unrelated rewrites and repeated builds.
+            state.lastBuildDiagnostics = diagnostics;
+            state.lastBuildProgress = progress;
+            await writer.write(sseEvent(encoder, {
+                type: "debug",
+                scope: "build-fix",
+                msg: "fix:diagnostics",
+                mode,
+                runId: state.runId,
+                fingerprint,
+                diagnostics,
+                progress,
+                rolledBackFiles,
+                errorSection: errorSection.slice(0, 8000),
+            }));
+
+            if (mode === "inspect") {
+                const reason = `最终构建仍有 ${diagnostics.length} 条诊断，已停止自动修复`;
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`× ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "log", msg: `× ${reason}` }));
+                await writer.write(sseEvent(encoder, {
+                    type: "result", fixed: 0, changed: 0, inspected: true, reason,
+                    fingerprint, diagnostics, progress, rolledBackFiles,
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
+            }
+
+            if (!llm) throw new Error("自动修复模型未配置");
+
+            if ((Number(state.repairAttempts) || 0) >= MAX_REPAIR_ATTEMPTS) {
+                const reason = `已达到 ${MAX_REPAIR_ATTEMPTS} 轮自动修复上限`;
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
+            }
+
+            if ((Number(state.fixStagnation) || 0) >= 2) {
+                const reason = "连续两轮未解决任何旧诊断，已提前停止重复返工";
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
+            }
+
+            const filesToFix = state.generatedFiles
+                .filter((file: any) => effectiveDiagnostics.some((item) => matchesPath(file.path, item.path)))
+                .map((file: any) => file.path as string);
+
             if (filesToFix.length === 0) {
-                const reason = "无法从构建日志定位可安全修改的文件，已停止自动修复；不会重写全部 Java 文件";
-                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
+                const reason = "无法从构建诊断定位可安全修改的文件，已停止自动修复；不会重写全部 Java 文件";
+                state.status = "error";
+                state.error = reason;
+                state.logs.push(`! ${reason}`);
+                await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, {
                     type: "debug", scope: "build-fix", msg: "fix:no-target", fingerprint,
-                    parsedPaths: [...errorMap.keys()],
+                    parsedPaths: effectiveDiagnostics.map((item) => item.path),
                 }));
-                state.status = "error";
-                state.error = reason;
-                state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
-                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint }));
-                await writer.write(encoder.encode("data: [DONE]\n\n"));
-                return;
-            } else {
-                await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 需要修复 ${filesToFix.length} 个文件: ${filesToFix.map(f => f.split("/").pop()).join(", ")}` }));
-            }
-
-            const previousFix = Array.isArray(state.buildFixHistory)
-                ? state.buildFixHistory[state.buildFixHistory.length - 1]
-                : null;
-            if (previousFix?.fingerprint === fingerprint) {
-                const reason = `构建错误与上轮完全一致 (${fingerprint})，已停止重复返工`;
-                await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
-                await writer.write(sseEvent(encoder, {
-                    type: "debug", scope: "build-fix", msg: "fix:repeated-error",
-                    fingerprint, previousRunId: previousFix.runId, targets: filesToFix,
-                }));
-                state.status = "error";
-                state.error = reason;
-                state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
-                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint, repeated: true }));
+                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, fingerprint, diagnostics, progress }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
 
+            await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 需要修改 ${filesToFix.length} 个文件: ${filesToFix.map((file) => file.split("/").pop()).join(", ")}` }));
             const summaries = extractSummaries(state.generatedFiles);
             const ctx = {
                 projectName: state.projectName,
@@ -302,34 +347,42 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 version: state.version,
                 javaVersion: state.javaVersion,
             };
+            const apiContractInput = {
+                coreType: state.coreType,
+                version: state.version,
+                externalDeps: state.grade?.vector?.external_deps ?? [],
+                generatedFiles: state.generatedFiles,
+            };
+            const apiContractCtx = buildApiContractContext(apiContractInput);
 
-            let fixedCount = 0;
+            const repairAttempt = (Number(state.repairAttempts) || 0) + 1;
+            state.repairAttempts = repairAttempt;
+            let changedCount = 0;
             const changedFiles: string[] = [];
             const skippedFiles: string[] = [];
+            const beforeContents = new Map<string, string>();
+            const beforeSummaries = new Map<string, any>();
             for (const filePath of filesToFix) {
                 const fileEntry = state.generatedFiles.find((f: any) => f.path === filePath);
                 if (!fileEntry) continue;
 
-                // Gather errors for this file
-                let fileErrors = "";
-                for (const [errPath, msgs] of errorMap) {
-                    if (filePath === errPath || filePath.endsWith(errPath) || errPath.endsWith(filePath)) {
-                        fileErrors += msgs.join("\n") + "\n";
-                    }
-                }
-                if (!fileErrors) fileErrors = errorSection; // fallback to full errors
+                const fileDiagnostics = effectiveDiagnostics.filter((item) => matchesPath(filePath, item.path));
+                const fileErrors = formatDiagnostics(fileDiagnostics.length ? fileDiagnostics : effectiveDiagnostics);
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "fixing", file: filePath }));
-                await writer.write(sseEvent(encoder, { type: "log", msg: `↻ 修复 ${filePath}...` }));
-                state.logs.push(`↻ 修复 ${filePath}...`);
+                await writer.write(sseEvent(encoder, { type: "log", msg: `↻ 生成 ${filePath} 的修正候选...` }));
+                state.logs.push(`↻ 生成 ${filePath} 的修正候选...`);
 
                 // The common legacy Paper repository failure is deterministic and
                 // should not spend an LLM call or risk rewriting unrelated XML.
                 if (filePath.endsWith("pom.xml")) {
                     const normalized = normalizePomRepositories(fileEntry.content);
                     if (normalized.changes.length > 0) {
+                        beforeContents.set(filePath, fileEntry.content);
+                        beforeSummaries.set(filePath, fileEntry.apiSummary ?? null);
                         fileEntry.content = normalized.content;
-                        fixedCount++;
+                        fileEntry.apiSummary = null;
+                        changedCount++;
                         changedFiles.push(filePath);
                         const msg = `● pom.xml 已确定性修正：${normalized.changes.join("；")}`;
                         await writer.write(sseEvent(encoder, { type: "log", msg }));
@@ -341,10 +394,50 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const fileRole = state.plan?.find((f: any) => f.path === filePath)?.role
                     ?? fileEntry.role
                     ?? "";
-                const prompt = buildFixPrompt(filePath, fileEntry.content, fileErrors, ctx, summaries, fileRole);
-                const fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
+                const prompt = buildFixPrompt(
+                    filePath,
+                    fileEntry.content,
+                    fileErrors,
+                    ctx,
+                    summaries,
+                    fileRole,
+                    apiContractCtx,
+                    progressSummary(progress, rolledBackFiles),
+                );
+                let fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
                 await charge(fixRes);
-                const fixedContent = stripFences(fixRes.content).trim();
+                let fixedContent = stripFences(fixRes.content).trim();
+                let knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
+                if (knownApiIssues.length) {
+                    const retryMsg = `! 修正候选仍违反 API 契约，正在重新生成：${knownApiIssues.join("；")}`;
+                    state.logs.push(retryMsg);
+                    await writer.write(sseEvent(encoder, { type: "log", msg: retryMsg }));
+                    const retryPrompt = buildFixPrompt(
+                        filePath,
+                        fixedContent,
+                        fileErrors,
+                        ctx,
+                        summaries,
+                        fileRole,
+                        apiContractCtx,
+                        `${progressSummary(progress, rolledBackFiles)}\n上一候选仍有确定性问题：${knownApiIssues.join("；")}`,
+                    );
+                    fixRes = await callAIStream(llm, retryPrompt.system, retryPrompt.user, writer, encoder);
+                    await charge(fixRes);
+                    fixedContent = stripFences(fixRes.content).trim();
+                    knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
+                }
+
+                if (knownApiIssues.length) {
+                    skippedFiles.push(filePath);
+                    const reason = `候选仍违反 API 契约：${knownApiIssues.join("；")}`;
+                    await writer.write(sseEvent(encoder, { type: "log", msg: `! ${filePath.split("/").pop()} 未应用：${reason}` }));
+                    await writer.write(sseEvent(encoder, {
+                        type: "debug", scope: "build-fix", msg: "fix:contract-rejected",
+                        path: filePath, reason, responseLength: fixRes.content.length,
+                    }));
+                    continue;
+                }
 
                 if (!fixedContent || sameContent(fixedContent, fileEntry.content)) {
                     skippedFiles.push(filePath);
@@ -357,26 +450,40 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     continue;
                 }
 
+                beforeContents.set(filePath, fileEntry.content);
+                beforeSummaries.set(filePath, fileEntry.apiSummary ?? null);
                 fileEntry.content = fixedContent;
-                fixedCount++;
+                fileEntry.apiSummary = null;
+                changedCount++;
                 changedFiles.push(filePath);
 
-                const msg = `● ${filePath.split("/").pop()} 修复完成`;
+                const msg = `● ${filePath.split("/").pop()} 已生成修正候选，等待重新构建验证`;
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
                 state.logs.push(msg);
             }
 
-            state.buildFixHistory = [
-                ...(Array.isArray(state.buildFixHistory) ? state.buildFixHistory : []),
-                { fingerprint, runId: state.runId, targets: filesToFix, changedFiles, skippedFiles, at: Date.now() },
-            ].slice(-4);
+            const failedRunId = state.runId;
+            const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
+            history.push({
+                attempt: repairAttempt,
+                runId: failedRunId,
+                fingerprint: diagnosticsFingerprint(effectiveDiagnostics),
+                diagnostics: effectiveDiagnostics,
+                targets: filesToFix,
+                changedFiles,
+                skippedFiles,
+                status: changedCount > 0 ? "pending" : "no-change",
+                at: Date.now(),
+            });
+            state.buildFixHistory = history.slice(-6);
 
             await writer.write(sseEvent(encoder, {
                 type: "debug", scope: "build-fix", msg: "fix:result",
-                fingerprint, targets: filesToFix, changedFiles, skippedFiles, fixedCount,
+                repairAttempt, fingerprint, targets: filesToFix, changedFiles, skippedFiles,
+                changedCount, diagnostics, progress, rolledBackFiles,
             }));
 
-            if (fixedCount === 0) {
+            if (changedCount === 0) {
                 const reason = "自动修复未产生任何有效文件变更，已停止重新构建";
                 state.status = "error";
                 state.error = reason;
@@ -384,10 +491,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await flushCharge();
                 await putTask(context.env, taskId, JSON.stringify(state));
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
-                await writer.write(sseEvent(encoder, { type: "result", fixed: 0, reason, fingerprint, skippedFiles }));
+                await writer.write(sseEvent(encoder, {
+                    type: "result", fixed: 0, changed: 0, reason, repairAttempt,
+                    fingerprint, skippedFiles, diagnostics, progress, rolledBackFiles,
+                }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
+
+            state.pendingFixSnapshot = {
+                attempt: repairAttempt,
+                runId: failedRunId,
+                diagnostics: effectiveDiagnostics,
+                changedFiles,
+                files: changedFiles.map((path) => ({
+                    path,
+                    content: beforeContents.get(path) ?? "",
+                    apiSummary: beforeSummaries.get(path) ?? null,
+                })),
+                at: Date.now(),
+            };
 
             // Delete the failed build branch on GitHub so rebuild can create a fresh one
             if (state.buildBranch) {
@@ -403,17 +526,34 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.error = null;
             delete state.runId;
             delete state.buildBranch;
+            const changedMsg = `● 已修改 ${changedCount} 个文件，等待重新构建验证`;
+            state.logs.push(changedMsg);
             await flushCharge();
             await putTask(context.env, taskId, JSON.stringify(state));
 
-            await writer.write(sseEvent(encoder, { type: "log", msg: `● 修复完成，共修复 ${fixedCount} 个文件` }));
-            state.logs.push(`● 修复完成，共修复 ${fixedCount} 个文件`);
-
-            await writer.write(sseEvent(encoder, { type: "result", fixed: fixedCount, fingerprint, changedFiles, skippedFiles }));
+            await writer.write(sseEvent(encoder, { type: "log", msg: changedMsg }));
+            await writer.write(sseEvent(encoder, {
+                type: "result",
+                fixed: changedCount,
+                changed: changedCount,
+                verified: false,
+                repairAttempt,
+                fingerprint,
+                changedFiles,
+                skippedFiles,
+                diagnostics,
+                progress,
+                rolledBackFiles,
+            }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
+            state.status = "error";
+            state.error = e.message;
+            state.logs.push(`× 修复失败: ${e.message}`);
+            try { await flushCharge(); } catch { /* 计费失败不覆盖原始修复异常 */ }
+            try { await putTask(context.env, taskId, JSON.stringify(state)); } catch { /* 保留原始修复异常 */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 修复失败: ${e.message}` }));
-            await writer.write(sseEvent(encoder, { type: "result", fixed: 0, error: e.message }));
+            await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, error: e.message }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);

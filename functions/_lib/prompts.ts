@@ -6,6 +6,7 @@ export interface FileSummary {
     className?: string;
     extends?: string;
     implements?: string[];
+    constructors?: { params: string }[];
     publicMethods?: { name: string; params: string; returns: string }[];
     publicFields?: string[];
     events?: string[];
@@ -104,6 +105,12 @@ function formatSummaries(summaries: FileSummary[]): string {
             lines.push("  公开方法：");
             for (const m of s.publicMethods) {
                 lines.push(`    - ${m.returns} ${m.name}(${m.params})`);
+            }
+        }
+        if (s.constructors?.length) {
+            lines.push("  构造器：");
+            for (const constructor of s.constructors) {
+                lines.push(`    - ${s.className ?? "<class>"}(${constructor.params})`);
             }
         }
         if (s.publicFields?.length) {
@@ -524,7 +531,7 @@ ${apiBlock}
 - 只输出文件正文内容，不要包裹 markdown 代码块
 - 不要输出文件名或解释
 - 确保 import 与已生成文件一致
-- 你只能调用上面「已生成文件的可用 API」中列出的类和方法，不要假设任何未列出的方法或类存在
+- 你只能使用上面「已生成文件的可用 API」中列出的类、构造器和方法，不要假设任何未列出的无参构造器、方法或类存在
 - 如果需要的功能在已生成文件中不存在，请在当前文件中自行实现，不要凭空调用不存在的方法
 - 禁止直接引用或转换插件主类类型。获取插件实例必须使用 Bukkit.getPluginManager().getPlugin("${projectContext.projectName}")，返回类型使用 org.bukkit.plugin.Plugin 接口，不要强转为具体主类
 - 不要使用 XxxPlugin.getPlugin()、XxxPlugin.getInstance() 或 (XxxPlugin) 强转等模式
@@ -565,7 +572,7 @@ export function reCheckerPrompt(
 ): { system: string; user: string } {
     const crossFileBlock = generatedSummaries?.length
         ? "\n\n项目中已生成文件的可用 API：" + formatSummaries(generatedSummaries) +
-        "\n\n除上述 API 外，还需检查：当前文件调用的项目内方法是否在上述 API 列表中存在。如果调用了未列出的项目内方法，视为错误。"
+        "\n\n除上述 API 外，还需检查：当前文件调用的项目内方法和构造器是否在上述 API 列表中存在。如果调用了未列出的方法，或在没有 public 无参构造器时使用 new Xxx()，视为错误。"
         : "";
 
     return {
@@ -593,6 +600,7 @@ export function reworkPrompt(
     reason: string,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     generatedSummaries?: FileSummary[],
+    apiContractContext?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
 
@@ -600,8 +608,9 @@ export function reworkPrompt(
         system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件代码修正器。
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
+${apiContractContext ?? ""}
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
-你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
+你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
 禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
 ${FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `文件 ${filePath}（职责：${fileRole}）存在错误：${reason}\n\n原始内容：\n${originalContent}`,
@@ -618,6 +627,7 @@ export function summaryExtractPrompt(filePath: string, fileContent: string): { s
   "className": "类名（如果是 Java 类文件）",
   "extends": "父类名（没有则为 null）",
   "implements": ["接口名"],
+  "constructors": [{ "params": "构造参数列表，如 Plugin plugin, ConfigManager config" }],
   "publicMethods": [
     { "name": "方法名", "params": "参数列表如 Player player, double amount", "returns": "返回类型" }
   ],
@@ -630,6 +640,7 @@ export function summaryExtractPrompt(filePath: string, fileContent: string): { s
 
 规则：
 - 只提取 public 和 public static 的方法和字段
+- constructors 必须列出所有 public 构造器；public Java 类完全未声明构造器时填 [{"params":""}] 表示隐式 public 无参构造器，只有不存在可用 public 构造器或非 Java 文件时才使用空数组
 - 对于非 Java 文件（如 pom.xml、plugin.yml、config.yml），className 为 null，只填 description
 - publicMethods 中不要包含 private/protected 方法
 - 如果某个字段不适用，使用 null 或空数组
@@ -838,6 +849,7 @@ function specializationBlock(
                 "onEnable 顺序（必须按此顺序）：",
                 "  1) saveDefaultConfig()（仅当蓝图 defaultsCopied=true）",
                 "  2) 实例化所有服务（lifecycle=onEnable 的 ManagerGen），保存为字段",
+                "     - 实例化时必须严格使用上方 API 摘要列出的 public 构造器参数；没有无参构造器时禁止 new Xxx()",
                 "  3) 注册所有命令：getCommand(\"name\").setExecutor(executorInstance) 与 setTabCompleter(executorInstance)（同一类的同一实例）",
                 "  4) 注册所有监听：getServer().getPluginManager().registerEvents(listenerInstance, this)",
                 "  5) 启动调度任务：根据 schedule 字段调用 runTaskTimer / runTaskLater / runTaskAsynchronously",
@@ -895,15 +907,18 @@ export function dispatchGen(
     ancestorSummaries: FileSummary[],
     slice: BlueprintSlice,
     skillContext?: string,
+    apiContractContext?: string,
 ): {
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
 } {
     const spec = specializationBlock(file, slice, ctx);
-    const additionalContext = [spec, skillContext].filter((v): v is string => !!v).join("\n\n");
+    const additionalContext = [spec, apiContractContext, skillContext].filter((v): v is string => !!v).join("\n\n");
     // 统一输出规范由 fileGenPrompt 放在最终尾部，确保专项规则与 skill 骨架不能覆盖它。
     const gen = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries, additionalContext);
-    const checkerSpec = checkerSpecializationBlock(file, slice);
+    const checkerSpec = [checkerSpecializationBlock(file, slice), apiContractContext]
+        .filter((v): v is string => !!v)
+        .join("\n\n");
     const checker = (path: string, content: string) => {
         return reCheckerPrompt(path, content, ancestorSummaries, ctx.projectName, file.role, checkerSpec);
     };
@@ -953,12 +968,14 @@ export function buildFixPrompt(
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     generatedSummaries?: FileSummary[],
     fileRole?: string,
+    apiContractContext?: string,
+    progressContext?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
     const isPom = filePath.toLowerCase().endsWith("pom.xml");
     const fileRules = isPom
         ? `这是 Maven pom.xml。只修正仓库、依赖、版本或构建插件配置，不得输出 Java。Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/。`
-        : `你只能调用上面列出的已生成文件中的类和方法，不要凭空调用不存在的方法。
+        : `你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
 禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
 文件职责：${fileRole || "未提供显式颜色例外"}
 ${FILEGEN_OUTPUT_STYLE_RULES}`;
@@ -967,9 +984,12 @@ ${FILEGEN_OUTPUT_STYLE_RULES}`;
         system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件构建修正器。
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
+${apiContractContext ?? ""}
 Maven 编译失败。根据下方的编译错误日志修正文件，使其能通过编译。
+编译器给出的 required/found、候选重载和符号信息是事实，优先级高于模型记忆。
+必须处理列出的每一条诊断；只修改诊断涉及的代码及必要 import，不要顺手改动无关逻辑，也不要臆测第三方 API 在目标版本改变了返回类型。
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
 ${fileRules}`,
-        user: `文件 ${filePath} 编译失败。\n\n编译错误日志：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
+        user: `文件 ${filePath} 编译失败。\n\n${progressContext ? `修复进度：\n${progressContext}\n\n` : ""}编译错误诊断：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
     };
 }

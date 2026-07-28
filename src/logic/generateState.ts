@@ -67,6 +67,8 @@ export type GenTask = {
     moreInputHint: string;
     grade: GradeInfo | null;
     debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
+    buildDiagnostics: any[];
+    buildHistory: any[];
 };
 
 export const genTask = reactive<GenTask>({
@@ -93,6 +95,8 @@ export const genTask = reactive<GenTask>({
     moreInputHint: "",
     grade: null,
     debugLog: [],
+    buildDiagnostics: [],
+    buildHistory: [],
 });
 
 export function resetGenTask() {
@@ -119,6 +123,8 @@ export function resetGenTask() {
     genTask.moreInputHint = "";
     genTask.grade = null;
     genTask.debugLog = [];
+    genTask.buildDiagnostics = [];
+    genTask.buildHistory = [];
     clarifyWaiting.value = false;
     pathGateWaiting.value = false;
     clearPersistedGenTask();
@@ -162,6 +168,8 @@ export function persistGenTask() {
                 logs: genTask.logs.slice(-200),
                 clarifyHistory: genTask.clarifyHistory,
                 grade: genTask.grade,
+                buildDiagnostics: genTask.buildDiagnostics,
+                buildHistory: genTask.buildHistory.slice(-6),
                 error: genTask.error,
                 t: Date.now(),
             };
@@ -193,6 +201,8 @@ export function restoreGenTask(): boolean {
         genTask.logs = s.logs || [];
         genTask.clarifyHistory = s.clarifyHistory || [];
         genTask.grade = s.grade || null;
+        genTask.buildDiagnostics = s.buildDiagnostics || [];
+        genTask.buildHistory = s.buildHistory || [];
         genTask.error = s.error || "";
         return true;
     } catch { return false; }

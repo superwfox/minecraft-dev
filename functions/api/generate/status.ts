@@ -1,5 +1,6 @@
 import { getRunStatus, getArtifactInfo, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { getTask, putTask } from "../../_lib/taskStore";
+import { compareDiagnostics } from "../../_lib/buildDiagnostics";
 
 interface Env {
     GITHUB_PAT: string;
@@ -50,6 +51,21 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             state.artifactId = artifact.id;
             state.status = "done";
             state.logs.push("● 构建成功，JAR 已就绪");
+            if (state.pendingFixSnapshot?.diagnostics) {
+                const progress = compareDiagnostics(state.pendingFixSnapshot.diagnostics, []);
+                const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
+                for (let i = history.length - 1; i >= 0; i--) {
+                    if (history[i]?.attempt === state.pendingFixSnapshot.attempt && !history[i]?.evaluatedRunId) {
+                        history[i] = { ...history[i], evaluatedRunId: state.runId, progress, status: "verified" };
+                        break;
+                    }
+                }
+                state.buildFixHistory = history.slice(-6);
+                state.lastBuildDiagnostics = [];
+                state.lastBuildProgress = progress;
+                state.fixStagnation = 0;
+                delete state.pendingFixSnapshot;
+            }
         } else {
             state.status = "error";
             state.error = "构建成功但未找到 artifact";

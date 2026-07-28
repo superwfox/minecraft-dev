@@ -5,6 +5,7 @@
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
 import { getTask, putTask } from "../_lib/taskStore";
+import { buildApiContractContext } from "../_lib/apiContracts";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -20,14 +21,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
     const uid: string | undefined = (context.data as any)?.uid;
+    let taskState: any = null;
 
     // 任务级额度耗尽时直接拒绝
     if (taskId) {
         const stateRaw = await getTask(context.env, taskId);
         if (stateRaw) {
             try {
-                const st = JSON.parse(stateRaw);
-                if (st.quotaExhausted) {
+                taskState = JSON.parse(stateRaw);
+                if (taskState.quotaExhausted) {
                     return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
                         status: 402, headers: { "Content-Type": "application/json" },
                     });
@@ -36,9 +38,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
     }
 
+    const messages = Array.isArray(body.messages)
+        ? body.messages.map((message: any) => ({ ...message }))
+        : [];
+    if (body.purpose === "append") {
+        const fallback = body.projectContext ?? {};
+        const generatedFiles = Array.isArray(taskState?.generatedFiles)
+            ? taskState.generatedFiles.filter((file: any) => !/(^|\/)pom\.xml$/i.test(file.path))
+            : [];
+        const pomContent = fallback.pomContent
+            || taskState?.generatedFiles?.find((file: any) => /(^|\/)pom\.xml$/i.test(file.path))?.content;
+        if (pomContent) generatedFiles.push({ path: "pom.xml", content: String(pomContent) });
+        const apiContract = buildApiContractContext({
+            coreType: taskState?.coreType || fallback.coreType,
+            version: taskState?.version || fallback.version,
+            externalDeps: taskState?.grade?.vector?.external_deps ?? [],
+            generatedFiles,
+        });
+        const systemMessage = messages.find((message: any) => message.role === "system");
+        if (systemMessage) systemMessage.content = `${systemMessage.content}\n\n${apiContract}`;
+        else messages.unshift({ role: "system", content: apiContract });
+    }
+
     const payload: any = {
         model,
-        messages: body.messages,
+        messages,
         stream: true,
         stream_options: { include_usage: true },
     };

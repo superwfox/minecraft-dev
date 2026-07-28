@@ -3,6 +3,7 @@ import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompt
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { getTask, putTask } from "../../_lib/taskStore";
+import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -199,7 +200,19 @@ async function generateAndCheckFile(
     dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
     const slice = computeSlice(target, blueprint);
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
-    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx);
+    const apiContractInput = {
+        coreType: ctx.coreType,
+        version: ctx.version,
+        externalDeps: state.grade?.vector?.external_deps ?? [],
+        generatedFiles: [
+            ...(state.generatedFiles ?? []),
+            ...summaries
+                .filter((summary) => !(state.generatedFiles ?? []).some((file: any) => file.path === summary.path))
+                .map((summary) => ({ path: summary.path, apiSummary: summary })),
+        ],
+    };
+    const apiContractCtx = buildApiContractContext(apiContractInput);
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx);
     dbg("file:gen-begin", { path: filePath });
     const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath, false, dbg);
     await charge(initialRes);
@@ -216,11 +229,17 @@ async function generateAndCheckFile(
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         dbg("file:review-begin", { path: filePath, round: reworkCount });
-        const check = dispatched.checker(filePath, content);
-        const reviewRes = await callAI(llm, check.system, check.user, true, true, dbg);
-        await charge(reviewRes);
         let review: any;
-        try { review = JSON.parse(reviewRes.content); } catch { dbg("file:review-parse-fail", { path: filePath }); passed = true; break; }
+        const knownApiIssues = findKnownApiIssues(apiContractInput, content);
+        if (knownApiIssues.length) {
+            review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
+            dbg("file:review-known-api", { path: filePath, issues: knownApiIssues });
+        } else {
+            const check = dispatched.checker(filePath, content);
+            const reviewRes = await callAI(llm, check.system, check.user, true, true, dbg);
+            await charge(reviewRes);
+            try { review = JSON.parse(reviewRes.content); } catch { dbg("file:review-parse-fail", { path: filePath }); passed = true; break; }
+        }
         dbg("file:review-done", { path: filePath, is_ok: !!review.is_ok, missing: (review.missing_classes ?? []).length });
 
         if (review.is_ok) {
@@ -250,7 +269,7 @@ async function generateAndCheckFile(
                         path: newPath, role: newRole, order: 0,
                         generatorType: inferGeneratorType(className, newPath),
                     };
-                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx);
+                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx);
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
                     const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath, false, dbg);
                     await charge(subRes);
@@ -283,7 +302,7 @@ async function generateAndCheckFile(
         state.logs.push(reworkMsg);
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
         dbg("file:rework-begin", { path: filePath, round: reworkCount });
-        const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries);
+        const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries, apiContractCtx);
         const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true, dbg);
         await charge(rwRes);
         content = stripFences(rwRes.content);

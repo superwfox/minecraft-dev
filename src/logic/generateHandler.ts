@@ -5,7 +5,7 @@ import { fetchWithByokFallback } from "./byok";
 import { selected } from "./skills";
 import { parseResponse } from "../ide/composables/useIDEChat";
 
-const MAX_FIX_ATTEMPTS = 2;
+const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
 
 // ── ESC 撤回中断（仅思考/需求确认阶段）──
@@ -240,6 +240,21 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                     case "debug":
                         genTask.debugLog.push(evt);
                         if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
+                        if (evt.scope === "build-fix" && evt.msg === "fix:diagnostics") {
+                            genTask.buildDiagnostics = Array.isArray(evt.diagnostics) ? evt.diagnostics : [];
+                            const entry = {
+                                runId: evt.runId,
+                                mode: evt.mode,
+                                fingerprint: evt.fingerprint,
+                                diagnostics: genTask.buildDiagnostics,
+                                progress: evt.progress ?? null,
+                                rolledBackFiles: evt.rolledBackFiles ?? [],
+                            };
+                            const index = genTask.buildHistory.findIndex(item => item.runId === evt.runId);
+                            if (index >= 0) genTask.buildHistory[index] = entry;
+                            else genTask.buildHistory.push(entry);
+                            if (genTask.buildHistory.length > 6) genTask.buildHistory.shift();
+                        }
                         break;
                 }
             } catch { /* skip */ }
@@ -318,11 +333,11 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
 }
 
 /** SSE streaming build fix */
-async function streamBuildFix(taskId: string): Promise<any> {
+async function streamBuildFix(taskId: string, mode: "repair" | "inspect" = "repair"): Promise<any> {
     const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId }),
+        body: JSON.stringify({ taskId, mode }),
     });
     if (!resp.ok) throw new Error(await resp.text());
 
@@ -704,7 +719,13 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     }
 }
 
-type BuildMeta = { javaVersion?: string; projectName?: string; packageName?: string };
+type BuildMeta = {
+    javaVersion?: string;
+    projectName?: string;
+    packageName?: string;
+    coreType?: string;
+    version?: string;
+};
 
 async function buildWithRetry(
     initialFiles?: { path: string; content: string }[],
@@ -738,19 +759,24 @@ async function buildWithRetry(
 
         if (buildOk) return; // success
 
-        // Build failed — attempt fix
-        if (attempt < MAX_FIX_ATTEMPTS) {
+        // 每次失败都抓取结构化诊断；最后一次只检查、不再调用模型修改。
+        const canRepair = attempt < MAX_FIX_ATTEMPTS;
+        if (canRepair) {
             genTask.logs.push(`! 构建失败，尝试自动修复 (第${attempt + 1}次)...`);
             setPhase("fixing", "正在分析编译错误并修复...");
-
-            const fixResult = await streamBuildFix(genTask.taskId);
-            if (!fixResult || fixResult.fixed === 0) {
-                throw new Error(fixResult?.reason || "自动修复未能修正任何文件，构建失败");
-            }
-            genTask.logs.push(`● 已修复 ${fixResult.fixed} 个文件，重新构建...`);
         } else {
-            throw new Error("构建失败，已用尽自动修复次数");
+            setPhase("fixing", "正在获取最终构建诊断...");
         }
+
+        const fixResult = await streamBuildFix(genTask.taskId, canRepair ? "repair" : "inspect");
+        if (!canRepair) {
+            throw new Error(fixResult?.reason || "构建失败，已用尽自动修复次数");
+        }
+        const changed = Number(fixResult?.changed ?? fixResult?.fixed ?? 0);
+        if (!fixResult || changed === 0) {
+            throw new Error(fixResult?.reason || "自动修复未产生可重新验证的文件变更，构建失败");
+        }
+        genTask.logs.push(`● 已修改 ${changed} 个文件，开始重新构建验证...`);
     }
 }
 
@@ -849,6 +875,12 @@ export async function appendFeature(appendText: string) {
             body: JSON.stringify({
                 model: "deepseek-v4-pro",
                 taskId: genTask.taskId || undefined,
+                purpose: "append",
+                projectContext: {
+                    coreType: genTask.coreType,
+                    version: genTask.version,
+                    pomContent: genTask.files.find(f => /(^|\/)pom\.xml$/i.test(f.path))?.content || "",
+                },
                 messages: [
                     { role: "system", content: APPEND_SYSTEM },
                     { role: "user", content: user },
@@ -916,7 +948,13 @@ export async function appendFeature(appendText: string) {
         // 重新编译（startBuildFromIDE 内部驱动 uploading/building/done/error）
         await startBuildFromIDE(
             genTask.files.filter(f => f.content).map(f => ({ path: f.path, content: f.content! })),
-            { javaVersion: genTask.javaVersion, projectName: genTask.projectName, packageName: genTask.packageName },
+            {
+                javaVersion: genTask.javaVersion,
+                projectName: genTask.projectName,
+                packageName: genTask.packageName,
+                coreType: genTask.coreType,
+                version: genTask.version,
+            },
         );
     } catch (e: any) {
         genTask.streamingPhase = "";
