@@ -7,7 +7,7 @@ import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContr
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
-const LLM_TIMEOUT_MS = 150000; // 非流式单次调用上限（无中间块，只能用总时长）
+const LLM_TIMEOUT_MS = 300000; // 非流式单次调用上限（无中间块，只能用总时长）
 const LLM_IDLE_MS = 120000;    // 流式调用的空闲超时：连续这么久没字节才 abort，长思考只要在流就不误杀
 
 interface Env {

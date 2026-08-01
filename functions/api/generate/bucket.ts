@@ -8,7 +8,7 @@ import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContr
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
 const SUPER_CONCURRENCY = 2; // 「超级并发」开关开启时的桶内并发数（默认串行=1）
-const LLM_TIMEOUT_MS = 150000; // 单次 LLM 调用总时长上限（生成/审查均走非流式，免费版 CPU 有限）
+const LLM_TIMEOUT_MS = 300000; // 单次 LLM 调用总时长上限（生成/审查均走非流式，免费版 CPU 有限）
 
 // 详细调试:把每一步(含 LLM 的 HTTP 状态/首字节耗时/错误堆栈/心跳是否真在跳)通过 SSE debug 事件发出,
 // 前端累积并可下载。用于定位「桶零进度、无返回」到底死在哪一步。
