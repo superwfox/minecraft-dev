@@ -49,7 +49,9 @@
       <input ref="customInput" v-model="customText" class="cc-custom-input"
              placeholder="输入你的想法…"
              @input="onCustomInput"
-             @keydown.enter.prevent="confirmCustom"
+             @compositionstart="onImeCompositionStart"
+             @compositionend="onImeCompositionEnd"
+             @keydown.enter="onCustomEnter"
              @keydown.esc.stop.prevent="cancelCustom"/>
       <button class="cc-btn primary" :disabled="!customText.trim()" @click="confirmCustom">确定</button>
       <button class="cc-btn ghost" @click="cancelCustom">取消</button>
@@ -74,6 +76,7 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { genTask, submitClarifyAnswers } from "../logic/generateState";
 import type { TodoItem } from "../logic/generateState";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 
 type CardKind = {
     id: string;
@@ -323,6 +326,11 @@ function openCustom(card: CardKind) {
 // 输入实时映射到卡面
 function onCustomInput() {
     if (editingCustom) editingCustom.label = customText.value.trim() || "其他…";
+}
+function onCustomEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    confirmCustom();
 }
 function confirmCustom() {
     const v = customText.value.trim();

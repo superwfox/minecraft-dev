@@ -20,7 +20,9 @@
       <div class="sel-input-row">
         <input ref="inputRef" v-model="customInput" class="sel-input"
                placeholder="或自定义提问..."
-               @keydown.enter.prevent="onCustomAsk"/>
+               @compositionstart="onImeCompositionStart"
+               @compositionend="onImeCompositionEnd"
+               @keydown.enter="onCustomEnter"/>
         <button class="sel-send" :disabled="!customInput.trim()" @click="onCustomAsk">
           <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
             <path d="m1.5 1.5 13 6.5-13 6.5 2.5-6.5-2.5-6.5Z"/>
@@ -64,6 +66,7 @@
 <script setup lang="ts">
 import {ref, computed, watch, nextTick} from "vue";
 import {useIDEChat} from "../composables/useIDEChat";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../../logic/keyboard";
 
 const props = defineProps<{
     visible: boolean;
@@ -142,6 +145,12 @@ async function runTask(label: string, task: string) {
         result.value = `调用失败：${e?.message || String(e)}`;
         phase.value = "result";
     }
+}
+
+function onCustomEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    onCustomAsk();
 }
 
 function onCustomAsk() {

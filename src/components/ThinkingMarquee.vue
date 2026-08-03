@@ -113,7 +113,7 @@ onUnmounted(() => {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  animation: tm-shine 1.4s linear 3;
+  animation: tm-shine 2.8s linear 3;
 }
 
 .tm-hero {

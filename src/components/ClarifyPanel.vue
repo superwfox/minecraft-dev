@@ -41,7 +41,9 @@
              class="clarify-custom"
              placeholder="在此输入你的其他想法（回车进入下一题）"
              @input="onCustomInput(current)"
-             @keydown.enter.prevent="onCustomEnter(current)"/>
+             @compositionstart="onImeCompositionStart"
+             @compositionend="onImeCompositionEnd"
+             @keydown.enter="onCustomEnter($event, current)"/>
     </div>
 
     <div class="clarify-footer">
@@ -59,6 +61,7 @@
 import { reactive, computed, ref, watch } from "vue";
 import { genTask, submitClarifyAnswers } from "../logic/generateState";
 import type { TodoItem } from "../logic/generateState";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 import CurveChart from "./CurveChart.vue";
 
 const selections = reactive<Record<string, string | string[]>>({});
@@ -125,7 +128,9 @@ function onCustomInput(todo: TodoItem) {
     else selections[todo.id] = v;
 }
 
-function onCustomEnter(todo: TodoItem) {
+function onCustomEnter(event: KeyboardEvent, todo: TodoItem) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
     onCustomInput(todo);
     if (!isAnswered(todo)) return;
     if (currentIndex.value < genTask.clarifyTodos.length - 1) {

@@ -67,7 +67,9 @@
     <div v-if="rejectOpen" class="pc-reject">
       <input ref="rejectInput" v-model="rejectText" class="pc-reject-input"
              placeholder="说明哪里理解错了，AI 重新分析…"
-             @keydown.enter.prevent="confirmReject"
+             @compositionstart="onImeCompositionStart"
+             @compositionend="onImeCompositionEnd"
+             @keydown.enter="onRejectEnter"
              @keydown.esc.stop.prevent="rejectOpen = false"/>
       <button class="pc-btn primary" :disabled="!rejectText.trim()" @click="confirmReject">重画</button>
       <button class="pc-btn ghost" @click="rejectOpen = false">取消</button>
@@ -87,6 +89,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 import { genTask, submitPathChoice, submitPathReject } from "../logic/generateState";
 import type { GradePath } from "../logic/generateState";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 
 type CardKind = {
     id: string;
@@ -355,6 +358,11 @@ function openReject() {
     rejectText.value = "";
     rejectOpen.value = true;
     nextTick(() => rejectInput.value?.focus());
+}
+function onRejectEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    confirmReject();
 }
 function confirmReject() {
     const v = rejectText.value.trim();

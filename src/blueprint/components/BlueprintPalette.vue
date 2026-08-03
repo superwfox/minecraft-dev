@@ -28,7 +28,9 @@
         变量<span class="sec-add" @click="adding = !adding">+</span>
       </div>
       <div v-if="adding" class="var-add">
-        <input v-model="newName" class="va-in" placeholder="名称" @keydown.enter="commitVar"/>
+        <input v-model="newName" class="va-in" placeholder="名称"
+               @compositionstart="onImeCompositionStart" @compositionend="onImeCompositionEnd"
+               @keydown.enter="onVarEnter"/>
         <select v-model="newType" class="va-sel">
           <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
         </select>
@@ -54,6 +56,7 @@ import { allCuratedDefs } from "../registry";
 import { CATEGORIES } from "../curated";
 import { categoryColor } from "../colors";
 import { useBlueprint } from "../useBlueprint";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../../logic/keyboard";
 
 defineEmits<{ (e: "pick", defType: string): void; (e: "pickVar", name: string): void }>();
 const bp = useBlueprint();
@@ -82,6 +85,11 @@ const TYPES = ["String", "int", "double", "boolean", "Player", "Location", "Item
 const adding = ref(false);
 const newName = ref("");
 const newType = ref("String");
+function onVarEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    commitVar();
+}
 function commitVar() {
     const n = newName.value.trim();
     if (!n) return;

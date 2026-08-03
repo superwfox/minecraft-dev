@@ -13,7 +13,8 @@
       </div>
       <div v-if="adding" class="tray-newrow">
         <input ref="addInp" v-model="newName" class="tn-in" placeholder="图名称(事件 / 函数)"
-               @keydown.enter="commitGraph" @keydown.esc="adding = false"/>
+               @compositionstart="onImeCompositionStart" @compositionend="onImeCompositionEnd"
+               @keydown.enter="onGraphEnter" @keydown.esc="adding = false"/>
         <button class="tn-btn" @click="commitGraph">建</button>
       </div>
       <div class="tray-hint">把卡片拖到画布 → 折叠成一个函数节点供调用</div>
@@ -25,7 +26,9 @@
           <div class="gc-top">
             <span class="gc-dot"></span>
             <input v-if="editingId === g.id" v-model="editName" class="gc-edit"
-                   @click.stop @mousedown.stop @keydown.enter="commitRename(g.id)" @keydown.esc="editingId = ''" @blur="commitRename(g.id)"/>
+                   @click.stop @mousedown.stop
+                   @compositionstart="onImeCompositionStart" @compositionend="onImeCompositionEnd"
+                   @keydown.enter="onRenameEnter($event, g.id)" @keydown.esc="editingId = ''" @blur="commitRename(g.id)"/>
             <span v-else class="gc-name" @dblclick.stop="startRename(g)" title="双击重命名">{{ g.name }}</span>
             <span v-if="graphs.length > 1" class="gc-del" @click.stop="bp.removeGraph(g.id)">×</span>
           </div>
@@ -40,6 +43,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from "vue";
 import { useBlueprint } from "../useBlueprint";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../../logic/keyboard";
 
 const bp = useBlueprint();
 const open = ref(false);
@@ -51,6 +55,11 @@ const addInp = ref<HTMLInputElement | null>(null);
 async function toggleAdd() {
     adding.value = !adding.value;
     if (adding.value) { await nextTick(); addInp.value?.focus(); }
+}
+function onGraphEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    commitGraph();
 }
 function commitGraph() {
     const n = newName.value.trim();
@@ -73,6 +82,11 @@ async function startRename(g: { id: string; name: string }) {
     editName.value = g.name;
     await nextTick();
     (document.querySelector(".gc-edit") as HTMLInputElement)?.focus();
+}
+function onRenameEnter(event: KeyboardEvent, id: string) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    commitRename(id);
 }
 function commitRename(id: string) {
     if (editingId.value !== id) return;

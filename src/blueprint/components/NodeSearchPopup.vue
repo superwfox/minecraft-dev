@@ -9,6 +9,7 @@
       </span>
     </div>
     <input ref="inp" v-model="q" class="bps-input" placeholder="搜索节点…"
+           @compositionstart="onImeCompositionStart" @compositionend="onImeCompositionEnd"
            @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
            @keydown.enter="onEnter" @keydown.esc.prevent="$emit('cancel')"/>
     <div class="bps-list">
@@ -27,6 +28,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import type { NodeDef } from "../model";
 import { categoryColor, typeColor } from "../colors";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../../logic/keyboard";
 
 const props = defineProps<{ visible: boolean; x: number; y: number; candidates: NodeDef[]; title: string; allCandidates?: NodeDef[] }>();
 const emit = defineEmits<{ (e: "select", d: NodeDef): void; (e: "cancel"): void }>();
@@ -65,9 +67,9 @@ function move(d: number) {
     if (!n) return;
     active.value = (active.value + d + n) % n;
 }
-// 输入法组合中(中文候选词未确认)按 Enter 不选定,避免误触
+// 输入法组合中（中文候选词未确认）按 Enter 不选定，避免误触。
 function onEnter(e: KeyboardEvent) {
-    if (e.isComposing || (e as any).keyCode === 229) return;
+    if (isImeComposing(e)) return;
     e.preventDefault();
     pick(filtered.value[active.value]);
 }

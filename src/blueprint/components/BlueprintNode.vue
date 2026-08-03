@@ -46,7 +46,9 @@
     <!-- 函数入口/出口:参数声明 -->
     <div v-if="isFn" class="fn-foot">
       <div v-if="pAdding" class="fn-form">
-        <input v-model="pName" class="fn-name" placeholder="名称" @mousedown.stop @keydown.enter="commitParam" @keydown.esc="pAdding = false"/>
+        <input v-model="pName" class="fn-name" placeholder="名称" @mousedown.stop
+               @compositionstart="onImeCompositionStart" @compositionend="onImeCompositionEnd"
+               @keydown.enter="onParamEnter" @keydown.esc="pAdding = false"/>
         <select v-model="pType" class="fn-type" @mousedown.stop>
           <option v-for="t in PTYPES" :key="t" :value="t">{{ t }}</option>
         </select>
@@ -69,6 +71,7 @@ import { NODE_W, HEADER_H, layoutOf } from "../layout";
 import { typeColor, EXEC_COLOR, categoryColor } from "../colors";
 import { pinsCompatible } from "../types";
 import { useBlueprint } from "../useBlueprint";
+import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../../logic/keyboard";
 
 const props = defineProps<{
     node: GraphNode; def: NodeDef; selected: boolean;
@@ -97,6 +100,11 @@ const pName = ref("");
 const pType = ref("String");
 function isParamPin(p: PinDef) { return isFn.value && p.id.startsWith("p:"); }
 function removeParam(p: PinDef) { emit("fnremove", { nodeId: props.node.id, kind: fnKind.value, paramId: p.id.slice(2) }); }
+function onParamEnter(event: KeyboardEvent) {
+    if (isImeComposing(event)) return;
+    event.preventDefault();
+    commitParam();
+}
 function commitParam() {
     const n = pName.value.trim();
     if (!n) return;
