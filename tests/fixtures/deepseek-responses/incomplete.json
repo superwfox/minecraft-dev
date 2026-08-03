@@ -1,0 +1,12 @@
+{
+  "type": "response.incomplete",
+  "response": {
+    "id": "resp_incomplete_fixture",
+    "status": "incomplete",
+    "model": "deepseek-v4-flash",
+    "output": [],
+    "incomplete_details": {
+      "reason": "max_output_tokens"
+    }
+  }
+}

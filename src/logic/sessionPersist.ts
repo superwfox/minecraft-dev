@@ -1,23 +1,13 @@
 import { watch } from "vue";
 import { chatBlocks, rehydrateBlocks } from "./chatState";
 import type { ChatBlock } from "./chatState";
-import { genTask } from "./generateState";
-import type { GenPhase, GenTask } from "./generateState";
-
 const STORAGE_KEY = "tahai-session-v1";
-
-const INTERRUPTED_PHASES: GenPhase[] = [
-    "planning", "clarifying", "grading", "confirming", "awaiting_input",
-    "generating", "verifying", "uploading",
-    "building", "polling", "fixing",
-];
 
 let saveTimer: any = null;
 
 function snapshot() {
     return {
         chatBlocks: chatBlocks.map(b => ({ ...b })),
-        genTask: { ...genTask, files: genTask.files.map(f => ({ ...f })) },
     };
 }
 
@@ -56,24 +46,6 @@ export function restoreSession() {
         ) as ChatBlock[];
         rehydrateBlocks(validated);
     }
-
-    if (data.genTask && typeof data.genTask === "object") {
-        const restored = data.genTask as Partial<GenTask>;
-        Object.assign(genTask, restored);
-
-        // 中断的进行中阶段 → error，避免 UI 永远卡住等 SSE/promise
-        if (INTERRUPTED_PHASES.includes(genTask.phase)) {
-            genTask.phase = "error";
-            genTask.error = "刷新中断，请重新生成";
-            genTask.streamingContent = "";
-            genTask.streamingPhase = "";
-            genTask.streamingFile = "";
-            genTask.reasoningContent = "";
-            genTask.clarifyTodos = [];
-            genTask.moreInputHint = "";
-            genTask.grade = null;
-        }
-    }
 }
 
 export function clearSession() {
@@ -86,5 +58,4 @@ export function clearSession() {
 
 export function startSessionPersistence() {
     watch(chatBlocks, schedulePersist, { deep: true });
-    watch(genTask, schedulePersist, { deep: true });
 }

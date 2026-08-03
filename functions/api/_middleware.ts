@@ -21,7 +21,11 @@ interface Env {
 
 // 需要登录的（贵）端点
 function needsAuth(path: string): boolean {
-    return path.startsWith("/api/generate/") || path === "/api/chat" || path === "/api/stream" || path === "/api/skills/submit";
+    return path.startsWith("/api/generate/")
+        || path.startsWith("/api/learning/")
+        || path === "/api/chat"
+        || path === "/api/stream"
+        || path === "/api/skills/submit";
 }
 
 // 需要软限流的端点（Rate Limiting binding 不产生 TASKS KV 读写）。
@@ -37,6 +41,8 @@ function needsKvFallbackLimit(path: string): boolean {
         || path === "/api/skills/submit"
         || path === "/api/sponsor/request"
         || path === "/api/auth/callback"
+        || path === "/api/learning/start"
+        || path === "/api/learning/step"
         || ["plan", "clarify", "grade", "bucket", "file", "fix", "build"]
             .some(name => path === `/api/generate/${name}`);
 }

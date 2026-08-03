@@ -2,6 +2,7 @@ import {
     addTaskCostInD1,
     getTaskCostFromD1,
     setTaskCostConsumedInD1,
+    TaskOwnershipError,
     type TaskStoreEnv,
 } from "./taskStore";
 
@@ -157,6 +158,22 @@ export async function ipAllow(
 
 interface TaskCost { uid: string; total: number; consumed: number; }
 
+function parseOwnedTaskCost(raw: string | null, uid: string): TaskCost {
+    if (!raw) return { uid, total: 0, consumed: 0 };
+    try {
+        const parsed = JSON.parse(raw) as Partial<TaskCost>;
+        if (parsed.uid && parsed.uid !== uid) throw new TaskOwnershipError();
+        return {
+            uid,
+            total: Number(parsed.total) || 0,
+            consumed: Number(parsed.consumed) || 0,
+        };
+    } catch (error) {
+        if (error instanceof TaskOwnershipError) throw error;
+        return { uid, total: 0, consumed: 0 };
+    }
+}
+
 export interface UsageBreakdown {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -190,10 +207,10 @@ export async function accumulateCosts(
     if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
     const cost = entries.reduce((sum, entry) => sum + (entry.usage ? costOf(entry.model, entry.usage) : 0), 0);
     if (cost <= 0) {
-        const d1Rec = await getTaskCostFromD1(env, taskId);
+        const d1Rec = await getTaskCostFromD1(env, taskId, uid);
         if (d1Rec) return { ...d1Rec, outOfQuota: false, delta: 0 };
         const raw = await env.TASKS.get(`taskCost:${taskId}`);
-        const rec: TaskCost = raw ? JSON.parse(raw) : { uid, total: 0, consumed: 0 };
+        const rec = parseOwnedTaskCost(raw, uid);
         return { consumed: rec.consumed, total: rec.total, outOfQuota: false, delta: 0 };
     }
 
@@ -208,14 +225,14 @@ export async function accumulateCosts(
             consumed++;
         }
         if (consumed !== d1Rec.consumed) {
-            await setTaskCostConsumedInD1(env, taskId, consumed);
+            await setTaskCostConsumedInD1(env, taskId, uid, consumed);
         }
         return { consumed, total: d1Rec.total, outOfQuota, delta: cost };
     }
 
     const key = `taskCost:${taskId}`;
     const raw = await env.TASKS.get(key);
-    const rec: TaskCost = raw ? JSON.parse(raw) : { uid, total: 0, consumed: 0 };
+    const rec = parseOwnedTaskCost(raw, uid);
     rec.total += cost;
 
     let outOfQuota = false;

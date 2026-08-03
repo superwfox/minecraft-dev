@@ -1,3 +1,5 @@
+import type { KnowledgeNeed } from "./learning/types";
+
 export type ApiContractId = "spigot" | "paper" | "placeholderapi" | "vault" | "worldguard";
 
 export interface MavenDependency {
@@ -162,12 +164,66 @@ function normalizeExternalName(value: string): ApiContractId | null {
     return null;
 }
 
+// major 必须与依赖名分隔，避免把 bridge8 这类 artifact 尾数当成版本。
+const CONTRACT_MAJOR_PATTERNS: Partial<Record<ApiContractId, RegExp>> = {
+    placeholderapi: /\bplaceholder\s*api\b(?:\s*[:@]\s*|\s+(?:(?:major|version|v)\s*)?)(\d+)(?=(?:\.\d+|\.x)*(?:[^a-z0-9_]|$))/gi,
+    vault: /\bvault(?:\s*api)?\b(?:\s*[:@]\s*|\s+(?:(?:major|version|v)\s*)?)(\d+)(?=(?:\.\d+|\.x)*(?:[^a-z0-9_]|$))/gi,
+    worldguard: /\bworld\s*guard(?:\s*(?:-\s*)?bukkit)?\b(?:\s*[:@]\s*|\s+(?:(?:major|version|v)\s*)?)(\d+)(?=(?:\.\d+|\.x)*(?:[^a-z0-9_]|$))/gi,
+};
+
+function explicitContractMajors(value: string, id: ApiContractId): number[] {
+    const pattern = CONTRACT_MAJOR_PATTERNS[id];
+    if (!pattern) return [];
+    return [...value.matchAll(pattern)].map((match) => Number(match[1]));
+}
+
+function unsupportedContractMajor(contract: ApiContract, majors: number[]): number | null {
+    const supported = contract.majors;
+    if (!supported) return null;
+    return majors.find((major) => !supported.includes(major)) ?? null;
+}
+
+const CONTRACT_KNOWLEDGE_PATTERNS: Record<ApiContractId, RegExp[]> = {
+    spigot: [
+        /\bsetplayerlistheaderfooter\b/,
+        /\bregisternewobjective\b/,
+    ],
+    paper: [
+        /\bsetplayerlistheaderfooter\b/,
+        /\bsendplayerlistheaderandfooter\b/,
+    ],
+    placeholderapi: [
+        /\bsetplaceholders\b/,
+        /\bsetbracketplaceholders\b/,
+    ],
+    vault: [
+        /\bgetregistration\b/,
+        /\bregisteredserviceprovider\b/,
+        /\bgetbalance\b/,
+        /\bdepositplayer\b/,
+        /\bwithdrawplayer\b/,
+        /\beconomyresponse\b/,
+        /\btransactionsuccess\b/,
+    ],
+    worldguard: [
+        /\bworldguard\s*(?:#|\.)?\s*getinstance\b/,
+        /\bregioncontainer\s*(?:#|\.)?\s*get\b/,
+        /\bbukkitadapter\s*(?:#|\.)?\s*adapt\b/,
+        /\bworldguardplugin\s*(?:#|\.)?\s*wrapplayer\b/,
+    ],
+};
+
 export function resolveApiContractIds(input: ApiContractInput): { ids: ApiContractId[]; warnings: string[] } {
     const files = input.generatedFiles ?? [];
     const pom = files.find((file) => /(^|\/)pom\.xml$/i.test(file.path));
     const dependencies = parsePomDependencies(pom?.content ?? "");
     const source = files.filter((file) => file.path.endsWith(".java")).map((file) => file.content ?? "").join("\n");
-    const requested = new Set((input.externalDeps ?? []).map(normalizeExternalName).filter((id): id is ApiContractId => !!id));
+    const requested = new Map<ApiContractId, string[]>();
+    for (const value of input.externalDeps ?? []) {
+        const id = normalizeExternalName(value);
+        if (!id) continue;
+        requested.set(id, [...(requested.get(id) ?? []), value]);
+    }
     const ids: ApiContractId[] = [];
     const warnings: string[] = [];
     const declaredCore = (input.coreType ?? "").toLowerCase();
@@ -184,17 +240,85 @@ export function resolveApiContractIds(input: ApiContractInput): { ids: ApiContra
 
     for (const contract of CONTRACTS.filter((item) => !["spigot", "paper"].includes(item.id))) {
         const matchedDependency = dependencies.find((dep) => contract.matches?.(dep));
-        const detected = !!matchedDependency || requested.has(contract.id) || !!contract.importPattern?.test(source);
+        const requestedValues = requested.get(contract.id) ?? [];
+        const detected = !!matchedDependency || requestedValues.length > 0 || !!contract.importPattern?.test(source);
         if (!detected) continue;
-        const major = matchedDependency ? dependencyMajor(matchedDependency.version) : null;
-        if (major != null && contract.majors && !contract.majors.includes(major)) {
-            warnings.push(`${contract.title} 版本 ${matchedDependency!.version} 不在内置契约范围内；只服从编译器诊断，不套用近似签名。`);
+        const matchedMajor = matchedDependency ? dependencyMajor(matchedDependency.version) : null;
+        const unsupportedDependencyMajor = matchedMajor == null
+            ? null
+            : unsupportedContractMajor(contract, [matchedMajor]);
+        const unsupportedRequestedMajor = unsupportedContractMajor(
+            contract,
+            requestedValues.flatMap((value) => explicitContractMajors(value, contract.id)),
+        );
+        const unsupportedVersion = unsupportedDependencyMajor != null
+            ? matchedDependency!.version
+            : unsupportedRequestedMajor != null ? String(unsupportedRequestedMajor) : "";
+        if (unsupportedVersion) {
+            warnings.push(`${contract.title} 版本 ${unsupportedVersion} 不在内置契约范围内；只服从编译器诊断，不套用近似签名。`);
             continue;
         }
         ids.push(contract.id);
     }
 
     return { ids, warnings };
+}
+
+function knowledgeNeedText(need: KnowledgeNeed): string {
+    return [
+        need.claim.subject,
+        need.claim.question,
+        need.scope.dependency,
+        need.scope.packageName,
+        need.scope.symbol,
+    ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function knowledgeNeedHasSupportedMajor(contract: ApiContract, need: KnowledgeNeed): boolean {
+    const majors = [
+        ...explicitContractMajors(need.scope.dependency ?? "", contract.id),
+        ...explicitContractMajors(need.claim.question, contract.id),
+    ];
+    return unsupportedContractMajor(contract, majors) == null;
+}
+
+function coordinateKnowledgeContractId(value: string): ApiContractId | null {
+    const normalized = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (/^(?:placeholderapi|meclipplaceholderapi)\d*$/.test(normalized)) return "placeholderapi";
+    if (/^(?:vault|vaultapi|comgithubmilkbowlvaultapi)\d*$/.test(normalized)) return "vault";
+    if (/^(?:worldguard|worldguardbukkit|comsk89qworldguardworldguardbukkit)\d*$/.test(normalized)) return "worldguard";
+    return null;
+}
+
+export function isKnowledgeNeedCoveredByApiContracts(input: ApiContractInput, need: KnowledgeNeed): boolean {
+    const activeIds = new Set(resolveApiContractIds(input).ids);
+    const text = knowledgeNeedText(need);
+
+    if (need.claim.answerType === "coordinate") {
+        const dependencyId = coordinateKnowledgeContractId(need.scope.dependency || need.claim.subject);
+        if (!dependencyId || !activeIds.has(dependencyId)) return false;
+        const contract = CONTRACTS.find((item) => item.id === dependencyId)!;
+        return knowledgeNeedHasSupportedMajor(contract, need);
+    }
+
+    for (const id of activeIds) {
+        const contract = CONTRACTS.find((item) => item.id === id)!;
+        if (!knowledgeNeedHasSupportedMajor(contract, need)) continue;
+        if (CONTRACT_KNOWLEDGE_PATTERNS[id].some((pattern) => pattern.test(text))) return true;
+    }
+    return false;
+}
+
+export function partitionKnowledgeNeedsByApiContracts(
+    input: ApiContractInput,
+    needs: KnowledgeNeed[],
+): { covered: KnowledgeNeed[]; uncovered: KnowledgeNeed[] } {
+    const covered: KnowledgeNeed[] = [];
+    const uncovered: KnowledgeNeed[] = [];
+    for (const need of needs) {
+        (isKnowledgeNeedCoveredByApiContracts(input, need) ? covered : uncovered).push(need);
+    }
+    return { covered, uncovered };
 }
 
 export function buildApiContractContext(input: ApiContractInput): string {

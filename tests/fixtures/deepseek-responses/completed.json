@@ -1,0 +1,26 @@
+{
+  "type": "response.completed",
+  "response": {
+    "id": "resp_completed_fixture",
+    "status": "completed",
+    "model": "deepseek-v4-flash",
+    "output": [
+      {
+        "type": "message",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "{\"candidates\":[{\"needId\":\"need-api\",\"urls\":[\"https://jd.papermc.io/paper/1.21.4/org/bukkit/entity/Player.html\"]}]}"
+          }
+        ]
+      }
+    ],
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 30,
+      "input_tokens_details": {
+        "cached_tokens": 20
+      }
+    }
+  }
+}

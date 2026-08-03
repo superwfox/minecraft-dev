@@ -1,9 +1,10 @@
 import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
-import { getTask, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, putTask, TaskOwnershipError } from "../../_lib/taskStore";
 
 interface Env {
+    DB?: D1Database;
     GITHUB_PAT: string;
     TASKS: KVNamespace;
 }
@@ -49,19 +50,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const token = context.env.GITHUB_PAT;
     if (!token) return json({ error: "GITHUB_PAT not configured" }, 500);
 
-    const uid: string | undefined = (context.data as any)?.uid;
+    const uid: string = (context.data as any)?.uid || "";
+    if (!uid) return json({ error: "Unauthorized" }, 401);
 
     const hasIncoming = Array.isArray(incomingFiles) && incomingFiles.length > 0;
 
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
+    let rebuiltExpiredTask = false;
     let state: any;
     if (raw) {
         state = JSON.parse(raw);
     } else if (hasIncoming) {
+        rebuiltExpiredTask = true;
         // 任务已过期（逻辑 TTL 1h），但 IDE 本地仍有文件：凭 IDE 传来的内容 + 元数据重建任务。
         // javaVersion 是触发 workflow 的必需项，缺失时默认 21（现代 Paper）。
         state = {
             taskId,
+            uid,
             status: "uploading",
             javaVersion: meta?.javaVersion || "21",
             projectName: meta?.projectName || "",
@@ -74,6 +79,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     } else {
         return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
     }
+    state.uid = uid;
 
     // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖任务里的 generatedFiles
     // （chat 阶段定型后，用户在 IDE 改动 / 新增 / 删除 不会回写后端；
@@ -98,6 +104,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (meta?.coreType) state.coreType = meta.coreType;
         if (meta?.version) state.version = meta.version;
         state.logs.push(`▸ 已从 IDE 同步 ${state.generatedFiles.length} 个文件到构建仓`);
+    }
+
+    if (rebuiltExpiredTask) {
+        try {
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        } catch (error) {
+            if (error instanceof TaskOwnershipError) {
+                return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
+            }
+            throw error;
+        }
     }
 
     // 只有 fix 端点刚生成候选后的无文件重建才延续同一轮修复状态；
@@ -135,7 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.status = "error";
             state.error = r.reason;
             state.logs.push(`× 安全校验拦截：${r.reason}`);
-            await putTask(context.env, taskId, JSON.stringify(state));
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
             return json({ error: r.reason, code: "POM_BLOCKED" }, 400);
         }
     }
@@ -182,7 +199,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         state.status = "building";
-        await putTask(context.env, taskId, JSON.stringify(state));
+        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
         // 通过所有校验且 GitHub 提交成功后再 increment daily 计数
         if (uid) await userBuildIncrement(context.env.TASKS, uid, userBuildUsed);
@@ -200,7 +217,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.status = "error";
         state.error = e.message;
         state.logs.push("× 构建启动失败: " + e.message);
-        await putTask(context.env, taskId, JSON.stringify(state));
+        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
         return new Response(JSON.stringify({ error: e.message }), { status: 500 });
     }
 };

@@ -2,7 +2,8 @@ import { graderPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/complexity";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
-import { getTask, putTask } from "../../_lib/taskStore";
+import { assessKnowledgeNeeds } from "../../_lib/learning/assessment";
+import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
@@ -55,8 +56,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const taskId = body.taskId as string;
     const correction = body.correction as string | undefined;
+    const uid: string = (context.data as any)?.uid || "";
 
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -70,8 +72,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             status: 400, headers: { "Content-Type": "application/json" },
         });
     }
-
-    const uid: string | undefined = (context.data as any)?.uid;
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -93,7 +93,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const cost = await accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), callRes.usage);
                 state.totalCost = cost.total;
                 state.consumedQuota = cost.consumed;
-                if (cost.outOfQuota) state.quotaExhausted = true;
+                if (cost.outOfQuota) {
+                    state.quotaExhausted = true;
+                    await markTaskQuotaExhausted(context.env, taskId, uid);
+                }
             }
 
             let parsed: any;
@@ -101,14 +104,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 parsed = JSON.parse(stripFences(callRes.content));
             } catch {
                 // 分级解析失败：兜底当直接级走原路径，避免卡死（仍受现有 plannerPrompt 极简约束）
-                state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null };
+                state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
+                state.knowledgeNeeds = [];
                 state.logs.push("× 分级解析失败，按直接级继续");
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
 
+            const assessment = assessKnowledgeNeeds(parsed.knowledgeNeeds, {
+                coreType: state.coreType,
+                mcVersion: state.version,
+            });
+            const knowledgeNeeds = assessment.accepted;
             const vector = (parsed.vector ?? {}) as ScoreVector;
             const level: Level = enforceLevelFloor(parsed.level, vector); // 代码侧强制下限
             const paths = Array.isArray(parsed.paths) ? parsed.paths : [];
@@ -122,9 +131,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 paths,
                 gateRequired,
                 chosenPathId: null,
+                knowledgeNeeds,
             };
+            state.knowledgeNeeds = knowledgeNeeds;
             state.logs.push(`复杂度分级：${level}${parsed.level_reason ? "（" + parsed.level_reason + "）" : ""}`);
-            await putTask(context.env, taskId, JSON.stringify(state));
+            if (assessment.rejected.length) {
+                state.logs.push(`▸ 已忽略 ${assessment.rejected.length} 个不符合学习边界的知识候选`);
+            }
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
             await writer.write(sseEvent(encoder, gateRequired
                 ? { type: "result", direct: false, level, paths }
@@ -132,8 +146,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
             // 出错兜底：重置 grade 为非门控并落库（避免上一轮 gateRequired 残留导致 plan 误判 400），按直接级继续
-            state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null };
-            try { await putTask(context.env, taskId, JSON.stringify(state)); } catch { /* ignore */ }
+            state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
+            state.knowledgeNeeds = [];
+            try { await putTask(context.env, taskId, JSON.stringify(state), 3600, uid); } catch { /* ignore */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 分级错误: ${e.message}` }));
             await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

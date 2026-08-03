@@ -1,4 +1,13 @@
-import { genTask, resetGenTask, waitForClarifyAnswers, waitForExtraPrompt, waitForPathChoice, cancelPendingInput, superConcurrency } from "./generateState";
+import {
+    genTask,
+    resetGenTask,
+    waitForClarifyAnswers,
+    waitForExtraPrompt,
+    waitForPathChoice,
+    cancelPendingInput,
+    persistGenTaskNow,
+    superConcurrency,
+} from "./generateState";
 import type { GenPhase } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 import { fetchWithByokFallback } from "./byok";
@@ -76,10 +85,163 @@ async function post(url: string, body: any, maxRetries = 3) {
     }
 }
 
+function createPlannerRequestId(): string {
+    return `plan_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
+    const deadline = Date.now() + waitMs;
+    let announcedWait = false;
+    let failures = 0;
+
+    while (true) {
+        let resp: Response;
+        try {
+            resp = await fetchWithByokFallback("/api/generate/plan", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+        } catch (error) {
+            if (Date.now() >= deadline || failures++ >= 3) throw error;
+            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+            continue;
+        }
+
+        if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
+        if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+        if (resp.status === 429) {
+            const payload = await resp.json().catch(() => ({}));
+            throw noRetry(payload?.error || "请求过于频繁");
+        }
+        if (resp.status === 409) {
+            const payload = await resp.json().catch(() => ({}));
+            if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
+                throw new Error(payload?.error || "Planner 状态冲突");
+            }
+            if (!announcedWait) {
+                genTask.logs.push("· Planner 已在服务端执行，等待现有结果...");
+                announcedWait = true;
+            }
+            const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
+            await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+            continue;
+        }
+        if (resp.status === 400) {
+            const payload = await resp.json().catch(() => ({}));
+            throw noRetry(payload?.error || "Planner 请求无效");
+        }
+        if (!resp.ok) {
+            const message = await resp.text();
+            if (Date.now() >= deadline || failures++ >= 3) throw new Error(message);
+            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+            continue;
+        }
+        return await resp.json();
+    }
+}
+
 async function get(url: string) {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(await resp.text());
     return resp.json() as any;
+}
+
+const LEARNING_TERMINAL = new Set(["ready", "deferred", "needs_review", "failed", "cancelled"]);
+
+function applyLearningSnapshot(snapshot: any) {
+    if (snapshot?.learningProgress) {
+        genTask.learningProgress = { ...snapshot.learningProgress };
+    }
+    if (Array.isArray(snapshot?.knowledgeUsed)) {
+        for (const item of snapshot.knowledgeUsed) {
+            if (!item?.knowledgeId) continue;
+            const index = genTask.knowledgeUsed.findIndex(existing => existing.knowledgeId === item.knowledgeId);
+            if (index >= 0) genTask.knowledgeUsed[index] = item;
+            else genTask.knowledgeUsed.push(item);
+        }
+    }
+    genTask.learningDeferred = !!snapshot?.learningDeferred;
+}
+
+async function learningPost(url: string, body: any, signal: AbortSignal): Promise<any> {
+    const resp = await fetchWithByokFallback(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+    });
+    if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
+    if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+    if (!resp.ok && resp.status !== 409) throw new Error(await resp.text());
+    return await resp.json();
+}
+
+async function runLearning(
+    stage: "planner" | "fix",
+    chosenPathId?: string,
+    waitMs = stage === "planner" ? 40_000 : 20_000,
+) {
+    const deadline = Date.now() + waitMs;
+    let lastMessage = "";
+    genTask.learningDeferred = false;
+
+    const request = async (url: string, body: any) => {
+        const remaining = Math.max(1, deadline - Date.now());
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), remaining);
+        try {
+            return await learningPost(url, body, ctrl.signal);
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+    const announce = (snapshot: any) => {
+        applyLearningSnapshot(snapshot);
+        const message = snapshot?.learningProgress?.message || "";
+        if (message && message !== lastMessage) {
+            genTask.logs.push(`▸ ${message}`);
+            lastMessage = message;
+        }
+    };
+
+    try {
+        let snapshot = await request("/api/learning/start", {
+            taskId: genTask.taskId,
+            stage,
+            chosenPathId,
+        });
+        announce(snapshot);
+
+        while (snapshot?.learningProgress?.jobId
+            && !LEARNING_TERMINAL.has(snapshot.learningProgress.status)
+            && Date.now() < deadline) {
+            snapshot = await request("/api/learning/step", {
+                taskId: genTask.taskId,
+                jobId: snapshot.learningProgress.jobId,
+                revision: snapshot.learningProgress.revision,
+            });
+            announce(snapshot);
+            if (!LEARNING_TERMINAL.has(snapshot?.learningProgress?.status)) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        }
+
+        if (!LEARNING_TERMINAL.has(genTask.learningProgress.status)) {
+            genTask.learningDeferred = true;
+            genTask.learningProgress.message = "本轮联网查证超过等待上限，已按现有知识继续";
+            genTask.logs.push("! 联网查证超过等待上限，已按现有知识继续");
+        }
+    } catch (error: any) {
+        genTask.learningDeferred = true;
+        const timedOut = error?.name === "AbortError";
+        genTask.learningProgress.message = timedOut
+            ? "本轮联网查证超过等待上限，已按现有知识继续"
+            : "联网查证暂不可用，已按现有知识继续";
+        genTask.logs.push(timedOut
+            ? "! 联网查证超过等待上限，已按现有知识继续"
+            : `! 联网查证未完成，已按现有知识继续: ${error?.message || error}`);
+    }
 }
 
 /** 从流式 JSON 文本中提取 "todos":[...] 数组里已完整闭合的对象 */
@@ -333,7 +495,7 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
 }
 
 /** SSE streaming build fix */
-async function streamBuildFix(taskId: string, mode: "repair" | "inspect" = "repair"): Promise<any> {
+async function streamBuildFix(taskId: string, mode: "diagnose" | "repair" | "inspect" = "repair"): Promise<any> {
     const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -384,10 +546,17 @@ export async function resumeGenerate() {
         return;
     }
 
-    // 准备阶段（澄清/分级/规划，尚无 plan）刷新：交互无法干净续接 → 转为可重试错误态
+    // Planner 学习/规划阶段已有 taskId 和路径选择，可直接沿用服务端状态恢复。
+    if (!genTask.files.length && p === "planning" && genTask.userPrompt) {
+        genTask.logs.push("↻ 页面恢复：继续联网查证与项目规划");
+        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
+        return;
+    }
+
+    // 澄清/分级/确认依赖尚未恢复的交互 Promise，只能转为可重试状态。
     if (!genTask.files.length) {
         genTask.phase = "error";
-        genTask.error = "页面刷新中断了准备阶段，点「重试」用上次需求继续。";
+        genTask.error = "页面刷新中断了需求确认，点「重试」用上次需求继续。";
         return;
     }
 
@@ -450,16 +619,25 @@ export async function resumeGenerate() {
     }
 }
 
-export async function startGenerate(userPrompt: string, coreType: string, version: string) {
-    if (isGeneratingPhase(genTask.phase)) {
+export async function startGenerate(
+    userPrompt: string,
+    coreType: string,
+    version: string,
+    options?: { resumePrepared?: boolean },
+) {
+    const resumePrepared = options?.resumePrepared === true;
+    if (!resumePrepared && isGeneratingPhase(genTask.phase)) {
         throw new Error("当前已有构建任务正在进行");
     }
-    lastGenParams = { userPrompt, coreType, version };
+    let chosenPathId: string | undefined = resumePrepared ? genTask.chosenPathId || undefined : undefined;
 
-    resetGenTask();
-    genTask.userPrompt = userPrompt;
-    genTask.coreType = coreType;
-    genTask.version = version;
+    if (!resumePrepared) {
+        lastGenParams = { userPrompt, coreType, version };
+
+        resetGenTask();
+        genTask.userPrompt = userPrompt;
+        genTask.coreType = coreType;
+        genTask.version = version;
 
     // ── Phase 1: create taskId (no plan yet) ──
     try {
@@ -536,7 +714,6 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
     }
 
     // ── Phase 2.5: 复杂度分级 +（非直接级）实现路径确认门 ──
-    let chosenPathId: string | undefined;
     try {
         let correction: string | undefined;
         while (true) {
@@ -557,6 +734,7 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 continue; // 带修正重新分级
             }
             chosenPathId = choice.pathId;
+            genTask.chosenPathId = choice.pathId || "";
             genTask.grade = null;
             break;
         }
@@ -570,9 +748,20 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
         genTask.grade = null;
         genTask.logs.push("! 分级阶段异常，按原路径继续: " + (e.message || e));
     }
+    }
+
+    // ── Phase 2.8: Planner 前限时查证公开技术缺口 ──
+    setPhase("planning", "正在查证目标版本 API 与依赖...");
+    await runLearning("planner", chosenPathId, 40_000);
 
     // ── Phase 3: planning + generating + build (with replan loop) ──
-    for (let replanAttempt = 0; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
+    const firstPlannerAttempt = resumePrepared && genTask.plannerRequestId
+        ? Math.min(
+            MAX_REPLAN_ATTEMPTS,
+            genTask.plannerReplan ? Math.max(1, genTask.plannerAttempt) : 0,
+        )
+        : 0;
+    for (let replanAttempt = firstPlannerAttempt; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
         try {
             if (replanAttempt > 0) {
                 genTask.logs.push(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
@@ -585,7 +774,26 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 ? "正在根据澄清结果生成项目规划..."
                 : `正在重新规划 (第${replanAttempt}次)...`);
 
-            const planResult = await post("/api/generate/plan", { taskId: genTask.taskId, chosenPathId, skillIds: [...selected] });
+            const plannerReplan = replanAttempt > 0;
+            const reusePendingRequest = genTask.plannerRequestId
+                && genTask.plannerReplan === plannerReplan
+                && genTask.plannerAttempt === replanAttempt;
+            const plannerRequestId = reusePendingRequest
+                ? genTask.plannerRequestId
+                : createPlannerRequestId();
+            genTask.plannerRequestId = plannerRequestId;
+            genTask.plannerReplan = plannerReplan;
+            genTask.plannerAttempt = replanAttempt;
+            // 必须在请求发出前同步落盘；刷新后才能复用同一 replan 意图与幂等 ID。
+            persistGenTaskNow();
+
+            const planResult = await postPlanner({
+                taskId: genTask.taskId,
+                chosenPathId,
+                skillIds: [...selected],
+                replan: plannerReplan,
+                plannerRequestId,
+            });
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;
@@ -598,7 +806,11 @@ export async function startGenerate(userPrompt: string, coreType: string, versio
                 pairPath: f.pairPath,
                 bucket: f.bucket,
             }));
+            genTask.plannerRequestId = "";
+            genTask.plannerReplan = false;
+            genTask.plannerAttempt = 0;
             genTask.logs.push(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
+            persistGenTaskNow();
 
             setPhase("generating");
             // 收集 buckets：每个 file 自带 bucket 索引；按桶号升序并发
@@ -766,6 +978,18 @@ async function buildWithRetry(
             setPhase("fixing", "正在分析编译错误并修复...");
         } else {
             setPhase("fixing", "正在获取最终构建诊断...");
+        }
+
+        if (canRepair) {
+            try {
+                const diagnosis = await streamBuildFix(genTask.taskId, "diagnose");
+                if (Number(diagnosis?.knowledgeNeeds) > 0) {
+                    genTask.logs.push(`▸ 构建诊断包含 ${diagnosis.knowledgeNeeds} 个公开技术缺口，开始限时查证`);
+                    await runLearning("fix", undefined, 20_000);
+                }
+            } catch (error: any) {
+                genTask.logs.push(`! 构建诊断学习准备失败，直接进入修复: ${error?.message || error}`);
+            }
         }
 
         const fixResult = await streamBuildFix(genTask.taskId, canRepair ? "repair" : "inspect");

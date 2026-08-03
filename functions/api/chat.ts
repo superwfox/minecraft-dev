@@ -4,7 +4,7 @@
 
 import { accumulateCost } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
-import { getTask, putTask } from "../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -19,21 +19,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tier = tierFromModel(body.model);
     const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
-    const uid: string | undefined = (context.data as any)?.uid;
+    const uid: string = (context.data as any)?.uid || "";
 
-    // 任务级额度耗尽时直接拒绝
+    // 带 taskId 的调用必须命中当前用户的任务，避免越权读取状态或错误归集费用。
     if (taskId) {
-        const stateRaw = await getTask(context.env, taskId);
-        if (stateRaw) {
-            try {
-                const st = JSON.parse(stateRaw);
-                if (st.quotaExhausted) {
-                    return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
-                        status: 402, headers: { "Content-Type": "application/json" },
-                    });
-                }
-            } catch { /* ignore */ }
-        }
+        const stateRaw = await getOwnedTask(context.env, taskId, uid);
+        if (!stateRaw) return new Response("Task not found", { status: 404 });
+        try {
+            const st = JSON.parse(stateRaw);
+            if (st.quotaExhausted) {
+                return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                    status: 402, headers: { "Content-Type": "application/json" },
+                });
+            }
+        } catch { /* ignore */ }
     }
 
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse 会超 CPU 被硬杀。
@@ -74,19 +73,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!llm.byok && uid && taskId && usage) {
         // 不阻塞响应：waitUntil 后台累积
         context.waitUntil(accumulateCost(context.env, uid, taskId, model, usage).then(async (cost) => {
-            // taskCost 已是成本真源；正常请求不再重复读写整份任务。
-            // 仅额度首次耗尽时回写拦截标记。
-            if (!cost.outOfQuota) return;
-            const raw = await getTask(context.env, taskId);
-            if (!raw) return;
-            try {
-                const st = JSON.parse(raw);
-                st.totalCost = cost.total;
-                st.consumedQuota = cost.consumed;
-                st.quotaExhausted = true;
-                await putTask(context.env, taskId, JSON.stringify(st));
-            } catch { /* ignore */ }
-        }));
+            if (cost.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+        }).catch((error) => console.warn("chat cost accumulation failed", error)));
     }
     return new Response(JSON.stringify({content}), {
         headers: {"Content-Type": "application/json"},

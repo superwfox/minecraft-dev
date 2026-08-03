@@ -30,14 +30,18 @@ const GLM_MODELS: Record<LLMTier, string> = {
 };
 
 export interface LLMProvider {
+    providerId: "deepseek" | "glm";
     url: string;
     apiKey: string;
     byok: boolean;                       // true=用户自带 key，调用方跳过计费
+    learningCacheRead: boolean;
+    canAutoLearn: boolean;
     modelFor(tier: LLMTier): string;
 }
 
 interface Env {
     DEEPSEEK_API_KEY: string;
+    DEEPSEEK_RESPONSES_WEB_SEARCH?: string;
     TASKS: KVNamespace;
 }
 
@@ -59,9 +63,12 @@ export async function resolveLLM(context: { request: Request; env: Env; data: an
                 const tier = await getTier(context.env.TASKS, uid);
                 if (tier !== "none") {
                     return {
+                        providerId: "glm",
                         url: endpoint === "coding" ? GLM_CODING_URL : GLM_URL,
                         apiKey: userKey,
                         byok: true,
+                        learningCacheRead: true,
+                        canAutoLearn: false,
                         modelFor: (t) => GLM_MODELS[t],
                     };
                 }
@@ -70,9 +77,12 @@ export async function resolveLLM(context: { request: Request; env: Env; data: an
     }
 
     return {
+        providerId: "deepseek",
         url: DEEPSEEK_URL,
         apiKey: context.env.DEEPSEEK_API_KEY,
         byok: false,
+        learningCacheRead: true,
+        canAutoLearn: /^(1|true|yes)$/i.test(context.env.DEEPSEEK_RESPONSES_WEB_SEARCH || ""),
         modelFor: (t) => DEEPSEEK_MODELS[t],
     };
 }

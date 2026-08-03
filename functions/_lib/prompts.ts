@@ -257,7 +257,31 @@ export function graderPrompt(
   },
   "level": "直接|简单|中等|复杂",
   "level_reason": "命中的主导维度一句话",
-  "paths": []
+  "paths": [],
+  "knowledgeNeeds": [
+    {
+      "id": "stable-short-id",
+      "kind": "fact",
+      "trigger": "contract_miss|version_gap|dependency_gap|skill_staleness",
+      "specificity": "exact|scoped",
+      "claim": {
+        "subject": "明确的依赖、包名或 API 符号",
+        "question": "目标版本下需要查证的单一技术事实",
+        "answerType": "signature|coordinate|behavior|migration|rule"
+      },
+      "scope": {
+        "coreType": "Paper|Spigot",
+        "mcVersion": "目标 MC 版本",
+        "dependency": "可选：groupId:artifactId 或插件名",
+        "packageName": "可选：公开包名",
+        "symbol": "可选：公开类#方法或配置键"
+      },
+      "risk": "low|medium|high",
+      "sourcePolicy": "api_signature|dependency|behavior|release",
+      "searchQueries": ["带版本与符号的精确查询"],
+      "acceptanceCriteria": ["能直接判断该事实真假的验收条件"]
+    }
+  ]
 }
 
 打分字段含义：
@@ -299,6 +323,15 @@ export function graderPrompt(
 - 涉及外部插件：外部调用画成独立节点并标依赖方向。
 - 必须是合法可渲染的 mermaid flowchart；节点文字用中文并以 A["中文标签"] 形式包裹，避免括号/特殊字符导致语法错误。
 - 不要用 style / classDef 给节点自定义填充色或文字色（深色背景下常不可读）；统一用默认主题配色，强调关键节点请靠形状（菱形判断、子图分组）而非颜色。
+
+【knowledgeNeeds：公开技术知识缺口，最多 3 条】
+- 只提出会影响 Planner 或代码正确性的单一事实；没有明确缺口时必须返回 []。
+- 禁止提出“学习 Paper API”“研究 Minecraft 插件”等泛化主题；必须落到目标版本 + 公开依赖、包名或 API 符号。
+- 用户意图不清属于澄清问题，不属于知识缺口；不要输出 specificity=ambiguous。
+- 普通 Bukkit/Paper 基础结构、Java 语法、以及上文已经明确给出的固定规则不需要联网查证。
+- 每条只问一个可验证问题，searchQueries 必须包含目标版本和核心符号，acceptanceCriteria 必须说明什么证据可直接支持或推翻结论。
+- 不得包含用户源码、用户包名、完整 Prompt、密钥、私有仓库或构建日志；只允许公开可共享的技术主题。
+- MVP 以 fact 为主；不要把实现偏好、代码风格或“最佳实践”包装成事实。
 
 核心类型：${coreType}，MC 版本：${version}${skillContext ?? ""}`,
         user: `用户需求：${userPrompt}${clarifyBlock}${correctionBlock}\n\n请输出分级 JSON。`,
@@ -388,6 +421,8 @@ export function plannerPrompt(
     version: string,
     clarifyRounds?: ClarifyRound[],
     gradeContext?: PlannerGradeContext,
+    apiContractContext?: string,
+    knowledgeContext?: string,
     skillContext?: string,
 ): { system: string; user: string } {
     const clarifyBlock = clarifyRounds?.length
@@ -486,7 +521,7 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 - **数据持久化**：**仅当**需要集中管理「较多结构化数据」（多条记录 / 需增删查的集合）时，才规划独立 ManagerGen 类（管理 File + YamlConfiguration，Main.onDisable 落盘）；**少量数据（单玩家数据 / 几个值）优先用 PDC 或直接 getConfig()/saveConfig()，不要为此引入 ManagerGen 重类**——无谓的重类会抬高复杂度、易生成失败而功能收益极小
 - **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
 - **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
-- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}${skillContext ?? ""}`,
+- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘${gradeBlock}${apiContractContext ? `\n\n${apiContractContext}` : ""}${knowledgeContext ?? ""}${skillContext ?? ""}`,
         user: `${userPrompt}${clarifyBlock}`,
     };
 }
@@ -601,6 +636,7 @@ export function reworkPrompt(
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     generatedSummaries?: FileSummary[],
     apiContractContext?: string,
+    knowledgeContext?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
 
@@ -609,6 +645,7 @@ export function reworkPrompt(
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
 ${apiContractContext ?? ""}
+${knowledgeContext ?? ""}
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
 你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
 禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
@@ -908,15 +945,16 @@ export function dispatchGen(
     slice: BlueprintSlice,
     skillContext?: string,
     apiContractContext?: string,
+    knowledgeContext?: string,
 ): {
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
 } {
     const spec = specializationBlock(file, slice, ctx);
-    const additionalContext = [spec, apiContractContext, skillContext].filter((v): v is string => !!v).join("\n\n");
+    const additionalContext = [spec, apiContractContext, knowledgeContext, skillContext].filter((v): v is string => !!v).join("\n\n");
     // 统一输出规范由 fileGenPrompt 放在最终尾部，确保专项规则与 skill 骨架不能覆盖它。
     const gen = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries, additionalContext);
-    const checkerSpec = [checkerSpecializationBlock(file, slice), apiContractContext]
+    const checkerSpec = [checkerSpecializationBlock(file, slice), apiContractContext, knowledgeContext]
         .filter((v): v is string => !!v)
         .join("\n\n");
     const checker = (path: string, content: string) => {
@@ -969,6 +1007,7 @@ export function buildFixPrompt(
     generatedSummaries?: FileSummary[],
     fileRole?: string,
     apiContractContext?: string,
+    knowledgeContext?: string,
     progressContext?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
@@ -985,6 +1024,7 @@ ${FILEGEN_OUTPUT_STYLE_RULES}`;
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
 ${apiContractContext ?? ""}
+${knowledgeContext ?? ""}
 Maven 编译失败。根据下方的编译错误日志修正文件，使其能通过编译。
 编译器给出的 required/found、候选重载和符号信息是事实，优先级高于模型记忆。
 必须处理列出的每一条诊断；只修改诊断涉及的代码及必要 import，不要顺手改动无关逻辑，也不要臆测第三方 API 在目标版本改变了返回类型。

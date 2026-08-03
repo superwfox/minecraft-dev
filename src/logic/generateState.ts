@@ -11,6 +11,56 @@ export type GradePath = {
 };
 export type GradeInfo = { level: string; paths: GradePath[] };
 
+export type LearningStatus = "idle" | "queued" | "discovering" | "fetching" | "verifying" | "ready" | "deferred" | "needs_review" | "failed" | "cancelled";
+export type LearningProgress = {
+    jobId: string;
+    status: LearningStatus;
+    revision: number;
+    currentNeed?: string;
+    totalNeeds: number;
+    completedNeeds: number;
+    sourceCount: number;
+    message: string;
+};
+export type KnowledgeUsed = {
+    knowledgeId: string;
+    summary: string;
+    confidence: number;
+    status: "active" | "skipped" | "needs_review";
+};
+
+export type PlannerResumeState = {
+    plannerRequestId: string;
+    plannerReplan: boolean;
+    plannerAttempt: number;
+};
+
+export function normalizePlannerResumeState(value: unknown): PlannerResumeState {
+    const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const plannerRequestId = typeof raw.plannerRequestId === "string"
+        && /^plan_[a-z0-9]{16,64}$/i.test(raw.plannerRequestId)
+        ? raw.plannerRequestId
+        : "";
+    const plannerReplan = !!plannerRequestId && raw.plannerReplan === true;
+    const rawAttempt = Number(raw.plannerAttempt);
+    const plannerAttempt = plannerRequestId && plannerReplan && Number.isInteger(rawAttempt)
+        ? Math.max(1, Math.min(10, rawAttempt))
+        : 0;
+    return { plannerRequestId, plannerReplan, plannerAttempt };
+}
+
+function emptyLearningProgress(): LearningProgress {
+    return {
+        jobId: "",
+        status: "idle",
+        revision: 0,
+        totalNeeds: 0,
+        completedNeeds: 0,
+        sourceCount: 0,
+        message: "",
+    };
+}
+
 export type GeneratorType =
     | "CommandGen" | "ListenerGen" | "TaskGen" | "ManagerGen"
     | "ConfigGen" | "ConfigClassGen" | "ModelGen" | "EnumGen"
@@ -66,9 +116,16 @@ export type GenTask = {
     reasoningVisible: boolean;
     moreInputHint: string;
     grade: GradeInfo | null;
+    chosenPathId: string;
+    plannerRequestId: string;
+    plannerReplan: boolean;
+    plannerAttempt: number;
     debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
     buildDiagnostics: any[];
     buildHistory: any[];
+    learningProgress: LearningProgress;
+    knowledgeUsed: KnowledgeUsed[];
+    learningDeferred: boolean;
 };
 
 export const genTask = reactive<GenTask>({
@@ -94,9 +151,16 @@ export const genTask = reactive<GenTask>({
     reasoningVisible: true,
     moreInputHint: "",
     grade: null,
+    chosenPathId: "",
+    plannerRequestId: "",
+    plannerReplan: false,
+    plannerAttempt: 0,
     debugLog: [],
     buildDiagnostics: [],
     buildHistory: [],
+    learningProgress: emptyLearningProgress(),
+    knowledgeUsed: [],
+    learningDeferred: false,
 });
 
 export function resetGenTask() {
@@ -122,9 +186,16 @@ export function resetGenTask() {
     genTask.reasoningVisible = true;
     genTask.moreInputHint = "";
     genTask.grade = null;
+    genTask.chosenPathId = "";
+    genTask.plannerRequestId = "";
+    genTask.plannerReplan = false;
+    genTask.plannerAttempt = 0;
     genTask.debugLog = [];
     genTask.buildDiagnostics = [];
     genTask.buildHistory = [];
+    genTask.learningProgress = emptyLearningProgress();
+    genTask.knowledgeUsed = [];
+    genTask.learningDeferred = false;
     clarifyWaiting.value = false;
     pathGateWaiting.value = false;
     clearPersistedGenTask();
@@ -146,36 +217,52 @@ export function setSuperConcurrency(on: boolean) {
 // 快照存 localStorage（不含文件正文，保持体积小；正文在后端 KV，续跑时按需重取）。
 const GEN_KEY = "tahai-gentask";
 let persistTimer: any = null;
+
+function writeGenTaskSnapshot() {
+    try {
+        if (genTask.phase === "idle" || !genTask.taskId) { localStorage.removeItem(GEN_KEY); return; }
+        const snap = {
+            taskId: genTask.taskId,
+            phase: genTask.phase,
+            userPrompt: genTask.userPrompt,
+            coreType: genTask.coreType,
+            version: genTask.version,
+            projectName: genTask.projectName,
+            packageName: genTask.packageName,
+            javaVersion: genTask.javaVersion,
+            files: genTask.files.map(f => ({
+                path: f.path, role: f.role, status: f.status,
+                generatorType: f.generatorType, tag: f.tag, pairPath: f.pairPath, bucket: f.bucket,
+            })),
+            currentIndex: genTask.currentIndex,
+            logs: genTask.logs.slice(-200),
+            clarifyHistory: genTask.clarifyHistory,
+            grade: genTask.grade,
+            chosenPathId: genTask.chosenPathId,
+            plannerRequestId: genTask.plannerRequestId,
+            plannerReplan: genTask.plannerReplan,
+            plannerAttempt: genTask.plannerAttempt,
+            buildDiagnostics: genTask.buildDiagnostics,
+            buildHistory: genTask.buildHistory.slice(-6),
+            learningProgress: genTask.learningProgress,
+            knowledgeUsed: genTask.knowledgeUsed,
+            learningDeferred: genTask.learningDeferred,
+            error: genTask.error,
+            t: Date.now(),
+        };
+        localStorage.setItem(GEN_KEY, JSON.stringify(snap));
+    } catch { /* ignore（超配额等） */ }
+}
+
 export function persistGenTask() {
     if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-        try {
-            if (genTask.phase === "idle" || !genTask.taskId) { localStorage.removeItem(GEN_KEY); return; }
-            const snap = {
-                taskId: genTask.taskId,
-                phase: genTask.phase,
-                userPrompt: genTask.userPrompt,
-                coreType: genTask.coreType,
-                version: genTask.version,
-                projectName: genTask.projectName,
-                packageName: genTask.packageName,
-                javaVersion: genTask.javaVersion,
-                files: genTask.files.map(f => ({
-                    path: f.path, role: f.role, status: f.status,
-                    generatorType: f.generatorType, tag: f.tag, pairPath: f.pairPath, bucket: f.bucket,
-                })),
-                currentIndex: genTask.currentIndex,
-                logs: genTask.logs.slice(-200),
-                clarifyHistory: genTask.clarifyHistory,
-                grade: genTask.grade,
-                buildDiagnostics: genTask.buildDiagnostics,
-                buildHistory: genTask.buildHistory.slice(-6),
-                error: genTask.error,
-                t: Date.now(),
-            };
-            localStorage.setItem(GEN_KEY, JSON.stringify(snap));
-        } catch { /* ignore（超配额等） */ }
-    }, 400);
+    persistTimer = setTimeout(writeGenTaskSnapshot, 400);
+}
+
+export function persistGenTaskNow() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = null;
+    writeGenTaskSnapshot();
 }
 export function clearPersistedGenTask() {
     try { localStorage.removeItem(GEN_KEY); } catch { /* ignore */ }
@@ -201,8 +288,16 @@ export function restoreGenTask(): boolean {
         genTask.logs = s.logs || [];
         genTask.clarifyHistory = s.clarifyHistory || [];
         genTask.grade = s.grade || null;
+        genTask.chosenPathId = s.chosenPathId || "";
+        const plannerResume = normalizePlannerResumeState(s);
+        genTask.plannerRequestId = plannerResume.plannerRequestId;
+        genTask.plannerReplan = plannerResume.plannerReplan;
+        genTask.plannerAttempt = plannerResume.plannerAttempt;
         genTask.buildDiagnostics = s.buildDiagnostics || [];
         genTask.buildHistory = s.buildHistory || [];
+        genTask.learningProgress = s.learningProgress || emptyLearningProgress();
+        genTask.knowledgeUsed = s.knowledgeUsed || [];
+        genTask.learningDeferred = !!s.learningDeferred;
         genTask.error = s.error || "";
         return true;
     } catch { return false; }
@@ -211,7 +306,9 @@ export function restoreGenTask(): boolean {
 // genTask 关键字段变化 → 防抖落盘
 watch(
     () => [genTask.phase, genTask.files.length, genTask.currentIndex, genTask.logs.length,
-        genTask.files.filter(f => f.status === "done").length],
+        genTask.files.filter(f => f.status === "done").length,
+        genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
+        genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt],
     persistGenTask,
 );
 

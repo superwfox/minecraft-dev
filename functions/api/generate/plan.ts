@@ -3,12 +3,30 @@ import { getSkillBundles } from "../../_lib/skills";
 import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
-import { cleanupExpiredTasks, getTask, putTask } from "../../_lib/taskStore";
+import { buildApiContractContext, partitionKnowledgeNeedsByApiContracts } from "../../_lib/apiContracts";
+import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import type { KnowledgeNeed } from "../../_lib/learning/types";
+import {
+    acquireTaskPlannerLease,
+    cleanupExpiredTasks,
+    getOwnedTask,
+    markTaskQuotaExhausted,
+    putTask,
+    putTaskWithPlannerLease,
+    releaseTaskPlannerLease,
+    renewTaskPlannerLease,
+} from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const PLANNER_MODEL = "deepseek-v4-pro";
+const PLANNER_PREPARATION_TIMEOUT_MS = 30_000;
+const PLANNER_UPSTREAM_TIMEOUT_MS = 300_000;
+// 整段 deadline 必须短于租约，避免旧请求过期后仍继续付费或提交。
+const PLANNER_OPERATION_TIMEOUT_MS = 350_000;
+const PLANNER_LEASE_MS = 360_000;
 
 interface Env {
+    DB?: D1Database;
     DEEPSEEK_API_KEY: string;
     TASKS: KVNamespace;
     GITHUB_TOKEN?: string;
@@ -126,10 +144,134 @@ function isValidBlueprint(bp: any): bp is MainBlueprint {
     return true;
 }
 
+export function shouldReusePersistedPlannerResult(
+    state: any,
+    replan: unknown,
+    plannerRequestId = "",
+): boolean {
+    const sameExplicitReplan = replan === true
+        && !!plannerRequestId
+        && state?.plannerRequestId === plannerRequestId;
+    return (replan !== true || sameExplicitReplan)
+        && state?.status === "planning"
+        && isValidBlueprint(state.mainBlueprint)
+        && Array.isArray(state.plan)
+        && state.plan.length > 0
+        && Array.isArray(state.buckets)
+        && state.buckets.length > 0;
+}
+
+function plannerResultResponse(taskId: string, state: any): Response {
+    return new Response(JSON.stringify({
+        taskId,
+        plan: state.plan,
+        projectName: state.projectName,
+        packageName: state.packageName,
+        javaVersion: state.javaVersion,
+        mainBlueprint: state.mainBlueprint,
+        buckets: state.buckets,
+    }), {
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
+function parsePlannerRequestId(value: unknown): string {
+    return typeof value === "string" && /^plan_[a-z0-9]{16,64}$/i.test(value)
+        ? value
+        : "";
+}
+
+function plannerBusyResponse(): Response {
+    return new Response(JSON.stringify({
+        error: "Planner 正在执行，请等待现有结果",
+        code: "PLANNER_IN_PROGRESS",
+    }), {
+        status: 409,
+        headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "2",
+        },
+    });
+}
+
+class PlannerTimeoutError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "PlannerTimeoutError";
+    }
+}
+
+function plannerTimeoutResponse(): Response {
+    return new Response(JSON.stringify({
+        error: "Planner 处理超时，请重试",
+        code: "PLANNER_TIMEOUT",
+    }), {
+        status: 504,
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
+function createPlannerDeadline(timeoutMs: number, message: string, parent?: AbortSignal) {
+    const controller = new AbortController();
+    const abortFromParent = () => {
+        if (!controller.signal.aborted) {
+            controller.abort(parent?.reason instanceof Error ? parent.reason : new PlannerTimeoutError(message));
+        }
+    };
+    if (parent?.aborted) abortFromParent();
+    else parent?.addEventListener("abort", abortFromParent, { once: true });
+    const timer = setTimeout(() => {
+        if (!controller.signal.aborted) controller.abort(new PlannerTimeoutError(message));
+    }, timeoutMs);
+    return {
+        signal: controller.signal,
+        dispose() {
+            clearTimeout(timer);
+            parent?.removeEventListener("abort", abortFromParent);
+        },
+    };
+}
+
+function plannerAbortReason(signal: AbortSignal, message: string): Error {
+    return signal.reason instanceof Error ? signal.reason : new PlannerTimeoutError(message);
+}
+
+function withPlannerDeadline<T>(operation: () => Promise<T>, signal: AbortSignal, message: string): Promise<T> {
+    if (signal.aborted) return Promise.reject(plannerAbortReason(signal, message));
+    return new Promise<T>((resolve, reject) => {
+        const abort = () => reject(plannerAbortReason(signal, message));
+        signal.addEventListener("abort", abort, { once: true });
+        let promise: Promise<T>;
+        try {
+            promise = operation();
+        } catch (error) {
+            signal.removeEventListener("abort", abort);
+            reject(error);
+            return;
+        }
+        promise.then(
+            (value) => {
+                signal.removeEventListener("abort", abort);
+                resolve(value);
+            },
+            (error) => {
+                signal.removeEventListener("abort", abort);
+                reject(error);
+            },
+        );
+    });
+}
+
+function isPlannerTimeout(error: unknown): boolean {
+    return error instanceof PlannerTimeoutError
+        || !!error && typeof error === "object" && "name" in error && error.name === "AbortError";
+}
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
     const key = context.env.DEEPSEEK_API_KEY;
     if (!key) return new Response("API key not configured", { status: 500 });
+    const uid: string = (context.data as any)?.uid || "";
 
     // ─── Mode 1: initialize task, no plan yet ───
     if (!body.taskId) {
@@ -140,6 +282,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const state = {
             taskId,
+            uid,
             status: "clarifying",
             userPrompt,
             coreType,
@@ -159,7 +302,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             skills,
             logs: ["任务已创建，进入澄清阶段"],
         };
-        const uid: string = (context.data as any)?.uid || "";
         await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
         context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
         return new Response(JSON.stringify({ taskId }), {
@@ -169,170 +311,334 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // ─── Mode 2: finalize plan using reasoner + clarify answers ───
     const taskId = body.taskId as string;
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
-    const state = JSON.parse(raw);
-
-    if (state.quotaExhausted) {
-        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
-            status: 402, headers: { "Content-Type": "application/json" },
+    const suppliedPlannerRequestId = parsePlannerRequestId(body.plannerRequestId);
+    if (body.replan === true && !suppliedPlannerRequestId) {
+        return new Response(JSON.stringify({ error: "重新规划请求缺少有效 plannerRequestId" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
         });
     }
-
-    if (!state.clarifyDone) {
-        return new Response(JSON.stringify({ error: "澄清阶段尚未完成" }), {
-            status: 400, headers: { "Content-Type": "application/json" },
+    const plannerRequestId = suppliedPlannerRequestId
+        || `plan_${crypto.randomUUID().replace(/-/g, "")}`;
+    const leaseToken = `planner_${crypto.randomUUID().replace(/-/g, "")}`;
+    let leaseMode;
+    try {
+        leaseMode = await acquireTaskPlannerLease(
+            context.env,
+            taskId,
+            uid,
+            leaseToken,
+            PLANNER_LEASE_MS,
+        );
+    } catch (error) {
+        console.warn("planner lease acquisition failed", error);
+        return new Response(JSON.stringify({
+            error: "Planner 状态存储暂不可用，请稍后重试",
+            code: "PLANNER_STORE_UNAVAILABLE",
+        }), {
+            status: 503,
+            headers: { "Content-Type": "application/json", "Retry-After": "2" },
         });
     }
+    if (!leaseMode) return plannerBusyResponse();
 
-    // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
-    const chosenPathId = body.chosenPathId as string | undefined;
-    if (state.grade?.gateRequired) {
-        if (chosenPathId) state.grade.chosenPathId = chosenPathId;
-        if (!state.grade.chosenPathId) {
-            return new Response(JSON.stringify({ error: "请先在确认门选择实现路径", code: "PATH_NOT_CONFIRMED" }), {
+    const operationDeadline = createPlannerDeadline(
+        PLANNER_OPERATION_TIMEOUT_MS,
+        "Planner 整体处理超时",
+    );
+    const preparationDeadline = createPlannerDeadline(
+        PLANNER_PREPARATION_TIMEOUT_MS,
+        "Planner 上下文准备超时",
+        operationDeadline.signal,
+    );
+
+    try {
+        const latestAfterLeaseRaw = await withPlannerDeadline(
+            () => getOwnedTask(context.env, taskId, uid),
+            preparationDeadline.signal,
+            "读取 Planner 状态超时",
+        );
+        if (!latestAfterLeaseRaw) {
+            return new Response("Task state unavailable", { status: 503 });
+        }
+        const state = JSON.parse(latestAfterLeaseRaw);
+
+        // 所有结果复用都在租约内读取最新状态，避免正在 replan 时返回旧计划。
+        if (shouldReusePersistedPlannerResult(state, body.replan, plannerRequestId)) {
+            return plannerResultResponse(taskId, state);
+        }
+
+        if (state.quotaExhausted) {
+            return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                status: 402, headers: { "Content-Type": "application/json" },
+            });
+        }
+
+        if (!state.clarifyDone) {
+            return new Response(JSON.stringify({ error: "澄清阶段尚未完成" }), {
                 status: 400, headers: { "Content-Type": "application/json" },
             });
         }
-    }
 
-    // 据分级结果构建 plannerPrompt 的 gradeContext（点亮轴 + 所选路径）
-    let gradeContext: PlannerGradeContext | undefined;
-    if (state.grade?.vector) {
-        const axes = litAxes(state.grade.vector);
-        let chosenPath: PlannerGradeContext["chosenPath"];
-        const pid = state.grade.chosenPathId;
-        if (pid && Array.isArray(state.grade.paths)) {
-            const p = state.grade.paths.find((x: any) => x.id === pid);
-            if (p) chosenPath = { title: p.title, summary: p.summary, mermaid: p.mermaid };
+        // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
+        const chosenPathId = body.chosenPathId as string | undefined;
+        if (state.grade?.gateRequired) {
+            if (chosenPathId) state.grade.chosenPathId = chosenPathId;
+            if (!state.grade.chosenPathId) {
+                return new Response(JSON.stringify({ error: "请先在确认门选择实现路径", code: "PATH_NOT_CONFIRMED" }), {
+                    status: 400, headers: { "Content-Type": "application/json" },
+                });
+            }
         }
-        if (axes.length || chosenPath) gradeContext = { axes, chosenPath };
-    }
 
-    // 据 body.skillIds 拉取用户挂载的 skill（KV 缓存 30min），存入 state 供逐文件生成复用
-    const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
-    const loadedSkillIds = Array.isArray(state.skills) ? state.skills.map((s: any) => s.id) : [];
-    const sameSkills = skillIds.length === loadedSkillIds.length
-        && skillIds.every((id, i) => id === loadedSkillIds[i]);
-    if (!sameSkills) {
-        state.skills = skillIds.length ? await getSkillBundles(context.env, skillIds) : [];
-    }
-    const skillCtx = state.skills?.length ? skillPlannerContext(state.skills) : "";
+        // 据分级结果构建 plannerPrompt 的 gradeContext（点亮轴 + 所选路径）
+        let gradeContext: PlannerGradeContext | undefined;
+        if (state.grade?.vector) {
+            const axes = litAxes(state.grade.vector);
+            let chosenPath: PlannerGradeContext["chosenPath"];
+            const pid = state.grade.chosenPathId;
+            if (pid && Array.isArray(state.grade.paths)) {
+                const p = state.grade.paths.find((x: any) => x.id === pid);
+                if (p) chosenPath = { title: p.title, summary: p.summary, mermaid: p.mermaid };
+            }
+            if (axes.length || chosenPath) gradeContext = { axes, chosenPath };
+        }
 
-    const { system, user } = plannerPrompt(state.userPrompt, state.coreType, state.version, state.clarifyRounds, gradeContext, skillCtx);
+        // 据 body.skillIds 拉取用户挂载的 skill（KV 缓存 30min），存入 state 供逐文件生成复用
+        const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
+        const loadedSkillIds = Array.isArray(state.skills) ? state.skills.map((s: any) => s.id) : [];
+        const sameSkills = skillIds.length === loadedSkillIds.length
+            && skillIds.every((id, i) => id === loadedSkillIds[i]);
+        if (!sameSkills) {
+            state.skills = skillIds.length
+                ? await withPlannerDeadline(
+                    () => getSkillBundles(context.env, skillIds, { signal: preparationDeadline.signal }),
+                    preparationDeadline.signal,
+                    "加载 Planner Skill 超时",
+                )
+                : [];
+        }
+        const skillCtx = state.skills?.length ? skillPlannerContext(state.skills) : "";
+        const apiContractInput = {
+            coreType: state.coreType,
+            version: state.version,
+            externalDeps: state.grade?.vector?.external_deps ?? [],
+            generatedFiles: state.generatedFiles ?? [],
+        };
+        const apiContractCtx = buildApiContractContext(apiContractInput);
+        const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
+            ? state.grade.knowledgeNeeds
+            : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
+        const needs = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawNeeds).uncovered;
+        const knowledge = await withPlannerDeadline(() => loadKnowledgeContext({
+            env: context.env,
+            needs,
+            maxCharacters: 4_800,
+            title: "Planner 已验证公共技术知识",
+        }), preparationDeadline.signal, "加载 Planner 知识超时");
+        state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
 
-    const llm = await resolveLLM(context);
-    const resp = await fetch(llm.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify({
-            model: llm.modelFor("pro"),
-            reasoning_effort: "high",
-            thinking: { type: "enabled" },
-            messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        }),
-    });
-    if (!resp.ok) return new Response(await resp.text(), { status: resp.status });
+        const { system, user } = plannerPrompt(
+            state.userPrompt,
+            state.coreType,
+            state.version,
+            state.clarifyRounds,
+            gradeContext,
+            apiContractCtx,
+            knowledge.context,
+            skillCtx,
+        );
 
-    const data = await resp.json() as any;
-    const content = stripFences(data.choices?.[0]?.message?.content ?? "");
+        const llm = await withPlannerDeadline(
+            () => resolveLLM(context),
+            preparationDeadline.signal,
+            "解析 Planner 模型配置超时",
+        );
+        const renewed = await withPlannerDeadline(
+            () => renewTaskPlannerLease(context.env, taskId, uid, leaseToken, PLANNER_LEASE_MS),
+            preparationDeadline.signal,
+            "续订 Planner 租约超时",
+        );
+        if (!renewed) return plannerBusyResponse();
+        preparationDeadline.dispose();
 
-    // 计费：累积 Planner 调用成本到 D1 任务记录（BYOK 自带 key 时跳过）
-    const uid: string | undefined = (context.data as any)?.uid;
-    if (!llm.byok && uid && data.usage) {
-        const cost = await accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), data.usage);
-        state.totalCost = cost.total;
-        state.consumedQuota = cost.consumed;
-        if (cost.outOfQuota) state.quotaExhausted = true;
-    }
+        const upstreamDeadline = createPlannerDeadline(
+            PLANNER_UPSTREAM_TIMEOUT_MS,
+            "Planner 模型调用超时",
+            operationDeadline.signal,
+        );
+        let resp: Response;
+        let responseText: string;
+        try {
+            resp = await withPlannerDeadline(() => fetch(llm.url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+                body: JSON.stringify({
+                    model: llm.modelFor("pro"),
+                    reasoning_effort: "high",
+                    thinking: { type: "enabled" },
+                    messages: [{ role: "system", content: system }, { role: "user", content: user }],
+                }),
+                signal: upstreamDeadline.signal,
+            }), upstreamDeadline.signal, "Planner 模型调用超时");
+            responseText = await withPlannerDeadline(
+                () => resp.text(),
+                upstreamDeadline.signal,
+                "读取 Planner 模型响应超时",
+            );
+        } finally {
+            upstreamDeadline.dispose();
+        }
+        if (!resp.ok) return new Response(responseText, { status: resp.status });
+        context.waitUntil(recordKnowledgeContextUsage({
+            env: context.env,
+            items: knowledge.used,
+            generationTaskId: taskId,
+            stage: "planner",
+        }));
 
-    let plan: any;
-    try {
-        plan = JSON.parse(content);
-    } catch {
-        return new Response(JSON.stringify({ error: "Planner 返回非 JSON", raw: content }), { status: 422 });
-    }
+        const data = JSON.parse(responseText) as any;
+        const content = stripFences(data.choices?.[0]?.message?.content ?? "");
 
-    // —— 蓝图校验 ——
-    if (!isValidBlueprint(plan.mainBlueprint)) {
-        return new Response(JSON.stringify({
-            error: "Planner 缺少有效的 mainBlueprint",
-            raw: plan,
-        }), { status: 422 });
-    }
-    const blueprint = plan.mainBlueprint as MainBlueprint;
+        // 计费：累积 Planner 调用成本到 D1 任务记录（BYOK 自带 key 时跳过）
+        if (!llm.byok && uid && data.usage) {
+            const cost = await withPlannerDeadline(
+                () => accumulateCost(context.env, uid, taskId, llm.modelFor("pro"), data.usage),
+                operationDeadline.signal,
+                "结算 Planner 用量超时",
+            );
+            state.totalCost = cost.total;
+            state.consumedQuota = cost.consumed;
+            if (cost.outOfQuota) {
+                state.quotaExhausted = true;
+                await withPlannerDeadline(
+                    () => markTaskQuotaExhausted(context.env, taskId, uid),
+                    operationDeadline.signal,
+                    "持久化 Planner 配额状态超时",
+                );
+            }
+        }
 
-    // —— 文件项校验：每个文件必须带合法的 generatorType ——
-    if (!Array.isArray(plan.files) || plan.files.length === 0) {
-        return new Response(JSON.stringify({ error: "Planner 未返回 files 数组" }), { status: 422 });
-    }
-    const validTypes = new Set<string>(GENERATOR_TYPES);
-    for (const f of plan.files) {
-        if (!f.path || !f.role || typeof f.order !== "number") {
+        let plan: any;
+        try {
+            plan = JSON.parse(content);
+        } catch {
+            return new Response(JSON.stringify({ error: "Planner 返回非 JSON", raw: content }), { status: 422 });
+        }
+
+        // —— 蓝图校验 ——
+        if (!isValidBlueprint(plan.mainBlueprint)) {
             return new Response(JSON.stringify({
-                error: "文件项缺少 path/role/order", file: f,
+                error: "Planner 缺少有效的 mainBlueprint",
+                raw: plan,
             }), { status: 422 });
         }
-        if (!f.generatorType || !validTypes.has(f.generatorType)) {
-            return new Response(JSON.stringify({
-                error: `非法 generatorType: ${f.generatorType}`, file: f,
-            }), { status: 422 });
+        const blueprint = plan.mainBlueprint as MainBlueprint;
+
+        // —— 文件项校验：每个文件必须带合法的 generatorType ——
+        if (!Array.isArray(plan.files) || plan.files.length === 0) {
+            return new Response(JSON.stringify({ error: "Planner 未返回 files 数组" }), { status: 422 });
         }
-    }
-
-    const files = plan.files as PlanFileItem[];
-
-    // —— 拓扑排序（保证 order 单调，依赖在前） ——
-    const sortedFiles = topoSort(files);
-
-    // —— 计算深度桶 ——
-    const depthMap = computeDepths(sortedFiles);
-    let maxDepth = 0;
-    for (const d of depthMap.values()) if (d > maxDepth) maxDepth = d;
-
-    // MainGen 强制放到最后一桶 (maxDepth + 1)
-    const mainGenBucket = maxDepth + 1;
-    for (const f of sortedFiles) {
-        if (f.generatorType === "MainGen") {
-            f.bucket = mainGenBucket;
-        } else {
-            f.bucket = depthMap.get(f.path) ?? 0;
+        const validTypes = new Set<string>(GENERATOR_TYPES);
+        for (const f of plan.files) {
+            if (!f.path || !f.role || typeof f.order !== "number") {
+                return new Response(JSON.stringify({
+                    error: "文件项缺少 path/role/order", file: f,
+                }), { status: 422 });
+            }
+            if (!f.generatorType || !validTypes.has(f.generatorType)) {
+                return new Response(JSON.stringify({
+                    error: `非法 generatorType: ${f.generatorType}`, file: f,
+                }), { status: 422 });
+            }
         }
+
+        const files = plan.files as PlanFileItem[];
+
+        // —— 拓扑排序（保证 order 单调，依赖在前） ——
+        const sortedFiles = topoSort(files);
+
+        // —— 计算深度桶 ——
+        const depthMap = computeDepths(sortedFiles);
+        let maxDepth = 0;
+        for (const d of depthMap.values()) if (d > maxDepth) maxDepth = d;
+
+        // MainGen 强制放到最后一桶 (maxDepth + 1)
+        const mainGenBucket = maxDepth + 1;
+        for (const f of sortedFiles) {
+            if (f.generatorType === "MainGen") {
+                f.bucket = mainGenBucket;
+            } else {
+                f.bucket = depthMap.get(f.path) ?? 0;
+            }
+        }
+
+        // 构建桶数组：buckets[d] = 该深度的所有文件
+        const totalBuckets = mainGenBucket + 1;
+        const buckets: PlanFileItem[][] = Array.from({ length: totalBuckets }, () => []);
+        for (const f of sortedFiles) {
+            buckets[f.bucket!].push(f);
+        }
+
+        // 初始化每文件状态
+        const fileStatuses: Record<string, "pending" | "generating" | "done" | "error" | "rework"> = {};
+        for (const f of sortedFiles) fileStatuses[f.path] = "pending";
+
+        state.status = "planning";
+        state.projectName = plan.projectName;
+        state.javaVersion = plan.javaVersion;
+        state.packageName = plan.packageName;
+        state.mainBlueprint = blueprint;
+        state.plan = sortedFiles;
+        state.buckets = buckets;
+        state.fileStatuses = fileStatuses;
+        state.currentBucket = 0;
+        state.plannerRequestId = plannerRequestId;
+        state.logs.push(`Planner 完成，${sortedFiles.length} 个文件分布在 ${totalBuckets} 个深度桶`);
+
+        const committed = await withPlannerDeadline(() => putTaskWithPlannerLease(
+            context.env,
+            taskId,
+            JSON.stringify(state),
+            leaseToken,
+            leaseMode,
+            3600,
+            uid,
+        ), operationDeadline.signal, "提交 Planner 结果超时");
+        if (!committed) {
+            const latestRaw = await withPlannerDeadline(
+                () => getOwnedTask(context.env, taskId, uid),
+                operationDeadline.signal,
+                "读取并发 Planner 结果超时",
+            );
+            if (latestRaw) {
+                try {
+                    const latest = JSON.parse(latestRaw);
+                    if (shouldReusePersistedPlannerResult(latest, body.replan, plannerRequestId)) {
+                        return plannerResultResponse(taskId, latest);
+                    }
+                } catch { /* wait for the current lease holder */ }
+            }
+            return plannerBusyResponse();
+        }
+
+        return plannerResultResponse(taskId, state);
+    } catch (error) {
+        if (isPlannerTimeout(error) || operationDeadline.signal.aborted || preparationDeadline.signal.aborted) {
+            return plannerTimeoutResponse();
+        }
+        throw error;
+    } finally {
+        preparationDeadline.dispose();
+        operationDeadline.dispose();
+        await releaseTaskPlannerLease(
+            context.env,
+            taskId,
+            uid,
+            leaseToken,
+            leaseMode,
+        ).catch((error) => console.warn("planner lease release failed", error));
     }
-
-    // 构建桶数组：buckets[d] = 该深度的所有文件
-    const totalBuckets = mainGenBucket + 1;
-    const buckets: PlanFileItem[][] = Array.from({ length: totalBuckets }, () => []);
-    for (const f of sortedFiles) {
-        buckets[f.bucket!].push(f);
-    }
-
-    // 初始化每文件状态
-    const fileStatuses: Record<string, "pending" | "generating" | "done" | "error" | "rework"> = {};
-    for (const f of sortedFiles) fileStatuses[f.path] = "pending";
-
-    state.status = "planning";
-    state.projectName = plan.projectName;
-    state.javaVersion = plan.javaVersion;
-    state.packageName = plan.packageName;
-    state.mainBlueprint = blueprint;
-    state.plan = sortedFiles;
-    state.buckets = buckets;
-    state.fileStatuses = fileStatuses;
-    state.currentBucket = 0;
-    state.logs.push(`Planner 完成，${sortedFiles.length} 个文件分布在 ${totalBuckets} 个深度桶`);
-
-    await putTask(context.env, taskId, JSON.stringify(state));
-
-    return new Response(JSON.stringify({
-        taskId,
-        plan: state.plan,
-        projectName: plan.projectName,
-        packageName: plan.packageName,
-        javaVersion: plan.javaVersion,
-        mainBlueprint: blueprint,
-        buckets,
-    }), {
-        headers: { "Content-Type": "application/json" },
-    });
 };

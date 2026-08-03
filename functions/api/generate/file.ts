@@ -2,8 +2,14 @@ import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGen
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
-import { getTask, putTask } from "../../_lib/taskStore";
-import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import type { KnowledgeNeed } from "../../_lib/learning/types";
+import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import {
+    buildApiContractContext,
+    findKnownApiIssues,
+    partitionKnowledgeNeedsByApiContracts,
+} from "../../_lib/apiContracts";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
@@ -11,6 +17,7 @@ const LLM_TIMEOUT_MS = 300000; // 非流式单次调用上限（无中间块，�
 const LLM_IDLE_MS = 120000;    // 流式调用的空闲超时：连续这么久没字节才 abort，长思考只要在流就不误杀
 
 interface Env {
+    DB?: D1Database;
     DEEPSEEK_API_KEY: string;
     TASKS: KVNamespace;
 }
@@ -143,6 +150,8 @@ async function generateSingleFile(
     blueprint: MainBlueprint | null,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
+    knowledgeContext: string,
+    onKnowledgeApplied: () => void,
     maxRework: number,
     charge: ChargeFn,
 ): Promise<{ content: string; apiSummary: any; reworkCount: number; failed: boolean }> {
@@ -171,10 +180,11 @@ async function generateSingleFile(
         ],
     };
     const apiContractCtx = buildApiContractContext(apiContractInput);
-    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx);
+    const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx, knowledgeContext);
 
     const gen = dispatched.gen;
     const initialGen = await callAIStream(llm, gen.system, gen.user, writer, encoder);
+    onKnowledgeApplied();
     await charge(initialGen);
     let content = stripFences(initialGen.content);
     let reworkCount = 0;
@@ -209,7 +219,7 @@ async function generateSingleFile(
         state.logs.push(msg);
 
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
-        const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries, apiContractCtx);
+        const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries, apiContractCtx, knowledgeContext);
         const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
         await charge(rwRes);
         content = stripFences(rwRes.content);
@@ -234,9 +244,10 @@ async function generateSingleFile(
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId } = await context.request.json() as any;
+    const uid: string = (context.data as any)?.uid || "";
     const llm = await resolveLLM(context);
 
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -252,7 +263,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const uid: string | undefined = (context.data as any)?.uid;
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -265,7 +275,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
-        if (cost.outOfQuota) state.quotaExhausted = true;
+        if (cost.outOfQuota) {
+            state.quotaExhausted = true;
+            await markTaskQuotaExhausted(context.env, taskId, uid);
+        }
     };
 
     const target = state.plan[state.currentFileIndex] as PlanFileItem;
@@ -291,8 +304,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 .map((summary) => ({ path: summary.path, apiSummary: summary })),
         ],
     };
+    const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
+        ? state.grade.knowledgeNeeds
+        : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
+    const needs = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawNeeds).uncovered;
+    const knowledge = await loadKnowledgeContext({
+        env: context.env,
+        needs,
+        maxCharacters: 3_200,
+        title: "代码生成已验证公共技术知识",
+    });
+    state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+    const markKnowledgeApplied = (filePath: string) => {
+        context.waitUntil(recordKnowledgeContextUsage({
+            env: context.env,
+            items: knowledge.used,
+            generationTaskId: taskId,
+            stage: `file:${filePath}`,
+        }));
+    };
     const apiContractCtx = buildApiContractContext(apiContractInput);
-    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx);
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx, knowledge.context);
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -311,6 +343,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             const gen = dispatched.gen;
             const initialRes = await callAIStream(llm, gen.system, gen.user, writer, encoder);
+            markKnowledgeApplied(target.path);
             await charge(initialRes);
             let content = stripFences(initialRes.content);
             let reworkCount = 0;
@@ -360,7 +393,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
                             const result = await generateSingleFile(
                                 llm, newPath, newRole, ctx, summaries, blueprint,
-                                writer, encoder, state, 1, charge,
+                                writer, encoder, state, knowledge.context,
+                                () => markKnowledgeApplied(newPath), 1, charge,
                             );
 
                             state.generatedFiles.push({ path: newPath, content: result.content, apiSummary: result.apiSummary });
@@ -386,7 +420,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(reworkMsg);
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
-                const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries, apiContractCtx);
+                const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries, apiContractCtx, knowledge.context);
                 const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
                 await charge(rwRes);
                 content = stripFences(rwRes.content);
@@ -422,7 +456,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: doneMsg }));
 
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state));
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
             await writer.write(sseEvent(encoder, {
                 type: "result", done: false,

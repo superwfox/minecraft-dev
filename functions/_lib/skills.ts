@@ -13,6 +13,22 @@ export interface SkillEnv {
     GITHUB_PAT?: string;
 }
 
+export interface SkillLoadOptions {
+    signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+}
+
+function rethrowAbort(error: unknown, signal?: AbortSignal): void {
+    if (signal?.aborted) throwIfAborted(signal);
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+        throw error;
+    }
+}
+
 export function ghHeaders(env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string }): Record<string, string> {
     const h: Record<string, string> = {
         "User-Agent": "tahai-skills",       // api.github.com 要求 UA，否则 403
@@ -24,24 +40,37 @@ export function ghHeaders(env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string }): 
 }
 
 /** 取首个可用分支的顶层目录列表 */
-export async function listRoot(env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string }): Promise<{ branch: string; entries: any[] } | null> {
+export async function listRoot(
+    env: { GITHUB_TOKEN?: string; GITHUB_PAT?: string },
+    options: SkillLoadOptions = {},
+): Promise<{ branch: string; entries: any[] } | null> {
     for (const branch of BRANCHES) {
+        throwIfAborted(options.signal);
         try {
-            const r = await fetch(`https://api.github.com/repos/${REPO}/contents?ref=${branch}`, { headers: ghHeaders(env) });
+            const r = await fetch(`https://api.github.com/repos/${REPO}/contents?ref=${branch}`, {
+                headers: ghHeaders(env),
+                signal: options.signal,
+            });
             if (r.ok) {
                 const entries = await r.json();
                 if (Array.isArray(entries)) return { branch, entries };
             }
-        } catch { /* 试下一个分支 */ }
+        } catch (error) {
+            rethrowAbort(error, options.signal);
+        }
     }
     return null;
 }
 
-export async function rawText(branch: string, path: string): Promise<string | null> {
+export async function rawText(branch: string, path: string, signal?: AbortSignal): Promise<string | null> {
+    throwIfAborted(signal);
     try {
-        const r = await fetch(`https://raw.githubusercontent.com/${REPO}/${branch}/${path}`);
+        const r = await fetch(`https://raw.githubusercontent.com/${REPO}/${branch}/${path}`, { signal });
         return r.ok ? await r.text() : null;
-    } catch { return null; }
+    } catch (error) {
+        rethrowAbort(error, signal);
+        return null;
+    }
 }
 
 // ─── skill bundle（注入用：每个 skill 的 brief 摘要 + 所有 md 正文）───
@@ -67,12 +96,12 @@ export interface SkillBundle {
 
 const BUNDLE_TTL = 1800;     // 30 分钟
 
-async function fetchOneBundle(id: string): Promise<SkillBundle | null> {
+async function fetchOneBundle(id: string, signal?: AbortSignal): Promise<SkillBundle | null> {
     // 先确定哪个分支有该 skill 的 brief.json
     let briefTxt: string | null = null;
     let branch = "";
     for (const b of BRANCHES) {
-        const t = await rawText(b, `${id}/brief.json`);
+        const t = await rawText(b, `${id}/brief.json`, signal);
         if (t) { briefTxt = t; branch = b; break; }
     }
     if (!briefTxt) return null;
@@ -83,7 +112,7 @@ async function fetchOneBundle(id: string): Promise<SkillBundle | null> {
     const structure: any[] = Array.isArray(brief.structure) ? brief.structure : [];
     const files = (await Promise.all(structure.map(async (s) => {
         if (!s?.file) return null;
-        const body = await rawText(branch, `${id}/${s.file}`);
+        const body = await rawText(branch, `${id}/${s.file}`, signal);
         if (body == null) return null;
         const f: SkillBundleFile = { file: s.file, kind: s.kind === "gen" ? "gen" : "ref", body };
         if (s.fileGen) f.fileGen = s.fileGen;
@@ -94,8 +123,8 @@ async function fetchOneBundle(id: string): Promise<SkillBundle | null> {
 
     // 根目录可选的教学 / 禁忌文件（不在 structure 里，单独拉）
     const [usage, deny] = await Promise.all([
-        rawText(branch, `${id}/usage.md`),
-        rawText(branch, `${id}/deny.md`),
+        rawText(branch, `${id}/usage.md`, signal),
+        rawText(branch, `${id}/deny.md`, signal),
     ]);
 
     return {
@@ -112,23 +141,31 @@ async function fetchOneBundle(id: string): Promise<SkillBundle | null> {
 /**
  * 按 id 拉取 skill bundle（含各 md 正文），用于注入生成上下文。
  * 每个 id 先查 KV `skillbundle:<id>`，miss 才拉 GitHub 并回写缓存。
- * 找不到 / 拉取失败的 id 跳过（不抛错）。
+ * 找不到 / 普通拉取失败的 id 跳过；调用方中止时传播 AbortSignal。
  */
-export async function getSkillBundles(env: SkillEnv, ids: string[]): Promise<SkillBundle[]> {
+export async function getSkillBundles(
+    env: SkillEnv,
+    ids: string[],
+    options: SkillLoadOptions = {},
+): Promise<SkillBundle[]> {
     const out: SkillBundle[] = [];
     const seen = new Set<string>();
     for (const id of ids) {
+        throwIfAborted(options.signal);
         if (!id || typeof id !== "string" || seen.has(id)) continue;
         seen.add(id);
 
         let bundle: SkillBundle | null = null;
         try {
             const cached = await env.TASKS.get(`skillbundle:${id}`);
+            throwIfAborted(options.signal);
             if (cached) bundle = JSON.parse(cached);
-        } catch { /* ignore */ }
+        } catch (error) {
+            rethrowAbort(error, options.signal);
+        }
 
         if (!bundle) {
-            bundle = await fetchOneBundle(id);
+            bundle = await fetchOneBundle(id, options.signal);
             if (bundle) {
                 try { await env.TASKS.put(`skillbundle:${id}`, JSON.stringify(bundle), { expirationTtl: BUNDLE_TTL }); } catch { /* ignore */ }
             }

@@ -1,0 +1,13 @@
+{
+  "type": "response.failed",
+  "response": {
+    "id": "resp_failed_fixture",
+    "status": "failed",
+    "model": "deepseek-v4-flash",
+    "output": [],
+    "error": {
+      "code": "web_search_failed",
+      "message": "fixture failure"
+    }
+  }
+}

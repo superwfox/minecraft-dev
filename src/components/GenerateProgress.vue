@@ -34,6 +34,19 @@
         <span class="tag">Java {{ genTask.javaVersion }}</span>
         <span class="tag">{{ genTask.packageName }}</span>
       </div>
+      <div v-if="genTask.learningProgress.status !== 'idle'" class="learning-progress"
+           :class="{ deferred: genTask.learningDeferred, ready: genTask.learningProgress.status === 'ready' }">
+        <span class="learning-dot"></span>
+        <span class="learning-message">{{ genTask.learningProgress.message }}</span>
+        <span v-if="genTask.learningProgress.totalNeeds" class="learning-ratio">
+          {{ genTask.learningProgress.completedNeeds }}/{{ genTask.learningProgress.totalNeeds }}
+        </span>
+        <span v-if="genTask.learningProgress.sourceCount" class="learning-ratio">
+          {{ genTask.learningProgress.sourceCount }} 来源
+        </span>
+      </div>
+      <LearningEvidence :task-id="genTask.taskId" :knowledge-count="activeKnowledgeCount"
+                        :learning-status="genTask.learningProgress.status" />
     </div>
 
     <!-- 文件生成卡片：按生成器分组 -->
@@ -130,12 +143,14 @@ import type {GeneratorType, GenFile} from "../logic/generateState";
 import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
 import {isImeComposing} from "../logic/keyboard";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
+import LearningEvidence from "./LearningEvidence.vue";
 
 // 后台活跃阶段（无逐字流）显示跑马灯
 const marqueeOn = computed(() =>
     ["planning", "generating", "verifying", "fixing"].includes(genTask.phase)
 );
 const canRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
+const activeKnowledgeCount = computed(() => genTask.knowledgeUsed.filter(item => item.status === "active").length);
 
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
@@ -412,6 +427,38 @@ watch(() => genTask.streamingContent, async () => {
 .gen-info {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+.learning-progress {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-left: 2px solid rgba(67, 128, 145, 0.72);
+  background: rgba(67, 128, 145, 0.07);
+  color: rgba(213, 229, 233, 0.72);
+  font-size: 12px;
+}
+.learning-progress.deferred {
+  border-left-color: rgba(198, 176, 125, 0.7);
+  background: rgba(198, 176, 125, 0.06);
+  color: rgba(226, 210, 173, 0.72);
+}
+.learning-progress.ready { border-left-color: rgba(93, 159, 118, 0.75); }
+.learning-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 7px currentColor;
+}
+.learning-message { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.learning-ratio {
+  flex: 0 0 auto;
+  color: rgba(244, 241, 236, 0.4);
+  font: 10px monospace;
 }
 .tag {
   padding: 3px 14px;

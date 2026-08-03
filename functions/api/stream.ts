@@ -4,7 +4,7 @@
 
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
 import { resolveLLM, tierFromModel } from "../_lib/llm";
-import { getTask, putTask } from "../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
 import { buildApiContractContext } from "../_lib/apiContracts";
 
 interface Env {
@@ -20,22 +20,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const tier = tierFromModel(body.model);
     const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
-    const uid: string | undefined = (context.data as any)?.uid;
+    const uid: string = (context.data as any)?.uid || "";
     let taskState: any = null;
 
-    // 任务级额度耗尽时直接拒绝
+    // 带 taskId 的调用必须命中当前用户的任务，避免越权读取上下文或错误归集费用。
     if (taskId) {
-        const stateRaw = await getTask(context.env, taskId);
-        if (stateRaw) {
-            try {
-                taskState = JSON.parse(stateRaw);
-                if (taskState.quotaExhausted) {
-                    return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
-                        status: 402, headers: { "Content-Type": "application/json" },
-                    });
-                }
-            } catch { /* ignore */ }
-        }
+        const stateRaw = await getOwnedTask(context.env, taskId, uid);
+        if (!stateRaw) return new Response("Task not found", { status: 404 });
+        try {
+            taskState = JSON.parse(stateRaw);
+            if (taskState.quotaExhausted) {
+                return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                    status: 402, headers: { "Content-Type": "application/json" },
+                });
+            }
+        } catch { /* ignore */ }
     }
 
     const messages = Array.isArray(body.messages)
@@ -142,16 +141,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!llm.byok && uid && taskId && usage) {
             try {
                 const cost = await accumulateCost(context.env, uid, taskId, model, usage);
-                // taskCost 已持久化正常成本；只有额度耗尽才需要改任务状态。
-                if (!cost.outOfQuota) return;
-                const raw = await getTask(context.env, taskId);
-                if (raw) {
-                    const st = JSON.parse(raw);
-                    st.totalCost = cost.total;
-                    st.consumedQuota = cost.consumed;
-                    st.quotaExhausted = true;
-                    await putTask(context.env, taskId, JSON.stringify(st));
-                }
+                if (cost.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
             } catch { /* ignore */ }
         }
     })();

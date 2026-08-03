@@ -8,6 +8,7 @@
     "cf:dev": "wrangler pages dev dist",
     "cf:dev:proxy": "wrangler pages dev -- npx vite",
     "build": "vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist",
     "font:subset": "node scripts/build-font-subset.mjs",
@@ -25,10 +26,14 @@
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260518.1",
+    "@types/node": "^20.19.0",
     "@vitejs/plugin-vue": "^6.0.3",
     "sharp": "^0.34.2",
     "subset-font": "^2.4.0",
+    "typescript": "^5.9.3",
     "vite": "^7.3.1",
+    "vitest": "^4.1.10",
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-vue-devtools": "^8.0.5",
     "wrangler": "^4.71.0"

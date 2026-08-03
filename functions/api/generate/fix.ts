@@ -3,9 +3,17 @@ import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
-import { getTask, putTask } from "../../_lib/taskStore";
+import { buildDiagnosticKnowledgeNeeds } from "../../_lib/learning/assessment";
+import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
+import type { KnowledgeNeed } from "../../_lib/learning/types";
+import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
 import { normalizePomRepositories } from "../../_lib/pomGuard";
-import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import {
+    buildApiContractContext,
+    findKnownApiIssues,
+    partitionKnowledgeNeedsByApiContracts,
+} from "../../_lib/apiContracts";
 import {
     compareDiagnostics,
     diagnosticsFingerprint,
@@ -18,12 +26,20 @@ import {
 } from "../../_lib/buildDiagnostics";
 
 interface Env {
+    DB?: D1Database;
     DEEPSEEK_API_KEY: string;
     GITHUB_PAT: string;
     TASKS: KVNamespace;
 }
 
 interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+
+interface PendingKnowledgeUsage {
+    knowledgeId: string;
+    stage: string;
+    path: string;
+    diagnosticBefore: string;
+}
 
 const FIX_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 delta，慢但活着不误杀）
 const MAX_REPAIR_ATTEMPTS = 3;
@@ -117,6 +133,41 @@ function matchesPath(filePath: string, diagnosticPath: string): boolean {
     return filePath === diagnosticPath || filePath.endsWith(diagnosticPath) || diagnosticPath.endsWith(filePath);
 }
 
+function knowledgeOutcomeForPath(
+    previous: BuildDiagnostic[],
+    current: BuildDiagnostic[],
+    filePath: string,
+): "resolved" | "persisted" | "introduced" {
+    const before = previous.filter((item) => matchesPath(filePath, item.path));
+    const after = current.filter((item) => matchesPath(filePath, item.path));
+    const beforeKeys = new Set(before.map((item) => item.key));
+    if (after.some((item) => !beforeKeys.has(item.key))) return "introduced";
+    if (after.some((item) => beforeKeys.has(item.key))) return "persisted";
+    return "resolved";
+}
+
+async function evaluatePendingKnowledgeUsage(
+    env: Env,
+    taskId: string,
+    snapshot: { diagnostics: BuildDiagnostic[]; knowledgeUsage?: PendingKnowledgeUsage[] },
+    diagnostics: BuildDiagnostic[],
+    diagnosticAfter: string,
+): Promise<void> {
+    if (!env.DB || !snapshot.knowledgeUsage?.length) return;
+    try {
+        await Promise.all(snapshot.knowledgeUsage.map((usage) => evaluateKnowledgeUsage(env, {
+            knowledgeId: usage.knowledgeId,
+            generationTaskId: taskId,
+            stage: usage.stage,
+            diagnosticBefore: usage.diagnosticBefore,
+            diagnosticAfter,
+            outcome: knowledgeOutcomeForPath(snapshot.diagnostics, diagnostics, usage.path),
+        })));
+    } catch (error) {
+        console.warn("knowledge usage evaluation failed", error);
+    }
+}
+
 function progressSummary(progress: DiagnosticProgress | null, rolledBackFiles: string[]): string {
     if (!progress) return "首次修复：逐条处理当前诊断。";
     const parts = [
@@ -131,10 +182,13 @@ function progressSummary(progress: DiagnosticProgress | null, rolledBackFiles: s
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
     const taskId = body.taskId as string;
-    const mode: "repair" | "inspect" = body.mode === "inspect" ? "inspect" : "repair";
+    const mode: "diagnose" | "repair" | "inspect" = body.mode === "diagnose"
+        ? "diagnose"
+        : body.mode === "inspect" ? "inspect" : "repair";
     const token = context.env.GITHUB_PAT;
+    const uid: string = (context.data as any)?.uid || "";
 
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -150,10 +204,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    // 最终 inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
+    // diagnose/inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
     const llm: LLMProvider | null = mode === "repair" ? await resolveLLM(context) : null;
 
-    const uid: string | undefined = (context.data as any)?.uid;
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge = async (r: AICallResult) => {
@@ -166,7 +219,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
-        if (cost.outOfQuota) state.quotaExhausted = true;
+        if (cost.outOfQuota) {
+            state.quotaExhausted = true;
+            await markTaskQuotaExhausted(context.env, taskId, uid);
+        }
     };
 
     const { readable, writable } = new TransformStream<Uint8Array>();
@@ -197,7 +253,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
@@ -212,7 +268,37 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 diagnostics: BuildDiagnostic[];
                 changedFiles: string[];
                 files: { path: string; content: string; apiSummary?: any }[];
+                knowledgeUsage?: PendingKnowledgeUsage[];
             } | undefined;
+            state.fixKnowledgeNeeds = buildDiagnosticKnowledgeNeeds({
+                diagnostics,
+                previousDiagnostics: pendingSnapshot?.diagnostics,
+                coreType: state.coreType,
+                mcVersion: state.version,
+                projectPackage: state.packageName,
+                externalDeps: state.grade?.vector?.external_deps ?? [],
+            });
+            state.fixDiagnosticsFingerprint = fingerprint;
+
+            if (mode === "diagnose") {
+                state.lastBuildDiagnostics = diagnostics;
+                const msg = state.fixKnowledgeNeeds.length
+                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个可查证的公开技术缺口`
+                    : "▸ 当前诊断没有可安全联网查证的公开知识缺口";
+                state.logs.push(msg);
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await writer.write(sseEvent(encoder, { type: "log", msg }));
+                await writer.write(sseEvent(encoder, {
+                    type: "result",
+                    diagnosed: true,
+                    fingerprint,
+                    diagnostics,
+                    knowledgeNeeds: state.fixKnowledgeNeeds.length,
+                }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
+            }
+
             const progress = pendingSnapshot
                 ? compareDiagnostics(pendingSnapshot.diagnostics, diagnostics)
                 : null;
@@ -235,6 +321,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             if (pendingSnapshot && progress) {
+                context.waitUntil(evaluatePendingKnowledgeUsage(
+                    context.env,
+                    taskId,
+                    pendingSnapshot,
+                    diagnostics,
+                    fingerprint,
+                ));
                 state.fixStagnation = progress.resolved.length > 0 ? 0 : (Number(state.fixStagnation) || 0) + 1;
                 const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
                 for (let i = history.length - 1; i >= 0; i--) {
@@ -285,7 +378,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`× ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `× ${reason}` }));
                 await writer.write(sseEvent(encoder, {
                     type: "result", fixed: 0, changed: 0, inspected: true, reason,
@@ -302,7 +395,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -313,7 +406,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -328,7 +421,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "debug", scope: "build-fix", msg: "fix:no-target", fingerprint,
                     parsedPaths: effectiveDiagnostics.map((item) => item.path),
@@ -354,6 +447,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 generatedFiles: state.generatedFiles,
             };
             const apiContractCtx = buildApiContractContext(apiContractInput);
+            const rawFixNeeds = (Array.isArray(state.fixKnowledgeNeeds) ? state.fixKnowledgeNeeds : []) as KnowledgeNeed[];
+            const fixNeeds = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawFixNeeds).uncovered;
+            const knowledge = await loadKnowledgeContext({
+                env: context.env,
+                needs: fixNeeds,
+                maxCharacters: 6_000,
+                title: "构建修复已验证公共技术知识",
+            });
+            state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+            const appliedKnowledgeUsage: PendingKnowledgeUsage[] = [];
+            const markKnowledgeApplied = (filePath: string) => {
+                const stage = `fix:${filePath}`;
+                context.waitUntil(recordKnowledgeContextUsage({
+                    env: context.env,
+                    items: knowledge.used,
+                    generationTaskId: taskId,
+                    stage,
+                    diagnosticBefore: fingerprint,
+                }));
+                for (const item of knowledge.used) {
+                    if (appliedKnowledgeUsage.some((usage) => usage.knowledgeId === item.knowledgeId && usage.stage === stage)) continue;
+                    appliedKnowledgeUsage.push({
+                        knowledgeId: item.knowledgeId,
+                        stage,
+                        path: filePath,
+                        diagnosticBefore: fingerprint,
+                    });
+                }
+            };
 
             const repairAttempt = (Number(state.repairAttempts) || 0) + 1;
             state.repairAttempts = repairAttempt;
@@ -402,9 +524,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     summaries,
                     fileRole,
                     apiContractCtx,
+                    knowledge.context,
                     progressSummary(progress, rolledBackFiles),
                 );
                 let fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
+                markKnowledgeApplied(filePath);
                 await charge(fixRes);
                 let fixedContent = stripFences(fixRes.content).trim();
                 let knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
@@ -420,9 +544,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         summaries,
                         fileRole,
                         apiContractCtx,
+                        knowledge.context,
                         `${progressSummary(progress, rolledBackFiles)}\n上一候选仍有确定性问题：${knownApiIssues.join("；")}`,
                     );
                     fixRes = await callAIStream(llm, retryPrompt.system, retryPrompt.user, writer, encoder);
+                    markKnowledgeApplied(filePath);
                     await charge(fixRes);
                     fixedContent = stripFences(fixRes.content).trim();
                     knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
@@ -489,7 +615,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
                 await flushCharge();
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
                 await writer.write(sseEvent(encoder, {
                     type: "result", fixed: 0, changed: 0, reason, repairAttempt,
@@ -509,6 +635,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     content: beforeContents.get(path) ?? "",
                     apiSummary: beforeSummaries.get(path) ?? null,
                 })),
+                knowledgeUsage: appliedKnowledgeUsage.filter((usage) => changedFiles.includes(usage.path)),
                 at: Date.now(),
             };
 
@@ -529,7 +656,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const changedMsg = `● 已修改 ${changedCount} 个文件，等待重新构建验证`;
             state.logs.push(changedMsg);
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state));
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
             await writer.write(sseEvent(encoder, { type: "log", msg: changedMsg }));
             await writer.write(sseEvent(encoder, {
@@ -551,7 +678,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.error = e.message;
             state.logs.push(`× 修复失败: ${e.message}`);
             try { await flushCharge(); } catch { /* 计费失败不覆盖原始修复异常 */ }
-            try { await putTask(context.env, taskId, JSON.stringify(state)); } catch { /* 保留原始修复异常 */ }
+            try { await putTask(context.env, taskId, JSON.stringify(state), 3600, uid); } catch { /* 保留原始修复异常 */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 修复失败: ${e.message}` }));
             await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, error: e.message }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

@@ -1,5 +1,5 @@
 import { downloadArtifact, deleteBranch } from "../../_lib/github";
-import { deleteTask, getTask } from "../../_lib/taskStore";
+import { deleteTask, getOwnedTask } from "../../_lib/taskStore";
 
 interface Env {
     GITHUB_PAT: string;
@@ -7,12 +7,13 @@ interface Env {
 }
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
+    const uid: string = (context.data as any)?.uid || "";
     const url = new URL(context.request.url);
     const taskId = url.searchParams.get("taskId");
     if (!taskId) return new Response("Missing taskId", { status: 400 });
 
     const token = context.env.GITHUB_PAT;
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
@@ -24,7 +25,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         if (state.buildBranch) {
             deleteBranch(token, state.buildBranch).catch(() => { });
         }
-        context.waitUntil(deleteTask(context.env, taskId).catch(() => { }));
+        context.waitUntil(deleteTask(context.env, taskId, uid).catch(() => { }));
 
         return new Response(resp.body, {
             headers: {

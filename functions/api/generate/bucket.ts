@@ -2,8 +2,14 @@ import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGen
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
-import { getTask, putTask } from "../../_lib/taskStore";
-import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import type { KnowledgeNeed } from "../../_lib/learning/types";
+import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import {
+    buildApiContractContext,
+    findKnownApiIssues,
+    partitionKnowledgeNeedsByApiContracts,
+} from "../../_lib/apiContracts";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -16,6 +22,7 @@ type Dbg = (msg: string, extra?: any) => void;
 const noopDbg: Dbg = () => { /* no-op */ };
 
 interface Env {
+    DB?: D1Database;
     DEEPSEEK_API_KEY: string;
     GEN_CONCURRENCY?: string;
     TASKS: KVNamespace;
@@ -187,6 +194,8 @@ async function generateAndCheckFile(
     blueprint: MainBlueprint | null,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
+    knowledgeContext: string,
+    onKnowledgeApplied: () => void,
     charge: ChargeFn,
     dbg: Dbg = noopDbg,
 ): Promise<FileGenOutput> {
@@ -212,9 +221,10 @@ async function generateAndCheckFile(
         ],
     };
     const apiContractCtx = buildApiContractContext(apiContractInput);
-    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx);
+    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx, knowledgeContext);
     dbg("file:gen-begin", { path: filePath });
     const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath, false, dbg);
+    onKnowledgeApplied();
     await charge(initialRes);
     let content = stripFences(initialRes.content);
 
@@ -269,7 +279,7 @@ async function generateAndCheckFile(
                         path: newPath, role: newRole, order: 0,
                         generatorType: inferGeneratorType(className, newPath),
                     };
-                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx);
+                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx, knowledgeContext);
                     await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
                     const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath, false, dbg);
                     await charge(subRes);
@@ -302,7 +312,7 @@ async function generateAndCheckFile(
         state.logs.push(reworkMsg);
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
         dbg("file:rework-begin", { path: filePath, round: reworkCount });
-        const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries, apiContractCtx);
+        const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries, apiContractCtx, knowledgeContext);
         const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true, dbg);
         await charge(rwRes);
         content = stripFences(rwRes.content);
@@ -345,6 +355,7 @@ async function generateAndCheckFile(
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
+    const uid: string = (context.data as any)?.uid || "";
     const llm = await resolveLLM(context);
     // 默认串行（1 文件/请求，最稳）；仅当前端「超级并发」开关开启时才桶内并发（env 可覆盖并发数）。
     // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/返工，更快但更易撞
@@ -354,7 +365,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         concurrency = Math.max(2, parseInt(context.env.GEN_CONCURRENCY || "") || SUPER_CONCURRENCY);
     }
 
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
     // 挂了 skill 的任务：prompt 更大、文件更多，强制串行，避免大 prompt × 并发撞 CF Worker 限制
@@ -366,7 +377,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const uid: string | undefined = (context.data as any)?.uid;
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -379,7 +389,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
-        if (cost.outOfQuota) state.quotaExhausted = true;
+        if (cost.outOfQuota) {
+            state.quotaExhausted = true;
+            await markTaskQuotaExhausted(context.env, taskId, uid);
+        }
     };
 
     const buckets = (state.buckets ?? []) as PlanFileItem[][];
@@ -398,6 +411,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         javaVersion: state.javaVersion,
     };
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
+    const knowledgeContractInput = {
+        coreType: state.coreType,
+        version: state.version,
+        externalDeps: state.grade?.vector?.external_deps ?? [],
+        generatedFiles: state.generatedFiles ?? [],
+    };
+    const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
+        ? state.grade.knowledgeNeeds
+        : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
+    const needs = partitionKnowledgeNeedsByApiContracts(knowledgeContractInput, rawNeeds).uncovered;
+    const knowledge = await loadKnowledgeContext({
+        env: context.env,
+        needs,
+        maxCharacters: 3_200,
+        title: "代码生成已验证公共技术知识",
+    });
+    state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+    const markKnowledgeApplied = (filePath: string) => {
+        context.waitUntil(recordKnowledgeContextUsage({
+            env: context.env,
+            items: knowledge.used,
+            generationTaskId: taskId,
+            stage: `file:${filePath}`,
+        }));
+    };
 
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
@@ -439,7 +477,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {
                 state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
@@ -469,7 +507,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     dbg("task:begin", { path: target.path });
                     try {
                         const r = await generateAndCheckFile(
-                            llm, target, ctx, localSummaries, blueprint, writer, encoder, state, charge, dbg,
+                            llm,
+                            target,
+                            ctx,
+                            localSummaries,
+                            blueprint,
+                            writer,
+                            encoder,
+                            state,
+                            knowledge.context,
+                            () => markKnowledgeApplied(target.path),
+                            charge,
+                            dbg,
                         );
                         dbg("task:ok", { path: target.path, failed: r.failed, reworkCount: r.reworkCount });
                         if (r.replan) {
@@ -522,7 +571,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = replanTriggered.reason ?? "审查未通过";
                 await flushCharge();
-                await putTask(context.env, taskId, JSON.stringify(state));
+                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, replan: true,
                     path: replanTriggered.path, reason: replanTriggered.reason,
@@ -538,7 +587,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (bucketDone) state.currentBucket = bucketIndex + 1;
             state.currentFileIndex = state.generatedFiles.length;
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state));
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
             dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
             await writer.write(sseEvent(encoder, {

@@ -1,21 +1,47 @@
 import { getRunStatus, getArtifactInfo, findRunByBranch, deleteBranch } from "../../_lib/github";
-import { getTask, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, putTask } from "../../_lib/taskStore";
 import { compareDiagnostics } from "../../_lib/buildDiagnostics";
+import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 
 interface Env {
+    DB?: D1Database;
     GITHUB_PAT: string;
     TASKS: KVNamespace;
 }
 
+async function evaluateResolvedKnowledgeUsage(
+    env: Env,
+    taskId: string,
+    usages: any[],
+): Promise<boolean> {
+    if (!env.DB || !Array.isArray(usages) || !usages.length) return true;
+    try {
+        await Promise.all(usages.map((usage) => evaluateKnowledgeUsage(env, {
+            knowledgeId: usage.knowledgeId,
+            generationTaskId: taskId,
+            stage: usage.stage,
+            diagnosticBefore: usage.diagnosticBefore,
+            diagnosticAfter: "",
+            outcome: "resolved",
+        })));
+        return true;
+    } catch (error) {
+        console.warn("knowledge usage success evaluation failed", error);
+        return false;
+    }
+}
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
+    const uid: string = (context.data as any)?.uid || "";
     const url = new URL(context.request.url);
     const taskId = url.searchParams.get("taskId");
     if (!taskId) return new Response("Missing taskId", { status: 400 });
 
     const token = context.env.GITHUB_PAT;
-    const raw = await getTask(context.env, taskId);
+    const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    state.uid = uid;
     let discoveredRun = false;
 
     if (!state.runId && state.buildBranch) {
@@ -38,7 +64,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (status !== "completed") {
         // 仅在首次发现 runId 时落一次；若本次已完成，则与终态合并为下方一次写入。
         if (discoveredRun) {
-            await putTask(context.env, taskId, JSON.stringify(state));
+            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
         }
         return new Response(JSON.stringify({ status: "building", runStatus: status }), {
             headers: { "Content-Type": "application/json" },
@@ -52,6 +78,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             state.status = "done";
             state.logs.push("● 构建成功，JAR 已就绪");
             if (state.pendingFixSnapshot?.diagnostics) {
+                const usageEvaluated = await evaluateResolvedKnowledgeUsage(
+                    context.env,
+                    taskId,
+                    state.pendingFixSnapshot.knowledgeUsage,
+                );
                 const progress = compareDiagnostics(state.pendingFixSnapshot.diagnostics, []);
                 const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
                 for (let i = history.length - 1; i >= 0; i--) {
@@ -64,7 +95,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
                 state.lastBuildDiagnostics = [];
                 state.lastBuildProgress = progress;
                 state.fixStagnation = 0;
-                delete state.pendingFixSnapshot;
+                if (usageEvaluated) delete state.pendingFixSnapshot;
             }
         } else {
             state.status = "error";
@@ -81,7 +112,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         deleteBranch(token, state.buildBranch).catch(() => { });
     }
 
-    await putTask(context.env, taskId, JSON.stringify(state));
+    await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
 
     return new Response(JSON.stringify({
         status: state.status,
