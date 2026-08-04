@@ -459,6 +459,8 @@ onUnmounted(() => {
 
 <style scoped>
 .path-cards {
+    --pc-safe-top: 118px;
+    --pc-stage-shift: 28px;
     position: fixed;
     inset: 0;
     z-index: 15;
@@ -474,7 +476,7 @@ onUnmounted(() => {
 
 .pc-head {
     position: fixed;
-    top: 84px;
+    top: var(--pc-safe-top);
     left: 0;
     right: 0;
     z-index: 600;
@@ -508,7 +510,10 @@ onUnmounted(() => {
 
 .pc-fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1500; }
 
-.pc-stage { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pc-stage {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    transform: translateY(var(--pc-stage-shift));
+}
 .pc-card {
     position: absolute; left: 50%; top: 50%; will-change: transform;
     transition: transform 0.55s cubic-bezier(.34, 1.56, .64, 1), opacity 0.35s ease;
@@ -538,11 +543,15 @@ onUnmounted(() => {
 .pc-preview {
     position: fixed; inset: 0; z-index: 2000;
     background: rgba(0, 0, 0, 0.78);
-    display: flex; align-items: flex-start; justify-content: center; padding: 92px 4vw 24px;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: var(--pc-safe-top) 4vw 24px;
     animation: pcFadeIn 0.18s ease-out;
 }
 .pc-preview-box {
-    width: 92vw; height: calc(100vh - 116px); max-width: 1400px;
+    width: 92vw;
+    height: calc(100vh - var(--pc-safe-top) - 24px);
+    height: calc(100dvh - var(--pc-safe-top) - 24px);
+    max-width: 1400px;
     background: rgba(4, 4, 2, 0.94); border: 1px solid rgba(209, 200, 182, 0.18);
     border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
 }
@@ -634,6 +643,24 @@ onUnmounted(() => {
 .pc-btn.ghost:hover:not(:disabled) { opacity: 1; background: rgba(255, 255, 255, 0.06); }
 .pc-btn.primary { background: #d5c9ac; color: #040402; border-color: #e1d8c4; font-weight: 700; }
 .pc-btn.primary:hover:not(:disabled) { background: #e1d8c4; }
+
+@media (max-width: 820px) {
+    .path-cards {
+        --pc-safe-top: 92px;
+        --pc-stage-shift: 20px;
+    }
+}
+
+@media (max-height: 760px) {
+    .path-cards {
+        --pc-safe-top: 104px;
+        --pc-stage-shift: 14px;
+    }
+}
+
+@media (max-width: 820px) and (max-height: 760px) {
+    .path-cards { --pc-safe-top: 84px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
     .pc-card, .pc-card-inner, .pc-hint { transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear; }

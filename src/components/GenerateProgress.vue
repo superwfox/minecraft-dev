@@ -11,9 +11,9 @@
           ? "⚠ 桶内并发更快，但更易撞 Cloudflare 限制导致生成失败，慎用"
           : "默认串行最稳。开启后更快，但可能失败" }}
       </span>
-      <button v-if="genTask.debugLog.length" class="gen-super-toggle dbg" @click="downloadDebug"
-              title="导出后端逐步调试日志（JSON），用于定位生成失败">
-        ⬇ 调试日志 <span class="dbg-count">{{ genTask.debugLog.length }}</span>
+      <button v-if="genTask.taskId" class="gen-super-toggle dbg" @click="downloadDebug"
+              title="下载已脱敏的生成与联网学习诊断（JSON）">
+        ⬇ 安全 Debug
       </button>
     </div>
 
@@ -108,7 +108,7 @@
       <div class="gen-error">{{ genTask.error }}</div>
       <div class="gen-error-actions">
         <button v-if="canRetry" class="gen-retry-btn" @click="retryGenerate">↻ 重试（用上次需求重跑）</button>
-        <button v-if="genTask.debugLog.length" class="gen-retry-btn ghost" @click="downloadDebug">⬇ 下载调试日志</button>
+        <button v-if="genTask.taskId" class="gen-retry-btn ghost" @click="downloadDebug">⬇ 下载安全 Debug</button>
       </div>
     </div>
 
@@ -144,6 +144,7 @@ import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateS
 import type {GeneratorType, GenFile} from "../logic/generateState";
 import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
+import {buildSafeDebugExport} from "../logic/safeDebug";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
 import LearningEvidence from "./LearningEvidence.vue";
 
@@ -157,24 +158,14 @@ const activeKnowledgeCount = computed(() => genTask.knowledgeUsed.filter(item =>
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
 
-// 导出后端逐步调试日志（含 logs + debug 事件），用于定位「桶零进度、无返回」死因
+// 只下载正向白名单构造的诊断，避免源码、路径、Prompt 或上游响应进入文件。
 function downloadDebug() {
-    const payload = {
-        taskId: genTask.taskId,
-        phase: genTask.phase,
-        error: genTask.error,
-        projectName: genTask.projectName,
-        exportedAt: new Date().toISOString(),
-        logs: genTask.logs,
-        buildDiagnostics: genTask.buildDiagnostics,
-        buildHistory: genTask.buildHistory,
-        debug: genTask.debugLog,
-    };
+    const payload = buildSafeDebugExport(genTask);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `tahai-debug-${genTask.taskId || "task"}.json`;
+    a.download = `tahai-safe-debug-${payload.generation.taskId || "task"}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();

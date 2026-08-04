@@ -1,8 +1,15 @@
+import {
+    buildLearningDebugMeta,
+    learningReasonMessage,
+    normalizeLearningReasonCode,
+} from "./debug";
 import type {
     KnowledgeItemRecord,
     KnowledgeUsed,
+    LearningDebugMeta,
     LearningJobRecord,
     LearningProgress,
+    LearningReasonCode,
 } from "./types";
 
 const STATUS_MESSAGES: Record<LearningJobRecord["status"], string> = {
@@ -21,12 +28,27 @@ export interface PublicLearningSnapshot {
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
     learningDeferred: boolean;
+    debugMeta?: LearningDebugMeta;
 }
 
 function publicStatus(item: KnowledgeItemRecord): KnowledgeUsed["status"] {
     if (item.status === "active") return "active";
     if (item.status === "needs_review") return "needs_review";
     return "skipped";
+}
+
+export function learningKnowledgeIds(
+    job: Pick<LearningJobRecord, "work" | "resultIds"> | null,
+    fallbackIds: unknown[] = [],
+): string[] {
+    const ids = [
+        ...(job?.work.cachedKnowledgeIds ?? []),
+        ...(job?.resultIds ?? []),
+        ...fallbackIds,
+    ];
+    return [...new Set(ids.filter((id): id is string =>
+        typeof id === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(id),
+    ))];
 }
 
 export function learningCompletionStatus(
@@ -44,9 +66,18 @@ export function learningSnapshot(
     job: LearningJobRecord | null,
     items: KnowledgeItemRecord[] = [],
     sourceCount = 0,
-    fallback?: { status?: LearningProgress["status"]; message?: string },
+    fallback?: {
+        status?: LearningProgress["status"];
+        reasonCode?: LearningReasonCode;
+        message?: string;
+    },
 ): PublicLearningSnapshot {
     const status = fallback?.status ?? job?.status ?? "idle";
+    const terminalFallback = status === "deferred" || status === "failed" || status === "cancelled"
+        ? "internal_error"
+        : undefined;
+    const reasonCode = fallback?.reasonCode
+        ?? normalizeLearningReasonCode(job?.error, terminalFallback);
     const completedNeeds = Math.max(0, Math.min(
         job?.needs.length ?? 0,
         Number(job?.work.completedNeeds) || (job?.status === "ready" ? job.needs.length : 0),
@@ -60,7 +91,9 @@ export function learningSnapshot(
             totalNeeds: job?.needs.length ?? 0,
             completedNeeds,
             sourceCount,
-            message: fallback?.message || (job ? STATUS_MESSAGES[job.status] : ""),
+            message: fallback?.message
+                || (reasonCode ? learningReasonMessage(reasonCode) : job ? STATUS_MESSAGES[job.status] : ""),
+            reasonCode,
         },
         knowledgeUsed: items.map((item) => ({
             knowledgeId: item.knowledgeId,
@@ -69,5 +102,9 @@ export function learningSnapshot(
             status: publicStatus(item),
         })),
         learningDeferred: status === "deferred" || status === "failed" || status === "cancelled",
+        debugMeta: job ? buildLearningDebugMeta(job, {
+            reasonCode,
+            status: status === "idle" ? job.status : status,
+        }) : undefined,
     };
 }

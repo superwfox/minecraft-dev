@@ -82,4 +82,111 @@ describe("DeepSeek Responses adapter", () => {
         expect(body.tools).toEqual([{ type: "web_search" }]);
         expect(body.tool_choice).toEqual({ type: "web_search" });
     });
+
+    it("retries one quick transient HTTP failure without exposing its body", async () => {
+        const fetchImpl = vi.fn()
+            .mockResolvedValueOnce(new Response("provider-secret-body", { status: 503 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify(completedFixture), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+            })) as unknown as typeof fetch;
+
+        const result = await discoverLearningSources({
+            apiKey: "test-key",
+            needs: [makeNeed()],
+            fetchImpl,
+            budgetMs: 8_000,
+        });
+
+        expect(result.ok).toBe(true);
+        expect(result.attempts).toHaveLength(2);
+        expect(result.attempts[0]).toMatchObject({
+            reasonCode: "discovery_http",
+            httpStatus: 503,
+            retryable: true,
+        });
+        expect(JSON.stringify(result)).not.toContain("provider-secret-body");
+    });
+
+    it("does not retry a non-transient authentication response", async () => {
+        const fetchImpl = vi.fn(async () => new Response("credential-error-body", {
+            status: 401,
+        })) as unknown as typeof fetch;
+
+        const result = await discoverLearningSources({
+            apiKey: "test-key",
+            needs: [makeNeed()],
+            fetchImpl,
+            budgetMs: 8_000,
+        });
+
+        expect(result).toMatchObject({
+            ok: false,
+            reasonCode: "discovery_http",
+            httpStatus: 401,
+            retryable: false,
+        });
+        expect(result.attempts).toHaveLength(1);
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(JSON.stringify(result)).not.toContain("credential-error-body");
+    });
+
+    it("accounts for usage from an incomplete attempt before retrying", async () => {
+        const incompleteWithUsage = {
+            type: "response.incomplete",
+            response: {
+                status: "incomplete",
+                model: "deepseek-v4-flash",
+                output_text: "",
+                usage: { input_tokens: 10, output_tokens: 2 },
+            },
+        };
+        const fetchImpl = vi.fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify(incompleteWithUsage), { status: 200 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify(completedFixture), { status: 200 })) as unknown as typeof fetch;
+
+        const result = await discoverLearningSources({
+            apiKey: "test-key",
+            needs: [makeNeed()],
+            fetchImpl,
+            budgetMs: 8_000,
+        });
+
+        expect(result.ok).toBe(true);
+        expect(result.attempts[0]).toMatchObject({
+            reasonCode: "discovery_provider_incomplete",
+            providerStatus: "incomplete",
+            retryable: true,
+        });
+        expect(result.usageEntries).toHaveLength(2);
+        expect(result.usageEntries[0].usage).toMatchObject({
+            prompt_tokens: 10,
+            completion_tokens: 2,
+        });
+    });
+
+    it("returns a bounded timeout reason when the provider does not respond", async () => {
+        const fetchImpl = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_, reject) => {
+                const signal = init?.signal;
+                const abort = () => reject(new DOMException("Aborted", "AbortError"));
+                if (signal?.aborted) abort();
+                else signal?.addEventListener("abort", abort, { once: true });
+            })) as unknown as typeof fetch;
+
+        const result = await discoverLearningSources({
+            apiKey: "test-key",
+            needs: [makeNeed()],
+            fetchImpl,
+            budgetMs: 1_000,
+        });
+
+        expect(result).toMatchObject({
+            ok: false,
+            reasonCode: "discovery_timeout",
+            retryable: false,
+        });
+        expect(result.attempts).toHaveLength(1);
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
 });

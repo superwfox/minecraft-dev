@@ -259,7 +259,46 @@ describe("learning source fetch safety", () => {
             "https://example.com/second-2",
             "https://example.com/first-2",
         ]);
-        expect(result.errors).toEqual([`${secondNeed.id}:source_http_404`]);
+        expect(result.telemetry).toMatchObject({
+            sourceAttempts: 4,
+            sourceAccepted: 3,
+            sourceRejected: 1,
+            sourceInvalid: 0,
+            sourceDeduplicated: 0,
+            sourceTimeouts: 0,
+            sourceHttp4xx: 1,
+            sourceHttp5xx: 0,
+        });
+    });
+
+    it("stops the candidate queue when the total fetch budget expires", async () => {
+        const fetchImpl = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_, reject) => {
+                const signal = init?.signal;
+                const abort = () => reject(new DOMException("Aborted", "AbortError"));
+                if (signal?.aborted) abort();
+                else signal?.addEventListener("abort", abort, { once: true });
+            })) as unknown as typeof fetch;
+
+        const result = await fetchLearningSources({
+            jobId: "learn-test",
+            needs: [makeNeed()],
+            candidates: [{
+                needId: "need-api",
+                urls: ["https://example.com/slow-1", "https://example.com/slow-2"],
+            }],
+            fetchImpl,
+            timeoutMs: 1_000,
+            budgetMs: 5,
+        });
+
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(result.sources).toEqual([]);
+        expect(result.telemetry).toMatchObject({
+            sourceAttempts: 1,
+            sourceTimeouts: 1,
+            sourceBudgetExhausted: 1,
+        });
     });
 
     it("applies the timeout while waiting for the response body", async () => {
@@ -316,7 +355,13 @@ describe("learning source fetch safety", () => {
         });
 
         expect(result.sources).toHaveLength(1);
-        expect(result.errors).toEqual(["need-api:https_required"]);
+        expect(result.telemetry).toMatchObject({
+            sourceAttempts: 3,
+            sourceAccepted: 1,
+            sourceRejected: 2,
+            sourceInvalid: 1,
+            sourceDeduplicated: 1,
+        });
         expect(fetchImpl).toHaveBeenCalledOnce();
     });
 });

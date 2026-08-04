@@ -7,8 +7,15 @@ import {
     cancelPendingInput,
     persistGenTaskNow,
     superConcurrency,
+    normalizeLearningDebugMeta,
+    recordLearningDebugEvent,
 } from "./generateState";
-import type { GenPhase } from "./generateState";
+import type {
+    GenPhase,
+    LearningDebugMeta,
+    LearningReasonCode,
+    LearningStatus,
+} from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
 import { fetchWithByokFallback } from "./byok";
 import { selected } from "./skills";
@@ -165,7 +172,17 @@ async function get(url: string) {
     return resp.json() as any;
 }
 
-const LEARNING_TERMINAL = new Set(["ready", "deferred", "needs_review", "failed", "cancelled"]);
+const LEARNING_TERMINAL = new Set<LearningStatus>([
+    "ready", "deferred", "needs_review", "failed", "cancelled",
+]);
+type LearningStage = "planner" | "fix";
+type LearningEndpoint = "start" | "step" | "status";
+
+type LearningCallResult = {
+    snapshot: any;
+    httpStatus: number;
+    debugMeta?: LearningDebugMeta;
+};
 
 function applyLearningSnapshot(snapshot: any) {
     if (snapshot?.learningProgress) {
@@ -182,38 +199,159 @@ function applyLearningSnapshot(snapshot: any) {
     genTask.learningDeferred = !!snapshot?.learningDeferred;
 }
 
-async function learningPost(url: string, body: any, signal: AbortSignal): Promise<any> {
-    const resp = await fetchWithByokFallback(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal,
-    });
-    if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
-    if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
-    if (!resp.ok && resp.status !== 409) throw new Error(await resp.text());
-    return await resp.json();
+function learningAbortError(): Error {
+    const error = new Error("learning deadline");
+    error.name = "AbortError";
+    return error;
+}
+
+function learningFailure(error: any): {
+    reasonCode: LearningReasonCode;
+    httpRecorded: boolean;
+} {
+    if (error?.name === "AbortError") {
+        return { reasonCode: "client_deadline", httpRecorded: false };
+    }
+    if (error?.learningHttpRecorded === true) {
+        return { reasonCode: "internal_error", httpRecorded: true };
+    }
+    return { reasonCode: "client_network", httpRecorded: false };
+}
+
+async function learningRequest(input: {
+    stage: LearningStage;
+    endpoint: LearningEndpoint;
+    url: string;
+    method: "GET" | "POST";
+    body?: any;
+    signal: AbortSignal;
+    attempt: number;
+}): Promise<LearningCallResult> {
+    const startedAt = Date.now();
+    const fromStatus = genTask.learningProgress.status;
+    let httpEventRecorded = false;
+    const requestRevision = Number.isInteger(Number(input.body?.revision))
+        ? Number(input.body.revision)
+        : undefined;
+    try {
+        const resp = await fetchWithByokFallback(input.url, {
+            method: input.method,
+            headers: input.method === "POST" ? { "Content-Type": "application/json" } : undefined,
+            body: input.method === "POST" ? JSON.stringify(input.body ?? {}) : undefined,
+            signal: input.signal,
+        });
+        let payload: any;
+        try {
+            payload = await resp.json();
+        } catch (error: any) {
+            if (error?.name !== "SyntaxError") throw error;
+            recordLearningDebugEvent({
+                kind: "http",
+                stage: input.stage,
+                endpoint: input.endpoint,
+                attempt: input.attempt,
+                httpStatus: resp.status,
+                elapsedMs: Date.now() - startedAt,
+                jobId: input.body?.jobId || genTask.learningProgress.jobId,
+                requestRevision,
+                fromStatus,
+                toStatus: genTask.learningProgress.status,
+                reasonCode: "internal_error",
+            });
+            httpEventRecorded = true;
+            throw new Error(`联网查证响应格式无效（HTTP ${resp.status}）`);
+        }
+        const debugMeta = normalizeLearningDebugMeta(payload?.debugMeta);
+        const progress = payload?.learningProgress;
+        const reasonCode = typeof progress?.reasonCode === "string"
+            ? progress.reasonCode as LearningReasonCode
+            : undefined;
+        recordLearningDebugEvent({
+            kind: resp.status === 409 ? "conflict" : "http",
+            stage: input.stage,
+            endpoint: input.endpoint,
+            attempt: input.attempt,
+            httpStatus: resp.status,
+            elapsedMs: Date.now() - startedAt,
+            jobId: debugMeta?.jobId || progress?.jobId || input.body?.jobId,
+            requestRevision,
+            responseRevision: Number.isInteger(Number(progress?.revision))
+                ? Number(progress.revision)
+                : undefined,
+            fromStatus,
+            toStatus: progress?.status,
+            reasonCode,
+            conflictReason: payload?.conflictReason,
+            telemetry: debugMeta?.telemetry,
+        });
+        httpEventRecorded = true;
+        if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
+        if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+        if (!resp.ok && resp.status !== 409 && !progress) {
+            throw new Error(`联网查证请求失败（HTTP ${resp.status}）`);
+        }
+        return { snapshot: payload, httpStatus: resp.status, debugMeta };
+    } catch (error: any) {
+        if (httpEventRecorded && error && typeof error === "object") {
+            error.learningHttpRecorded = true;
+        }
+        if (!httpEventRecorded) {
+            const timedOut = error?.name === "AbortError" || input.signal.aborted;
+            recordLearningDebugEvent({
+                kind: "client",
+                stage: input.stage,
+                endpoint: input.endpoint,
+                attempt: input.attempt,
+                httpStatus: 0,
+                elapsedMs: Date.now() - startedAt,
+                jobId: input.body?.jobId || genTask.learningProgress.jobId,
+                requestRevision,
+                fromStatus,
+                toStatus: genTask.learningProgress.status,
+                reasonCode: timedOut ? "client_deadline" : "client_network",
+            });
+        }
+        throw error;
+    }
+}
+
+async function learningRequestBefore(input: {
+    stage: LearningStage;
+    endpoint: LearningEndpoint;
+    url: string;
+    method: "GET" | "POST";
+    body?: any;
+    deadline: number;
+    attempt: number;
+    maxWaitMs?: number;
+}): Promise<LearningCallResult> {
+    const remaining = input.deadline - Date.now();
+    if (remaining <= 0) throw learningAbortError();
+    const ctrl = new AbortController();
+    const timer = setTimeout(
+        () => ctrl.abort(),
+        Math.max(1, Math.min(remaining, input.maxWaitMs ?? remaining)),
+    );
+    try {
+        return await learningRequest({ ...input, signal: ctrl.signal });
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 async function runLearning(
-    stage: "planner" | "fix",
+    stage: LearningStage,
     chosenPathId?: string,
-    waitMs = stage === "planner" ? 40_000 : 20_000,
+    waitMs = stage === "planner" ? 44_000 : 20_000,
 ) {
-    const deadline = Date.now() + waitMs;
+    const finalDeadline = Date.now() + waitMs;
+    const stepDeadline = finalDeadline - Math.min(2_000, Math.max(1_000, Math.floor(waitMs / 10)));
     let lastMessage = "";
+    let lastEndpoint: LearningEndpoint = "start";
+    let lastFailureReason: LearningReasonCode = "client_deadline";
+    let lastFailureHttpRecorded = false;
     genTask.learningDeferred = false;
 
-    const request = async (url: string, body: any) => {
-        const remaining = Math.max(1, deadline - Date.now());
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), remaining);
-        try {
-            return await learningPost(url, body, ctrl.signal);
-        } finally {
-            clearTimeout(timer);
-        }
-    };
     const announce = (snapshot: any) => {
         applyLearningSnapshot(snapshot);
         const message = snapshot?.learningProgress?.message || "";
@@ -222,43 +360,134 @@ async function runLearning(
             lastMessage = message;
         }
     };
-
-    try {
-        let snapshot = await request("/api/learning/start", {
-            taskId: genTask.taskId,
-            stage,
-            chosenPathId,
-        });
-        announce(snapshot);
-
-        while (snapshot?.learningProgress?.jobId
-            && !LEARNING_TERMINAL.has(snapshot.learningProgress.status)
-            && Date.now() < deadline) {
-            snapshot = await request("/api/learning/step", {
-                taskId: genTask.taskId,
-                jobId: snapshot.learningProgress.jobId,
-                revision: snapshot.learningProgress.revision,
-            });
-            announce(snapshot);
-            if (!LEARNING_TERMINAL.has(snapshot?.learningProgress?.status)) {
-                await new Promise(resolve => setTimeout(resolve, 200));
+    const statusUrl = (jobId?: string) => {
+        const params = new URLSearchParams({ taskId: genTask.taskId, stage });
+        if (jobId) params.set("jobId", jobId);
+        return `/api/learning/status?${params.toString()}`;
+    };
+    const reconcile = async (jobId?: string): Promise<any | null> => {
+        let latest: any = null;
+        for (let attempt = 1; attempt <= 2 && Date.now() < finalDeadline; attempt++) {
+            try {
+                lastEndpoint = "status";
+                const result = await learningRequestBefore({
+                    stage,
+                    endpoint: "status",
+                    url: statusUrl(jobId),
+                    method: "GET",
+                    deadline: finalDeadline,
+                    maxWaitMs: 900,
+                    attempt,
+                });
+                latest = result.snapshot;
+                announce(latest);
+                if (LEARNING_TERMINAL.has(latest?.learningProgress?.status)) return latest;
+            } catch (error: any) {
+                const failure = learningFailure(error);
+                lastFailureReason = failure.reasonCode;
+                lastFailureHttpRecorded = failure.httpRecorded;
+            }
+            if (attempt < 2 && Date.now() + 120 < finalDeadline) {
+                await new Promise(resolve => setTimeout(resolve, 120));
             }
         }
-
-        if (!LEARNING_TERMINAL.has(genTask.learningProgress.status)) {
-            genTask.learningDeferred = true;
-            genTask.learningProgress.message = "本轮联网查证超过等待上限，已按现有知识继续";
-            genTask.logs.push("! 联网查证超过等待上限，已按现有知识继续");
-        }
-    } catch (error: any) {
+        return latest;
+    };
+    const markClientDeferred = (reasonCode: LearningReasonCode, recordEvent: boolean) => {
+        const message = reasonCode === "client_network"
+            ? "联网学习状态暂时无法确认，已按现有知识继续"
+            : reasonCode === "client_deadline"
+                ? "联网学习未在等待时限内完成，已按现有知识继续"
+                : "联网学习未完成，已按现有知识继续";
+        const fromStatus = genTask.learningProgress.status;
         genTask.learningDeferred = true;
-        const timedOut = error?.name === "AbortError";
-        genTask.learningProgress.message = timedOut
-            ? "本轮联网查证超过等待上限，已按现有知识继续"
-            : "联网查证暂不可用，已按现有知识继续";
-        genTask.logs.push(timedOut
-            ? "! 联网查证超过等待上限，已按现有知识继续"
-            : `! 联网查证未完成，已按现有知识继续: ${error?.message || error}`);
+        genTask.learningProgress = {
+            ...genTask.learningProgress,
+            status: "deferred",
+            reasonCode,
+            message,
+        };
+        if (recordEvent) {
+            recordLearningDebugEvent({
+                kind: "client",
+                stage,
+                endpoint: lastEndpoint,
+                attempt: 0,
+                httpStatus: 0,
+                elapsedMs: Math.max(0, waitMs - Math.max(0, finalDeadline - Date.now())),
+                jobId: genTask.learningProgress.jobId,
+                responseRevision: genTask.learningProgress.revision,
+                fromStatus,
+                toStatus: "deferred",
+                reasonCode,
+            });
+        }
+        if (message !== lastMessage) genTask.logs.push(`! ${message}`);
+    };
+
+    let snapshot: any = null;
+    try {
+        lastEndpoint = "start";
+        const started = await learningRequestBefore({
+            stage,
+            endpoint: "start",
+            url: "/api/learning/start",
+            method: "POST",
+            body: { taskId: genTask.taskId, stage, chosenPathId },
+            deadline: stepDeadline,
+            attempt: 1,
+        });
+        snapshot = started.snapshot;
+        announce(snapshot);
+    } catch (error: any) {
+        const failure = learningFailure(error);
+        lastFailureReason = failure.reasonCode;
+        lastFailureHttpRecorded = failure.httpRecorded;
+        snapshot = await reconcile();
+    }
+
+    while (snapshot?.learningProgress?.jobId
+        && !LEARNING_TERMINAL.has(snapshot.learningProgress.status)
+        && Date.now() < stepDeadline) {
+        try {
+            lastEndpoint = "step";
+            const stepped = await learningRequestBefore({
+                stage,
+                endpoint: "step",
+                url: "/api/learning/step",
+                method: "POST",
+                body: {
+                    taskId: genTask.taskId,
+                    jobId: snapshot.learningProgress.jobId,
+                    revision: snapshot.learningProgress.revision,
+                },
+                deadline: stepDeadline,
+                attempt: 1,
+            });
+            snapshot = stepped.snapshot;
+            announce(snapshot);
+            if (stepped.httpStatus === 409) {
+                snapshot = await reconcile(snapshot?.learningProgress?.jobId) ?? snapshot;
+            }
+        } catch (error: any) {
+            const failure = learningFailure(error);
+            lastFailureReason = failure.reasonCode;
+            lastFailureHttpRecorded = failure.httpRecorded;
+            const reconciled = await reconcile(snapshot?.learningProgress?.jobId);
+            if (reconciled) snapshot = reconciled;
+            else break;
+        }
+        if (!LEARNING_TERMINAL.has(snapshot?.learningProgress?.status) && Date.now() + 200 < stepDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+    }
+
+    if (!LEARNING_TERMINAL.has(snapshot?.learningProgress?.status ?? genTask.learningProgress.status)) {
+        const reconciled = await reconcile(snapshot?.learningProgress?.jobId || genTask.learningProgress.jobId);
+        if (reconciled) snapshot = reconciled;
+    }
+    if (!LEARNING_TERMINAL.has(snapshot?.learningProgress?.status ?? genTask.learningProgress.status)) {
+        markClientDeferred(lastFailureReason, !lastFailureHttpRecorded);
     }
 }
 
@@ -788,7 +1017,7 @@ export async function startGenerate(
 
     // ── Phase 2.8: Planner 前限时查证公开技术缺口 ──
     setPhase("planning", "正在查证目标版本 API 与依赖...");
-    await runLearning("planner", chosenPathId, 40_000);
+    await runLearning("planner", chosenPathId, 44_000);
 
     // ── Phase 3: planning + generating + build (with replan loop) ──
     const firstPlannerAttempt = resumePrepared && genTask.plannerRequestId

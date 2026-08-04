@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     assessKnowledgeNeeds,
     buildDiagnosticKnowledgeNeeds,
+    deduplicateKnowledgeNeeds,
     knowledgeLookupKey,
     learningLookupKeys,
 } from "../../functions/_lib/learning/assessment";
@@ -69,6 +70,21 @@ describe("knowledge need assessment", () => {
 
         expect(knowledgeLookupKey(first)).toBe(knowledgeLookupKey(second));
         expect(learningLookupKeys([second, first])).toEqual([knowledgeLookupKey(first)]);
+    });
+
+    it("deduplicates semantically identical needs by lookup key", () => {
+        const first = makeNeed({ id: "need-first" });
+        const duplicate = makeNeed({ id: "need-duplicate" });
+        const distinct = makeNeed({
+            id: "need-distinct",
+            claim: {
+                subject: "org.bukkit.entity.Player#isOnline",
+                question: "What does Player#isOnline return on Paper 1.21.4?",
+            },
+            scope: { symbol: "org.bukkit.entity.Player#isOnline" },
+        });
+
+        expect(deduplicateKnowledgeNeeds([first, duplicate, distinct])).toEqual([first, distinct]);
     });
 
     it("derives fix needs only from public dependency or API symbols", () => {

@@ -12,6 +12,35 @@ export type GradePath = {
 export type GradeInfo = { level: string; paths: GradePath[] };
 
 export type LearningStatus = "idle" | "queued" | "discovering" | "fetching" | "verifying" | "ready" | "deferred" | "needs_review" | "failed" | "cancelled";
+export type LearningReasonCode =
+    | "no_learning_needed"
+    | "static_contract_covered"
+    | "knowledge_cache_hit"
+    | "responses_not_configured"
+    | "auto_learning_disabled"
+    | "glm_auto_learning_disabled"
+    | "quota_exhausted"
+    | "discovery_timeout"
+    | "discovery_network"
+    | "discovery_http"
+    | "discovery_provider_incomplete"
+    | "discovery_provider_failed"
+    | "discovery_invalid_response"
+    | "no_candidate_sources"
+    | "no_fetchable_sources"
+    | "source_fetch_timeout"
+    | "verification_no_sources"
+    | "verification_timeout"
+    | "verification_http"
+    | "verification_invalid_response"
+    | "verification_failed"
+    | "unresolved_knowledge_needs"
+    | "revision_conflict"
+    | "lease_conflict"
+    | "storage_unavailable"
+    | "client_deadline"
+    | "client_network"
+    | "internal_error";
 export type LearningProgress = {
     jobId: string;
     status: LearningStatus;
@@ -21,6 +50,71 @@ export type LearningProgress = {
     completedNeeds: number;
     sourceCount: number;
     message: string;
+    reasonCode?: LearningReasonCode;
+};
+
+export type LearningProviderStatus = "completed" | "incomplete" | "failed" | "unknown";
+export type LearningJobTelemetry = {
+    version: 1;
+    discoveryAttempts: number;
+    discoveryElapsedMs: number;
+    discoveryTimeouts: number;
+    discoveryRetryableFailures: number;
+    discoveryLastHttpStatus: number;
+    discoveryLastProviderStatus: LearningProviderStatus;
+    candidateNeedCount: number;
+    candidateUrlCount: number;
+    sourceAttempts: number;
+    sourceAccepted: number;
+    sourceRejected: number;
+    sourceInvalid: number;
+    sourceDeduplicated: number;
+    sourceTimeouts: number;
+    sourceHttp4xx: number;
+    sourceHttp5xx: number;
+    sourceTooLarge: number;
+    sourceUnsupportedContentType: number;
+    sourceTooThin: number;
+    sourceElapsedMs: number;
+    sourceBudgetExhausted: number;
+    verificationAttempts: number;
+    verificationCompleted: number;
+    verificationSupported: number;
+    verificationContradicted: number;
+    verificationInsufficient: number;
+    verificationFailures: number;
+    verificationTimeouts: number;
+    verificationHttp4xx: number;
+    verificationHttp5xx: number;
+    verificationInvalidResponses: number;
+    verificationElapsedMs: number;
+};
+export type LearningDebugMeta = {
+    schemaVersion: "learning.debug.v1";
+    jobId: string;
+    stage: "planner" | "fix";
+    status: Exclude<LearningStatus, "idle">;
+    revision: number;
+    reasonCode?: LearningReasonCode;
+    updatedAt: number;
+    telemetry: LearningJobTelemetry;
+};
+export type LearningDebugEvent = {
+    at: number;
+    kind: "http" | "transition" | "conflict" | "client";
+    stage: "planner" | "fix";
+    endpoint: "start" | "step" | "status";
+    attempt: number;
+    httpStatus: number;
+    elapsedMs: number;
+    jobId?: string;
+    requestRevision?: number;
+    responseRevision?: number;
+    fromStatus?: LearningStatus;
+    toStatus?: LearningStatus;
+    reasonCode?: LearningReasonCode;
+    conflictReason?: "revision" | "lease";
+    telemetry?: LearningJobTelemetry;
 };
 export type KnowledgeUsed = {
     knowledgeId: string;
@@ -58,6 +152,97 @@ function emptyLearningProgress(): LearningProgress {
         completedNeeds: 0,
         sourceCount: 0,
         message: "",
+    };
+}
+
+const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
+    "no_learning_needed", "static_contract_covered", "knowledge_cache_hit",
+    "responses_not_configured", "auto_learning_disabled", "glm_auto_learning_disabled",
+    "quota_exhausted", "discovery_timeout", "discovery_network", "discovery_http",
+    "discovery_provider_incomplete", "discovery_provider_failed", "discovery_invalid_response",
+    "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
+    "verification_timeout", "verification_http", "verification_invalid_response",
+    "verification_failed", "unresolved_knowledge_needs", "revision_conflict", "lease_conflict",
+    "storage_unavailable", "client_deadline", "client_network", "internal_error",
+]);
+const LEARNING_STATUSES = new Set<LearningStatus>([
+    "idle", "queued", "discovering", "fetching", "verifying", "ready",
+    "deferred", "needs_review", "failed", "cancelled",
+]);
+
+function safeCount(value: unknown): number {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+        ? Math.min(1_000_000_000, Math.floor(number))
+        : 0;
+}
+
+export function normalizeLearningTelemetry(value: unknown): LearningJobTelemetry {
+    const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const providerStatus = raw.discoveryLastProviderStatus;
+    return {
+        version: 1,
+        discoveryAttempts: safeCount(raw.discoveryAttempts),
+        discoveryElapsedMs: safeCount(raw.discoveryElapsedMs),
+        discoveryTimeouts: safeCount(raw.discoveryTimeouts),
+        discoveryRetryableFailures: safeCount(raw.discoveryRetryableFailures),
+        discoveryLastHttpStatus: safeCount(raw.discoveryLastHttpStatus),
+        discoveryLastProviderStatus: providerStatus === "completed"
+            || providerStatus === "incomplete"
+            || providerStatus === "failed"
+            ? providerStatus
+            : "unknown",
+        candidateNeedCount: safeCount(raw.candidateNeedCount),
+        candidateUrlCount: safeCount(raw.candidateUrlCount),
+        sourceAttempts: safeCount(raw.sourceAttempts),
+        sourceAccepted: safeCount(raw.sourceAccepted),
+        sourceRejected: safeCount(raw.sourceRejected),
+        sourceInvalid: safeCount(raw.sourceInvalid),
+        sourceDeduplicated: safeCount(raw.sourceDeduplicated),
+        sourceTimeouts: safeCount(raw.sourceTimeouts),
+        sourceHttp4xx: safeCount(raw.sourceHttp4xx),
+        sourceHttp5xx: safeCount(raw.sourceHttp5xx),
+        sourceTooLarge: safeCount(raw.sourceTooLarge),
+        sourceUnsupportedContentType: safeCount(raw.sourceUnsupportedContentType),
+        sourceTooThin: safeCount(raw.sourceTooThin),
+        sourceElapsedMs: safeCount(raw.sourceElapsedMs),
+        sourceBudgetExhausted: safeCount(raw.sourceBudgetExhausted),
+        verificationAttempts: safeCount(raw.verificationAttempts),
+        verificationCompleted: safeCount(raw.verificationCompleted),
+        verificationSupported: safeCount(raw.verificationSupported),
+        verificationContradicted: safeCount(raw.verificationContradicted),
+        verificationInsufficient: safeCount(raw.verificationInsufficient),
+        verificationFailures: safeCount(raw.verificationFailures),
+        verificationTimeouts: safeCount(raw.verificationTimeouts),
+        verificationHttp4xx: safeCount(raw.verificationHttp4xx),
+        verificationHttp5xx: safeCount(raw.verificationHttp5xx),
+        verificationInvalidResponses: safeCount(raw.verificationInvalidResponses),
+        verificationElapsedMs: safeCount(raw.verificationElapsedMs),
+    };
+}
+
+export function normalizeLearningDebugMeta(value: unknown): LearningDebugMeta | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const raw = value as Record<string, unknown>;
+    const jobId = typeof raw.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)
+        ? raw.jobId
+        : "";
+    const stage = raw.stage === "fix" ? "fix" : raw.stage === "planner" ? "planner" : undefined;
+    const status = typeof raw.status === "string" && raw.status !== "idle"
+        && LEARNING_STATUSES.has(raw.status as LearningStatus)
+        ? raw.status as Exclude<LearningStatus, "idle">
+        : undefined;
+    if (raw.schemaVersion !== "learning.debug.v1" || !jobId || !stage || !status) return undefined;
+    const rawReason = typeof raw.reasonCode === "string" ? raw.reasonCode as LearningReasonCode : undefined;
+    return {
+        schemaVersion: "learning.debug.v1",
+        jobId,
+        stage,
+        status,
+        revision: optionalCount(raw.revision) ?? 0,
+        reasonCode: rawReason && LEARNING_REASON_CODES.has(rawReason) ? rawReason : undefined,
+        updatedAt: optionalCount(raw.updatedAt) ?? 0,
+        telemetry: normalizeLearningTelemetry(raw.telemetry),
     };
 }
 
@@ -126,6 +311,8 @@ export type GenTask = {
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
     learningDeferred: boolean;
+    learningDebugEvents: LearningDebugEvent[];
+    learningDebugDroppedEvents: number;
 };
 
 export const genTask = reactive<GenTask>({
@@ -161,7 +348,77 @@ export const genTask = reactive<GenTask>({
     learningProgress: emptyLearningProgress(),
     knowledgeUsed: [],
     learningDeferred: false,
+    learningDebugEvents: [],
+    learningDebugDroppedEvents: 0,
 });
+
+const MAX_LEARNING_DEBUG_EVENTS = 256;
+
+function optionalCount(value: unknown): number | undefined {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0
+        ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(number))
+        : undefined;
+}
+
+function normalizeLearningDebugEvent(value: unknown): LearningDebugEvent | null {
+    if (!value || typeof value !== "object") return null;
+    const raw = value as Record<string, unknown>;
+    const kind = raw.kind === "http" || raw.kind === "transition"
+        || raw.kind === "conflict" || raw.kind === "client"
+        ? raw.kind
+        : undefined;
+    const stage = raw.stage === "planner" || raw.stage === "fix" ? raw.stage : undefined;
+    const endpoint = raw.endpoint === "start" || raw.endpoint === "step" || raw.endpoint === "status"
+        ? raw.endpoint
+        : undefined;
+    if (!kind || !stage || !endpoint) return null;
+    const jobId = typeof raw.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)
+        ? raw.jobId
+        : undefined;
+    const fromStatus = typeof raw.fromStatus === "string" && LEARNING_STATUSES.has(raw.fromStatus as LearningStatus)
+        ? raw.fromStatus as LearningStatus
+        : undefined;
+    const toStatus = typeof raw.toStatus === "string" && LEARNING_STATUSES.has(raw.toStatus as LearningStatus)
+        ? raw.toStatus as LearningStatus
+        : undefined;
+    const rawReason = typeof raw.reasonCode === "string" ? raw.reasonCode as LearningReasonCode : undefined;
+    return {
+        at: optionalCount(raw.at) || Date.now(),
+        kind,
+        stage,
+        endpoint,
+        attempt: safeCount(raw.attempt),
+        httpStatus: safeCount(raw.httpStatus),
+        elapsedMs: safeCount(raw.elapsedMs),
+        jobId,
+        requestRevision: optionalCount(raw.requestRevision),
+        responseRevision: optionalCount(raw.responseRevision),
+        fromStatus,
+        toStatus,
+        reasonCode: rawReason && LEARNING_REASON_CODES.has(rawReason) ? rawReason : undefined,
+        conflictReason: raw.conflictReason === "revision" || raw.conflictReason === "lease"
+            ? raw.conflictReason
+            : undefined,
+        telemetry: raw.telemetry ? normalizeLearningTelemetry(raw.telemetry) : undefined,
+    };
+}
+
+export function recordLearningDebugEvent(
+    event: Omit<LearningDebugEvent, "at"> & { at?: number },
+): void {
+    const normalized = normalizeLearningDebugEvent({ ...event, at: event.at ?? Date.now() });
+    if (!normalized) return;
+    genTask.learningDebugEvents.push(normalized);
+    if (genTask.learningDebugEvents.length > MAX_LEARNING_DEBUG_EVENTS) {
+        const dropped = genTask.learningDebugEvents.length - MAX_LEARNING_DEBUG_EVENTS;
+        genTask.learningDebugEvents.splice(0, dropped);
+        genTask.learningDebugDroppedEvents = Math.min(
+            1_000_000_000,
+            genTask.learningDebugDroppedEvents + dropped,
+        );
+    }
+}
 
 export function resetGenTask() {
     genTask.taskId = "";
@@ -196,6 +453,8 @@ export function resetGenTask() {
     genTask.learningProgress = emptyLearningProgress();
     genTask.knowledgeUsed = [];
     genTask.learningDeferred = false;
+    genTask.learningDebugEvents = [];
+    genTask.learningDebugDroppedEvents = 0;
     clarifyWaiting.value = false;
     pathGateWaiting.value = false;
     clearPersistedGenTask();
@@ -247,6 +506,8 @@ function writeGenTaskSnapshot() {
             learningProgress: genTask.learningProgress,
             knowledgeUsed: genTask.knowledgeUsed,
             learningDeferred: genTask.learningDeferred,
+            learningDebugEvents: genTask.learningDebugEvents.slice(-MAX_LEARNING_DEBUG_EVENTS),
+            learningDebugDroppedEvents: genTask.learningDebugDroppedEvents,
             error: genTask.error,
             t: Date.now(),
         };
@@ -298,6 +559,17 @@ export function restoreGenTask(): boolean {
         genTask.learningProgress = s.learningProgress || emptyLearningProgress();
         genTask.knowledgeUsed = s.knowledgeUsed || [];
         genTask.learningDeferred = !!s.learningDeferred;
+        const rawLearningDebugEvents = Array.isArray(s.learningDebugEvents) ? s.learningDebugEvents : [];
+        const boundedLearningDebugEvents = rawLearningDebugEvents.slice(-MAX_LEARNING_DEBUG_EVENTS);
+        genTask.learningDebugEvents = boundedLearningDebugEvents
+            .map(normalizeLearningDebugEvent)
+            .filter((event: LearningDebugEvent | null): event is LearningDebugEvent => !!event);
+        const restoreDropped = Math.max(0, rawLearningDebugEvents.length - MAX_LEARNING_DEBUG_EVENTS)
+            + Math.max(0, boundedLearningDebugEvents.length - genTask.learningDebugEvents.length);
+        genTask.learningDebugDroppedEvents = Math.min(
+            1_000_000_000,
+            safeCount(s.learningDebugDroppedEvents) + restoreDropped,
+        );
         genTask.error = s.error || "";
         return true;
     } catch { return false; }
@@ -308,6 +580,7 @@ watch(
     () => [genTask.phase, genTask.files.length, genTask.currentIndex, genTask.logs.length,
         genTask.files.filter(f => f.status === "done").length,
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
+        genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
         genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt],
     persistGenTask,
 );

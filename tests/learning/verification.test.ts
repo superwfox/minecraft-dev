@@ -90,9 +90,41 @@ describe("knowledge verification", () => {
         expect(decideKnowledgeStatus(makeNeed({ risk: "high" }), dualEvidence, [officialA, officialB], now).status)
             .toBe("needs_review");
         expect(decideKnowledgeStatus(makeNeed({ kind: "strategy" }), makeVerification(), [makeSource()], now).status)
-            .toBe("draft");
+            .toBe("needs_review");
         expect(decideKnowledgeStatus(makeNeed(), makeVerification({ confidence: 0.7 }), [makeSource()], now).status)
             .toBe("needs_review");
+    });
+
+    it("retains provider usage when a 2xx verifier payload is invalid", async () => {
+        const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+            choices: [{ message: { content: "{}" } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch;
+        const llm: LLMProvider = {
+            providerId: "deepseek",
+            url: "https://api.deepseek.com/v1/chat/completions",
+            apiKey: "test-key",
+            byok: false,
+            learningCacheRead: true,
+            canAutoLearn: true,
+            modelFor: () => "deepseek-v4-pro",
+        };
+
+        const result = await verifyKnowledgeNeed({
+            llm,
+            need: makeNeed(),
+            sources: [makeSource()],
+            fetchImpl,
+        });
+
+        expect(result).toMatchObject({
+            ok: false,
+            reasonCode: "verification_invalid_response",
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+        });
     });
 
     it("keeps fetched prompt injection text in the untrusted user-data boundary", async () => {

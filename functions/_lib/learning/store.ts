@@ -165,6 +165,7 @@ export async function createOrGetLearningJob(
         stage: LearningStage;
         lookupHash: string;
         needs: KnowledgeNeed[];
+        work?: LearningJobWork;
         now?: number;
     },
 ): Promise<LearningJobRecord> {
@@ -176,7 +177,7 @@ export async function createOrGetLearningJob(
             job_id, owner_uid, generation_task_id, stage, lookup_hash, status,
             needs_json, work_json, result_ids_json, revision, lease_token,
             lease_until, error, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, '{}', '[]', 0, '', 0, '', ?7, ?7)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, '[]', 0, '', 0, '', ?8, ?8)
     `).bind(
         jobId,
         input.ownerUid,
@@ -184,6 +185,7 @@ export async function createOrGetLearningJob(
         input.stage,
         input.lookupHash,
         JSON.stringify(input.needs),
+        JSON.stringify(input.work ?? {}),
         now,
     ).run();
 

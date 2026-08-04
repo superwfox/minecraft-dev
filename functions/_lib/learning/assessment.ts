@@ -168,6 +168,16 @@ export function knowledgeLookupKey(need: KnowledgeNeed): string {
     ].join("::");
 }
 
+export function deduplicateKnowledgeNeeds(needs: KnowledgeNeed[]): KnowledgeNeed[] {
+    const seen = new Set<string>();
+    return needs.filter((need) => {
+        const lookupKey = knowledgeLookupKey(need);
+        if (seen.has(lookupKey)) return false;
+        seen.add(lookupKey);
+        return true;
+    });
+}
+
 export function learningLookupKeys(needs: KnowledgeNeed[]): string[] {
     return [...new Set(needs.map(knowledgeLookupKey))].sort();
 }

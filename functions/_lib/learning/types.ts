@@ -51,6 +51,36 @@ export interface VerificationResult {
 }
 
 export type LearningStage = "planner" | "fix";
+export type LearningProviderStatus = "completed" | "incomplete" | "failed" | "unknown";
+export type LearningReasonCode =
+    | "no_learning_needed"
+    | "static_contract_covered"
+    | "knowledge_cache_hit"
+    | "responses_not_configured"
+    | "auto_learning_disabled"
+    | "glm_auto_learning_disabled"
+    | "quota_exhausted"
+    | "discovery_timeout"
+    | "discovery_network"
+    | "discovery_http"
+    | "discovery_provider_incomplete"
+    | "discovery_provider_failed"
+    | "discovery_invalid_response"
+    | "no_candidate_sources"
+    | "no_fetchable_sources"
+    | "source_fetch_timeout"
+    | "verification_no_sources"
+    | "verification_timeout"
+    | "verification_http"
+    | "verification_invalid_response"
+    | "verification_failed"
+    | "unresolved_knowledge_needs"
+    | "revision_conflict"
+    | "lease_conflict"
+    | "storage_unavailable"
+    | "client_deadline"
+    | "client_network"
+    | "internal_error";
 export type LearningJobStatus =
     | "queued"
     | "discovering"
@@ -67,12 +97,51 @@ export interface LearningCandidate {
     urls: string[];
 }
 
+export interface LearningJobTelemetry {
+    version: 1;
+    discoveryAttempts: number;
+    discoveryElapsedMs: number;
+    discoveryTimeouts: number;
+    discoveryRetryableFailures: number;
+    discoveryLastHttpStatus: number;
+    discoveryLastProviderStatus: LearningProviderStatus;
+    candidateNeedCount: number;
+    candidateUrlCount: number;
+    sourceAttempts: number;
+    sourceAccepted: number;
+    sourceRejected: number;
+    sourceInvalid: number;
+    sourceDeduplicated: number;
+    sourceTimeouts: number;
+    sourceHttp4xx: number;
+    sourceHttp5xx: number;
+    sourceTooLarge: number;
+    sourceUnsupportedContentType: number;
+    sourceTooThin: number;
+    sourceElapsedMs: number;
+    sourceBudgetExhausted: number;
+    verificationAttempts: number;
+    verificationCompleted: number;
+    verificationSupported: number;
+    verificationContradicted: number;
+    verificationInsufficient: number;
+    verificationFailures: number;
+    verificationTimeouts: number;
+    verificationHttp4xx: number;
+    verificationHttp5xx: number;
+    verificationInvalidResponses: number;
+    verificationElapsedMs: number;
+}
+
 export interface LearningJobWork {
     candidates?: LearningCandidate[];
     sourceIds?: string[];
     verifications?: VerificationResult[];
+    cachedKnowledgeIds?: string[];
+    verificationAttemptsByNeed?: Record<string, number>;
     currentNeed?: string;
     completedNeeds?: number;
+    telemetry?: LearningJobTelemetry;
 }
 
 export interface LearningJobRecord {
@@ -132,6 +201,17 @@ export interface LearningSourceRecord {
 
 export type LearningStatus = "idle" | LearningJobStatus;
 
+export interface LearningDebugMeta {
+    schemaVersion: "learning.debug.v1";
+    jobId: string;
+    stage: LearningStage;
+    status: LearningJobStatus;
+    revision: number;
+    reasonCode?: LearningReasonCode;
+    updatedAt: number;
+    telemetry: LearningJobTelemetry;
+}
+
 export interface LearningProgress {
     jobId: string;
     status: LearningStatus;
@@ -141,6 +221,7 @@ export interface LearningProgress {
     completedNeeds: number;
     sourceCount: number;
     message: string;
+    reasonCode?: LearningReasonCode;
 }
 
 export interface KnowledgeUsed {

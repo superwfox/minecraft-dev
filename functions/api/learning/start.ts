@@ -2,6 +2,7 @@ import { partitionKnowledgeNeedsByApiContracts } from "../../_lib/apiContracts";
 import { resolveLLM } from "../../_lib/llm";
 import {
     assessKnowledgeNeeds,
+    deduplicateKnowledgeNeeds,
     knowledgeLookupKey,
     learningLookupHash,
     learningLookupKeys,
@@ -67,15 +68,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }))
             : [],
     }, assessment.accepted);
-    const needs = contractCoverage.uncovered;
+    const needs = deduplicateKnowledgeNeeds(contractCoverage.uncovered);
     const lookupKeys = learningLookupKeys(needs);
 
     if (!needs.length) {
         return json(learningSnapshot(null, [], 0, {
             status: "ready",
+            reasonCode: contractCoverage.covered.length
+                ? "static_contract_covered"
+                : "no_learning_needed",
             message: contractCoverage.covered.length
                 ? `已有静态 API 契约覆盖 ${contractCoverage.covered.length} 个技术缺口，无需联网查证`
-                : "当前需求没有需要联网查证的技术缺口",
+                : undefined,
         }));
     }
 
@@ -86,6 +90,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!pendingNeeds.length) {
             return json(learningSnapshot(null, active, 0, {
                 status: "ready",
+                reasonCode: "knowledge_cache_hit",
                 message: `已复用 ${active.length} 条经过验证的公共知识`,
             }));
         }
@@ -94,9 +99,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!llm.canAutoLearn) {
             return json(learningSnapshot(null, active, 0, {
                 status: "deferred",
-                message: llm.providerId === "glm"
-                    ? "GLM BYOK 不触发自动联网学习，已按现有知识继续"
-                    : "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续",
+                reasonCode: llm.providerId === "glm"
+                    ? "glm_auto_learning_disabled"
+                    : "auto_learning_disabled",
+                message: llm.providerId === "deepseek"
+                    ? "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续"
+                    : undefined,
             }));
         }
 
@@ -106,6 +114,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             stage,
             lookupHash: await learningLookupHash(pendingNeeds),
             needs: pendingNeeds,
+            work: active.length ? {
+                cachedKnowledgeIds: active.map((item) => item.knowledgeId),
+            } : undefined,
         });
         return json(learningSnapshot(job, active, 0, active.length ? {
             message: `已复用 ${active.length} 条公共知识，继续查证 ${pendingNeeds.length} 个缺口`,
@@ -114,7 +125,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!(error instanceof LearningStoreUnavailableError)) console.warn("learning start failed", error);
         return json(learningSnapshot(null, [], 0, {
             status: "deferred",
-            message: "学习存储暂不可用，已按现有知识继续",
-        }));
+            reasonCode: "storage_unavailable",
+        }), 503);
     }
 };

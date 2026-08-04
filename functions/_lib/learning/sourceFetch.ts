@@ -3,6 +3,8 @@ import type { KnowledgeNeed, LearningSourceRecord } from "./types";
 const MAX_REDIRECTS = 3;
 const MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_BUDGET_MS = 12_000;
+const MAX_BUDGET_MS = 60_000;
 const ALLOWED_CONTENT_TYPES = [
     "text/html",
     "text/plain",
@@ -340,14 +342,54 @@ export async function fetchLearningSource(input: {
     };
 }
 
+export interface LearningSourceFetchTelemetry {
+    sourceAttempts: number;
+    sourceAccepted: number;
+    sourceRejected: number;
+    sourceInvalid: number;
+    sourceDeduplicated: number;
+    sourceTimeouts: number;
+    sourceHttp4xx: number;
+    sourceHttp5xx: number;
+    sourceTooLarge: number;
+    sourceUnsupportedContentType: number;
+    sourceTooThin: number;
+    sourceElapsedMs: number;
+    sourceBudgetExhausted: number;
+}
+
+function recordSourceFailure(
+    telemetry: LearningSourceFetchTelemetry,
+    error: unknown,
+): void {
+    telemetry.sourceRejected++;
+    const name = error && typeof error === "object" ? String((error as { name?: unknown }).name || "") : "";
+    const code = error && typeof error === "object" ? String((error as { message?: unknown }).message || "") : "";
+    if (name === "AbortError") telemetry.sourceTimeouts++;
+    else if (/^source_http_4\d\d$/.test(code)) telemetry.sourceHttp4xx++;
+    else if (/^source_http_5\d\d$/.test(code)) telemetry.sourceHttp5xx++;
+    else if (code === "source_too_large") telemetry.sourceTooLarge++;
+    else if (code === "unsupported_content_type") telemetry.sourceUnsupportedContentType++;
+    else if (code === "source_too_thin") telemetry.sourceTooThin++;
+    else telemetry.sourceInvalid++;
+}
+
 export async function fetchLearningSources(input: {
     jobId: string;
     needs: KnowledgeNeed[];
     candidates: { needId: string; urls: string[] }[];
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
+    budgetMs?: number;
     maxSources?: number;
-}): Promise<{ sources: LearningSourceRecord[]; errors: string[] }> {
+}): Promise<{ sources: LearningSourceRecord[]; telemetry: LearningSourceFetchTelemetry }> {
+    const startedAt = Date.now();
+    const configuredBudget = Number(input.budgetMs);
+    const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
+        ? Math.min(MAX_BUDGET_MS, Math.floor(configuredBudget))
+        : DEFAULT_BUDGET_MS;
+    const deadline = startedAt + budgetMs;
+    const remainingMs = () => Math.max(0, deadline - Date.now());
     const needs = new Map(input.needs.map((need) => [need.id, need]));
     const urlsByNeed = new Map([...needs.keys()].map((needId) => [needId, [] as string[]]));
     for (const candidate of input.candidates) {
@@ -360,41 +402,83 @@ export async function fetchLearningSources(input: {
         sourceCount: 0,
     }));
     const sources: LearningSourceRecord[] = [];
-    const errors: string[] = [];
+    const telemetry: LearningSourceFetchTelemetry = {
+        sourceAttempts: 0,
+        sourceAccepted: 0,
+        sourceRejected: 0,
+        sourceInvalid: 0,
+        sourceDeduplicated: 0,
+        sourceTimeouts: 0,
+        sourceHttp4xx: 0,
+        sourceHttp5xx: 0,
+        sourceTooLarge: 0,
+        sourceUnsupportedContentType: 0,
+        sourceTooThin: 0,
+        sourceElapsedMs: 0,
+        sourceBudgetExhausted: 0,
+    };
     const seenCandidates = new Set<string>();
     const acceptedSources = new Set<string>();
     const maxSources = Math.max(1, Math.min(6, input.maxSources ?? 6));
+    const finish = () => {
+        telemetry.sourceElapsedMs = Math.max(0, Date.now() - startedAt);
+        return { sources, telemetry };
+    };
+    const budgetExhausted = () => {
+        telemetry.sourceBudgetExhausted = 1;
+        return "budget_exhausted" as const;
+    };
 
-    const tryNext = async (queue: typeof queues[number]): Promise<"success" | "attempted" | "exhausted"> => {
+    const tryNext = async (queue: typeof queues[number]): Promise<
+        "success" | "attempted" | "exhausted" | "budget_exhausted"
+    > => {
         while (queue.index < queue.urls.length) {
+            if (remainingMs() <= 0) return budgetExhausted();
             const rawUrl = queue.urls[queue.index++];
+            telemetry.sourceAttempts++;
             let canonicalUrl: string;
             try {
                 canonicalUrl = validatePublicSourceUrl(rawUrl).href;
-            } catch (error: any) {
-                errors.push(`${queue.need.id}:${error?.message || "invalid_url"}`);
+            } catch {
+                telemetry.sourceRejected++;
+                telemetry.sourceInvalid++;
                 continue;
             }
             const candidateKey = `${queue.need.id}\n${canonicalUrl}`;
-            if (seenCandidates.has(candidateKey)) continue;
+            if (seenCandidates.has(candidateKey)) {
+                telemetry.sourceRejected++;
+                telemetry.sourceDeduplicated++;
+                continue;
+            }
             seenCandidates.add(candidateKey);
+            const remaining = remainingMs();
+            if (remaining <= 0) return budgetExhausted();
+            const configuredTimeout = Number(input.timeoutMs);
+            const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+                ? Math.floor(configuredTimeout)
+                : DEFAULT_TIMEOUT_MS;
             try {
                 const source = await fetchLearningSource({
                     jobId: input.jobId,
                     need: queue.need,
                     url: canonicalUrl,
                     fetchImpl: input.fetchImpl,
-                    timeoutMs: input.timeoutMs,
+                    timeoutMs: Math.max(1, Math.min(timeoutMs, remaining)),
                 });
                 const sourceKey = `${queue.need.id}\n${source.canonicalUrl}`;
-                if (acceptedSources.has(sourceKey)) return "attempted";
+                if (acceptedSources.has(sourceKey)) {
+                    telemetry.sourceRejected++;
+                    telemetry.sourceDeduplicated++;
+                    return "attempted";
+                }
                 acceptedSources.add(sourceKey);
                 queue.sourceCount++;
                 sources.push(source);
+                telemetry.sourceAccepted++;
                 return "success";
-            } catch (error: any) {
-                errors.push(`${queue.need.id}:${error?.message || "fetch_failed"}`);
-                return "attempted";
+            } catch (error) {
+                recordSourceFailure(telemetry, error);
+                return remainingMs() <= 0 ? budgetExhausted() : "attempted";
             }
         }
         return "exhausted";
@@ -407,8 +491,9 @@ export async function fetchLearningSources(input: {
             if (queue.sourceCount || queue.index >= queue.urls.length) continue;
             hasUnsourcedCandidates = true;
             const outcome = await tryNext(queue);
+            if (outcome === "budget_exhausted") return finish();
             if (outcome !== "exhausted") attempted = true;
-            if (sources.length >= maxSources) return { sources, errors };
+            if (sources.length >= maxSources) return finish();
         }
         if (!hasUnsourcedCandidates || !attempted) break;
     }
@@ -418,10 +503,11 @@ export async function fetchLearningSources(input: {
         for (const queue of queues) {
             if (queue.index >= queue.urls.length) continue;
             const outcome = await tryNext(queue);
+            if (outcome === "budget_exhausted") return finish();
             if (outcome !== "exhausted") attempted = true;
-            if (sources.length >= maxSources) return { sources, errors };
+            if (sources.length >= maxSources) return finish();
         }
         if (!attempted) break;
     }
-    return { sources, errors };
+    return finish();
 }
