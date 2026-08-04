@@ -281,11 +281,12 @@ data: [DONE]
 | 变量名 | 用途 | 获取方式 |
 |--------|------|---------|
 | `DEEPSEEK_API_KEY` | DeepSeek API 认证 | https://platform.deepseek.com |
+| `DEEPSEEK_RESPONSES_WEB_SEARCH` | DeepSeek Responses 自动联网学习开关；默认关闭，接受 `1`、`true`、`yes` | 设置为 `true` |
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
 | `XFYUN_APP_ID` / `XFYUN_API_KEY` / `XFYUN_API_SECRET` | 讯飞语音 | https://console.xfyun.cn |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。该开关只允许平台 DeepSeek 在遇到未被静态契约或公共知识覆盖的原子技术缺口时启动 URL discovery，并不强制每个任务联网。GLM BYOK 即使配置该变量也只读取已有公共知识，不会触发 DeepSeek 自动联网。
 
 ## KV 绑定
 
@@ -295,4 +296,4 @@ data: [DONE]
 
 ## D1 绑定
 
-生产环境以变量名 `DB` 绑定 D1 数据库，并执行 `migrations/0001_generation_tasks.sql` 初始化表结构。D1 只保存生成任务和单任务成本；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。
+生产环境以变量名 `DB` 绑定 D1 数据库，并按编号依次执行 `migrations/0001_generation_tasks.sql`、`0002_autonomous_learning.sql`、`0003_generation_task_quota.sql`、`0004_generation_task_planner_lease.sql`。Cloudflare Pages 部署不会自动执行这些 migration；已有数据库发布新版本时只执行尚未应用的后续文件。D1 保存生成任务、单任务成本和公共技术知识；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。

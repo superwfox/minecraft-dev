@@ -113,7 +113,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             context.env,
             current,
             uid,
-            "当前模型配置不允许继续自动联网学习，已按现有知识继续",
+            llm.providerId === "glm"
+                ? "GLM BYOK 不触发自动联网学习，已按现有知识继续"
+                : "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续",
             "auto_learning_unavailable",
         ));
     }

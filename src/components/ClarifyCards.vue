@@ -455,6 +455,8 @@ onUnmounted(() => {
 
 <style scoped>
 .clarify-cards {
+    --cc-head-top: 118px;
+    --cc-stage-shift: 28px;
     position: fixed;
     inset: 0;
     z-index: 15;
@@ -470,7 +472,7 @@ onUnmounted(() => {
 
 .cc-head {
     position: fixed;
-    top: 84px;
+    top: var(--cc-head-top);
     left: 0;
     right: 0;
     z-index: 600;
@@ -538,6 +540,7 @@ onUnmounted(() => {
     inset: 0;
     width: 100%;
     height: 100%;
+    transform: translateY(var(--cc-stage-shift));
 }
 
 .cc-card {
@@ -676,6 +679,24 @@ onUnmounted(() => {
     font-size: 12px;
     color: rgba(209, 200, 182, 0.5);
     letter-spacing: 0.04em;
+}
+
+@media (max-width: 820px) {
+    .clarify-cards {
+        --cc-head-top: 92px;
+        --cc-stage-shift: 20px;
+    }
+}
+
+@media (max-height: 760px) {
+    .clarify-cards {
+        --cc-head-top: 104px;
+        --cc-stage-shift: 14px;
+    }
+}
+
+@media (max-width: 820px) and (max-height: 760px) {
+    .clarify-cards { --cc-head-top: 84px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

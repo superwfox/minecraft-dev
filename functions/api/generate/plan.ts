@@ -8,6 +8,7 @@ import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage }
 import type { KnowledgeNeed } from "../../_lib/learning/types";
 import {
     acquireTaskPlannerLease,
+    assertBoundTaskStoreSchema,
     cleanupExpiredTasks,
     getOwnedTask,
     markTaskQuotaExhausted,
@@ -15,6 +16,7 @@ import {
     putTaskWithPlannerLease,
     releaseTaskPlannerLease,
     renewTaskPlannerLease,
+    TaskStoreUnavailableError,
 } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
@@ -275,6 +277,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // ─── Mode 1: initialize task, no plan yet ───
     if (!body.taskId) {
+        try {
+            await assertBoundTaskStoreSchema(context.env);
+        } catch (error) {
+            const message = error instanceof TaskStoreUnavailableError
+                ? error.message
+                : "D1 任务数据库暂不可用，请稍后重试";
+            return new Response(JSON.stringify({
+                error: message,
+                code: "TASK_STORE_MIGRATION_REQUIRED",
+            }), {
+                status: 503,
+                headers: { "Content-Type": "application/json", "Retry-After": "30" },
+            });
+        }
+
         const { userPrompt, coreType, version } = body;
         // 建任务即拉取已挂载 skill，让 clarify / grade / plan / fileGen 全程都能感知能力
         const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];

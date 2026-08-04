@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
     acquireTaskPlannerLease,
     applyTaskQuotaExhausted,
+    assertBoundTaskStoreSchema,
     deleteTask,
     getOwnedTask,
     renewTaskPlannerLease,
@@ -17,6 +18,43 @@ function createMemoryKv(initial: Record<string, string> = {}) {
         delete: async (key: string) => { values.delete(key); },
     } as unknown as KVNamespace;
     return { namespace, values };
+}
+
+const REQUIRED_TASK_COLUMNS = [
+    "task_id",
+    "owner_uid",
+    "cost_total",
+    "cost_consumed",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "quota_exhausted",
+    "planner_lease_token",
+    "planner_lease_until",
+];
+
+function createSchemaD1(columns = REQUIRED_TASK_COLUMNS) {
+    const database = {
+        prepare(sql: string) {
+            return {
+                async all() {
+                    if (sql.includes("sqlite_master")) {
+                        return {
+                            results: [
+                                { name: "generation_tasks" },
+                                { name: "generation_task_chunks" },
+                            ],
+                        };
+                    }
+                    if (sql.includes("PRAGMA table_info(generation_tasks)")) {
+                        return { results: columns.map(name => ({ name })) };
+                    }
+                    throw new Error(`unexpected schema query: ${sql}`);
+                },
+            };
+        },
+    } as unknown as D1Database;
+    return database;
 }
 
 function createQuotaMarkerD1(taskId: string, ownerUid: string, raw: string) {
@@ -86,6 +124,37 @@ function createPlannerLeaseD1(ownerUid: string) {
     } as unknown as D1Database;
     return { database, currentLease: () => ({ leaseToken, leaseUntil }) };
 }
+
+describe("task store schema gate", () => {
+    it("accepts the fully migrated task schema", async () => {
+        const { namespace } = createMemoryKv();
+
+        await expect(assertBoundTaskStoreSchema({
+            TASKS: namespace,
+            DB: createSchemaD1(),
+        })).resolves.toBeUndefined();
+    });
+
+    it("points to the quota migration when quota_exhausted is missing", async () => {
+        const { namespace } = createMemoryKv();
+        const columns = REQUIRED_TASK_COLUMNS.filter(name => name !== "quota_exhausted");
+
+        await expect(assertBoundTaskStoreSchema({
+            TASKS: namespace,
+            DB: createSchemaD1(columns),
+        })).rejects.toThrow("0003_generation_task_quota.sql");
+    });
+
+    it("points to the Planner migration when lease columns are missing", async () => {
+        const { namespace } = createMemoryKv();
+        const columns = REQUIRED_TASK_COLUMNS.filter(name => !name.startsWith("planner_lease_"));
+
+        await expect(assertBoundTaskStoreSchema({
+            TASKS: namespace,
+            DB: createSchemaD1(columns),
+        })).rejects.toThrow("0004_generation_task_planner_lease.sql");
+    });
+});
 
 describe("task quota state overlay", () => {
     it("sets the durable quota flag without discarding generation state", () => {

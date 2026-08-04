@@ -96,7 +96,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 status: "deferred",
                 message: llm.providerId === "glm"
                     ? "GLM BYOK 不触发自动联网学习，已按现有知识继续"
-                    : "联网学习未启用，已按现有知识继续",
+                    : "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续",
             }));
         }
 

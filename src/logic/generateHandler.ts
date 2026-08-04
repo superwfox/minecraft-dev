@@ -35,11 +35,30 @@ export function interruptGenerate() {
     cancelPendingInput();
 }
 
-/** 不可重试错误（鉴权 / 额度），跳过 post() 的重试逻辑 */
+/** 不可重试错误（鉴权 / 额度 / 请求状态），跳过自动重试。 */
 function noRetry(msg: string): Error {
     const e = new Error(msg);
     (e as any).noRetry = true;
     return e;
+}
+
+async function readApiError(
+    response: Response,
+    fallback = `请求失败（HTTP ${response.status}）`,
+): Promise<{ message: string; code: string }> {
+    const raw = await response.text().catch(() => "");
+    if (!raw) return { message: fallback, code: "" };
+    try {
+        const payload = JSON.parse(raw) as { error?: unknown; code?: unknown };
+        return {
+            message: typeof payload.error === "string" && payload.error.trim()
+                ? payload.error.trim()
+                : fallback,
+            code: typeof payload.code === "string" ? payload.code : "",
+        };
+    } catch {
+        return { message: raw, code: "" };
+    }
 }
 
 function setPhase(phase: GenPhase, log?: string) {
@@ -61,20 +80,19 @@ async function post(url: string, body: any, maxRetries = 3) {
             });
             if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
             if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
-            if (resp.status === 429) {
-                // 构建端硬上限：不重试，向上抛
-                const j = await resp.json().catch(() => ({}));
-                throw noRetry(j?.error || "请求过于频繁");
-            }
-            if (resp.status === 400) {
-                // pom 安全校验拦截等：不重试
-                const j = await resp.json().catch(() => ({}));
-                if (j?.code === "POM_BLOCKED") {
-                    throw noRetry(`pom.xml 安全校验未通过：${j.error}`);
+            if (!resp.ok) {
+                const apiError = await readApiError(resp);
+                if (apiError.code === "POM_BLOCKED") {
+                    throw noRetry(`pom.xml 安全校验未通过：${apiError.message}`);
                 }
-                throw new Error(j?.error || await resp.text());
+                if (resp.status === 400
+                    || resp.status === 404
+                    || resp.status === 429
+                    || apiError.code === "TASK_STORE_MIGRATION_REQUIRED") {
+                    throw noRetry(apiError.message);
+                }
+                throw new Error(apiError.message);
             }
-            if (!resp.ok) throw new Error(await resp.text());
             return await resp.json() as any;
         } catch (e: any) {
             if (e?.noRetry || attempt >= maxRetries) throw e;
@@ -477,7 +495,18 @@ async function streamClarify(
         body: JSON.stringify({ taskId, answers, extraPrompt }),
         signal: clarifyAbort.signal,
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
+    if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+    if (!resp.ok) {
+        const apiError = await readApiError(resp, "澄清请求失败");
+        if (resp.status === 404) {
+            throw noRetry("任务状态不存在，请重新开始生成");
+        }
+        if (resp.status === 400 || resp.status === 429) {
+            throw noRetry(apiError.message);
+        }
+        throw new Error(apiError.message);
+    }
     return readSSE(resp);
 }
 
@@ -663,18 +692,25 @@ export async function startGenerate(
             // 澄清调用可能因 CF→模型服务链路慢/抖动拿不到 result(超时/被切/连接失败)。
             // 这不一定是真失败:重试几次(保留已填 answers/补充说明),都不行才硬失败。
             let clarifyResult: any = null;
+            let lastClarifyError = "";
             for (let attempt = 0; attempt < 3 && !clarifyResult; attempt++) {
                 try {
                     const r = await streamClarify(genTask.taskId, answers, extraPrompt);
                     if (r && !r.error) { clarifyResult = r; break; }
-                    genTask.logs.push(`· 澄清${r?.error ? `出错(${r.error})` : "无返回"}，重试 (${attempt + 1}/3)...`);
+                    lastClarifyError = r?.error ? String(r.error) : "服务端未返回澄清结果";
+                    genTask.logs.push(`· 澄清出错（${lastClarifyError}），重试 (${attempt + 1}/3)...`);
                 } catch (ce: any) {
-                    if (isInterrupt(ce)) throw ce; // ESC 撤回照常中断
-                    genTask.logs.push(`· 澄清中断（${ce?.message || ce}），重试 (${attempt + 1}/3)...`);
+                    if (isInterrupt(ce) || ce?.noRetry) throw ce;
+                    lastClarifyError = ce?.message || String(ce);
+                    genTask.logs.push(`· 澄清中断（${lastClarifyError}），重试 (${attempt + 1}/3)...`);
                 }
             }
             extraPrompt = undefined;
-            if (!clarifyResult) throw new Error("澄清阶段多次无响应（可能与模型服务连接不稳定，请稍后重试）");
+            if (!clarifyResult) {
+                throw new Error(lastClarifyError
+                    ? `澄清阶段失败：${lastClarifyError}`
+                    : "澄清阶段多次无响应，请稍后重试");
+            }
 
             if (clarifyResult.needMoreInput) {
                 genTask.moreInputHint = clarifyResult.hint || "请补充更多需求描述";

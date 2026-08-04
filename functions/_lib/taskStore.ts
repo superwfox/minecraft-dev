@@ -25,6 +25,7 @@ const STATE_TTL_SECONDS = 3600;
 const CHUNK_CHARACTERS = 300_000;
 // Free plan allows 50 D1 statements per invocation. Reserve headroom for task read/cost/cleanup.
 const MAX_CHUNKS = 40;
+const verifiedTaskSchemas = new WeakSet<object>();
 
 export class TaskOwnershipError extends Error {
     constructor() {
@@ -37,6 +38,74 @@ export class TaskStoreUnavailableError extends Error {
     constructor(message = "D1 is required for Planner leases") {
         super(message);
         this.name = "TaskStoreUnavailableError";
+    }
+}
+
+/**
+ * Bound D1 databases must be migrated before accepting a new task. Without this
+ * check, mode-1 can write a task successfully and the following Clarify read can
+ * fail on a newer column, then incorrectly fall back to an empty KV record.
+ */
+export async function assertBoundTaskStoreSchema(env: TaskStoreEnv): Promise<void> {
+    if (!env.DB) return;
+    const dbKey = env.DB as unknown as object;
+    if (verifiedTaskSchemas.has(dbKey)) return;
+
+    try {
+        const [tableResult, columnResult] = await Promise.all([
+            env.DB.prepare(`
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name IN ('generation_tasks', 'generation_task_chunks')
+            `).all<{ name: string }>(),
+            env.DB.prepare("PRAGMA table_info(generation_tasks)").all<{ name: string }>(),
+        ]);
+
+        const tables = new Set((tableResult.results ?? []).map(row => String(row.name ?? "")));
+        const columns = new Set((columnResult.results ?? []).map(row => String(row.name ?? "")));
+        const requiredTables = ["generation_tasks", "generation_task_chunks"];
+        const requiredColumns = [
+            "task_id",
+            "owner_uid",
+            "cost_total",
+            "cost_consumed",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "quota_exhausted",
+            "planner_lease_token",
+            "planner_lease_until",
+        ];
+        const missingTables = requiredTables.filter(name => !tables.has(name));
+        const missingColumns = requiredColumns.filter(name => !columns.has(name));
+
+        if (missingTables.length || missingColumns.length) {
+            const migrations = new Set<string>();
+            if (missingTables.length || missingColumns.some(name => ![
+                "quota_exhausted",
+                "planner_lease_token",
+                "planner_lease_until",
+            ].includes(name))) {
+                migrations.add("0001_generation_tasks.sql");
+            }
+            if (missingColumns.includes("quota_exhausted")) {
+                migrations.add("0003_generation_task_quota.sql");
+            }
+            if (missingColumns.includes("planner_lease_token")
+                || missingColumns.includes("planner_lease_until")) {
+                migrations.add("0004_generation_task_planner_lease.sql");
+            }
+            throw new TaskStoreUnavailableError(
+                `D1 数据库未完成升级，请执行 ${[...migrations].join("、")}`,
+            );
+        }
+
+        verifiedTaskSchemas.add(dbKey);
+    } catch (error) {
+        if (error instanceof TaskStoreUnavailableError) throw error;
+        console.warn("D1 task schema check failed", error);
+        throw new TaskStoreUnavailableError("无法校验 D1 任务数据库结构，请检查 DB binding 与 migrations");
     }
 }
 

@@ -29,11 +29,14 @@ npm install
 
 ```
 DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_RESPONSES_WEB_SEARCH=true
 GITHUB_PAT=ghp_...
 XFYUN_APP_ID=...
 XFYUN_API_KEY=...
 XFYUN_API_SECRET=...
 ```
+
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后也只在 Grader 识别到未被静态契约或已有公共知识覆盖的原子技术缺口时联网。GLM BYOK 始终只读取已有公共知识，不触发 DeepSeek 自动联网。
 
 **获取密钥**：
 
@@ -118,6 +121,7 @@ git push -u origin master
 2. 添加以下变量（Production 和 Preview 都需要）：
    ```
    DEEPSEEK_API_KEY=sk-...
+   DEEPSEEK_RESPONSES_WEB_SEARCH=true
    GITHUB_PAT=ghp_...
    XFYUN_APP_ID=...
    XFYUN_API_KEY=...
@@ -136,6 +140,8 @@ git push -u origin master
    >
    > 注：OAuth App 对任意 GitHub 用户开箱即用，无需安装、无 public/private 开关；
    > 这也是登录场景比 GitHub App 更合适的原因（GitHub App 会强制「先安装再授权」）。
+   >
+   > `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭。Production 和需要验证联网学习的 Preview 环境必须分别配置；保存环境变量后重新部署对应环境的 Pages Functions 才会生效。GLM BYOK 不受该开关影响，始终不会触发 DeepSeek 自动联网。
 
 ### 4. 创建 KV 命名空间
 
@@ -151,9 +157,15 @@ git push -u origin master
 1. **D1 SQL Database** → **Create database**
 2. 在 Pages 项目的 **Settings** → **Bindings** 中新增 D1 database binding
 3. Variable name 固定为 `DB`
-4. 在 D1 Console 执行 `migrations/0001_generation_tasks.sql`
+4. 在 D1 Console 按文件编号依次执行：
+   - `migrations/0001_generation_tasks.sql`
+   - `migrations/0002_autonomous_learning.sql`
+   - `migrations/0003_generation_task_quota.sql`
+   - `migrations/0004_generation_task_planner_lease.sql`
 
-D1 仅承载高频生成任务状态和单任务成本；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。
+已有数据库只需从尚未执行的下一份 migration 继续，不能重复执行包含 `ALTER TABLE ... ADD COLUMN` 的文件。Cloudflare Pages 的 Git 自动部署只发布代码，不会自动执行 D1 migration；每次发布包含新 SQL 文件时必须先在对应的 Preview / Production 数据库执行。
+
+D1 承载高频生成任务状态、单任务成本和公共技术知识；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。
 
 ### 5. 部署
 

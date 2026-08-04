@@ -350,12 +350,15 @@ npm run deploy  # vite build && wrangler pages deploy dist
 
 CF 端需要的环境变量与绑定：
 - `DEEPSEEK_API_KEY` —— DeepSeek 平台 API key
+- `DEEPSEEK_RESPONSES_WEB_SEARCH=true` —— 启用 DeepSeek Responses 自动联网学习；默认关闭，Production 和需要验证该功能的 Preview 环境需分别配置
 - `GITHUB_PAT` —— 对 `superwfox/minecraft-dev-workflow` 仓库有 `repo + workflow` 权限的 PAT
 - `GEN_CONCURRENCY` —— 可选，默认 2
 - KV namespace 绑定名 `TASKS`
 - D1 database 绑定名 `DB`（生产任务状态与任务成本）
 - `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
 - `EDGE_RATE_LIMITING=true` —— 使用域名级 WAF Rate Limiting 时设置；关闭代码内 KV 限流兜底
+
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 接受 `1`、`true`、`yes`（忽略大小写）。开启后也只在 Grader 提出真实、未被静态契约或已有公共知识覆盖的原子技术缺口时联网；GLM BYOK 始终只读取已有公共知识，不触发 DeepSeek 自动联网。Cloudflare 环境变量变更后需要重新部署对应环境的 Pages Functions。
 
 ---
 
