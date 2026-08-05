@@ -81,6 +81,24 @@ describe("DeepSeek Responses adapter", () => {
         expect(body.model).toBe("deepseek-v4-flash");
         expect(body.tools).toEqual([{ type: "web_search" }]);
         expect(body.tool_choice).toEqual({ type: "web_search" });
+        expect(body.text?.format).toMatchObject({
+            type: "json_schema",
+            name: "learning_source_candidates",
+            schema: {
+                type: "object",
+                required: ["candidates"],
+                properties: {
+                    candidates: {
+                        maxItems: 1,
+                        items: {
+                            properties: {
+                                needId: { enum: ["need-api"] },
+                            },
+                        },
+                    },
+                },
+            },
+        });
     });
 
     it("retries one quick transient HTTP failure without exposing its body", async () => {
@@ -106,6 +124,50 @@ describe("DeepSeek Responses adapter", () => {
             retryable: true,
         });
         expect(JSON.stringify(result)).not.toContain("provider-secret-body");
+    });
+
+    it("retries a slow completed response whose text is not valid JSON", async () => {
+        let now = 1_800_000_000_000;
+        const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+        const invalidCompleted = {
+            type: "response.completed",
+            response: {
+                status: "completed",
+                model: "deepseek-v4-flash",
+                output: [{
+                    type: "message",
+                    content: [{ type: "output_text", text: "Sources were found, but this is not JSON." }],
+                }],
+            },
+        };
+        const fetchImpl = vi.fn()
+            .mockImplementationOnce(async () => {
+                now += 6_000;
+                return new Response(JSON.stringify(invalidCompleted), { status: 200 });
+            })
+            .mockResolvedValueOnce(new Response(JSON.stringify(completedFixture), {
+                status: 200,
+            })) as unknown as typeof fetch;
+
+        try {
+            const result = await discoverLearningSources({
+                apiKey: "test-key",
+                needs: [makeNeed()],
+                fetchImpl,
+                budgetMs: 30_000,
+            });
+
+            expect(result.ok).toBe(true);
+            expect(result.attempts).toHaveLength(2);
+            expect(result.attempts[0]).toMatchObject({
+                reasonCode: "discovery_invalid_response",
+                providerStatus: "completed",
+                retryable: true,
+            });
+            expect(fetchImpl).toHaveBeenCalledTimes(2);
+        } finally {
+            nowSpy.mockRestore();
+        }
     });
 
     it("does not retry a non-transient authentication response", async () => {

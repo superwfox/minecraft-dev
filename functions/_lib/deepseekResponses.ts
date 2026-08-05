@@ -14,7 +14,41 @@ const RESERVE_MS = 750;
 const RETRY_BACKOFF_MS = 250;
 const QUICK_FAILURE_MS = 5_000;
 const MIN_RETRY_BUDGET_MS = 6_000;
+const MIN_MODEL_RESULT_RETRY_BUDGET_MS = 15_000;
 const MAX_ATTEMPTS = 2;
+
+function discoveryTextFormat(needs: KnowledgeNeed[]) {
+    const needIds = [...new Set(needs.map((need) => need.id))];
+    return {
+        type: "json_schema",
+        name: "learning_source_candidates",
+        schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                candidates: {
+                    type: "array",
+                    maxItems: needIds.length,
+                    items: {
+                        type: "object",
+                        additionalProperties: false,
+                        properties: {
+                            needId: { type: "string", enum: needIds },
+                            urls: {
+                                type: "array",
+                                minItems: 1,
+                                maxItems: 3,
+                                items: { type: "string" },
+                            },
+                        },
+                        required: ["needId", "urls"],
+                    },
+                },
+            },
+            required: ["candidates"],
+        },
+    };
+}
 
 export interface DeepSeekResponsesResult {
     status: "completed" | "incomplete" | "failed";
@@ -242,6 +276,7 @@ export async function discoverLearningSources(input: {
                     tools: [{ type: "web_search" }],
                     tool_choice: { type: "web_search" },
                     reasoning: { effort: "low" },
+                    text: { format: discoveryTextFormat(input.needs) },
                     max_output_tokens: 4096,
                     stream: false,
                 }),
@@ -323,10 +358,17 @@ export async function discoverLearningSources(input: {
             retryable,
         ) as Extract<LearningDiscoveryResult, { ok: false }>;
         const remainingAfterAttempt = deadline - Date.now();
+        const modelResultCanRetry = reasonCode === "discovery_invalid_response"
+            || reasonCode === "no_candidate_sources"
+            || reasonCode === "discovery_provider_incomplete"
+            || reasonCode === "discovery_provider_failed";
+        const requiredRetryBudgetMs = modelResultCanRetry
+            ? MIN_MODEL_RESULT_RETRY_BUDGET_MS
+            : MIN_RETRY_BUDGET_MS;
         const canRetry = attempt + 1 < MAX_ATTEMPTS
             && retryable
-            && attemptElapsedMs <= QUICK_FAILURE_MS
-            && remainingAfterAttempt >= MIN_RETRY_BUDGET_MS;
+            && (attemptElapsedMs <= QUICK_FAILURE_MS || modelResultCanRetry)
+            && remainingAfterAttempt >= requiredRetryBudgetMs;
         if (!canRetry) return lastFailure;
         await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
     }
