@@ -4,7 +4,7 @@ import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../..
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import type { KnowledgeNeed } from "../../_lib/learning/types";
-import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import {
     buildApiContractContext,
     findKnownApiIssues,
@@ -456,7 +456,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: doneMsg }));
 
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
 
             await writer.write(sseEvent(encoder, {
                 type: "result", done: false,

@@ -34,19 +34,71 @@
         <span class="tag">Java {{ genTask.javaVersion }}</span>
         <span class="tag">{{ genTask.packageName }}</span>
       </div>
-      <div v-if="genTask.learningProgress.status !== 'idle'" class="learning-progress"
-           :class="{ deferred: genTask.learningDeferred, ready: genTask.learningProgress.status === 'ready' }">
-        <span class="learning-dot"></span>
-        <span class="learning-message">{{ genTask.learningProgress.message }}</span>
-        <span v-if="genTask.learningProgress.totalNeeds" class="learning-ratio">
-          {{ genTask.learningProgress.completedNeeds }}/{{ genTask.learningProgress.totalNeeds }}
-        </span>
-        <span v-if="genTask.learningProgress.sourceCount" class="learning-ratio">
-          {{ genTask.learningProgress.sourceCount }} 来源
-        </span>
-      </div>
-      <LearningEvidence :task-id="genTask.taskId" :knowledge-count="activeKnowledgeCount"
-                        :learning-status="genTask.learningProgress.status" />
+      <section v-if="genTask.learningProgress.status !== 'idle'" class="learning-progress"
+               :class="{
+                 deferred: learningStopped,
+                 ready: genTask.learningProgress.status === 'ready',
+                 review: genTask.learningProgress.status === 'needs_review',
+               }"
+               aria-live="polite" aria-atomic="false">
+        <div class="learning-head">
+          <div class="learning-heading">
+            <span class="learning-dot" :class="{ active: !learningTerminal }" aria-hidden="true"></span>
+            <div class="learning-copy">
+              <div class="learning-title">{{ learningTitle }}</div>
+              <div class="learning-message">
+                {{ genTask.learningProgress.message || learningStatusLabel }}
+              </div>
+            </div>
+          </div>
+          <div v-if="!learningTerminal" class="learning-time">
+            <strong>{{ remainingTimeLabel }}</strong>
+            <span>最长约 5 分钟</span>
+          </div>
+          <div v-else class="learning-outcome">{{ learningOutcomeLabel }}</div>
+        </div>
+
+        <div v-if="!learningTerminal && genTask.learningProgress.currentNeed" class="learning-need">
+          <span class="learning-need-label">当前查证</span>
+          <span class="learning-need-text">{{ genTask.learningProgress.currentNeed }}</span>
+        </div>
+
+        <div class="learning-track" role="list" aria-label="联网查证阶段">
+          <div v-for="(step, index) in learningSteps" :key="step" class="learning-track-step"
+               :class="learningTrackState(index)" role="listitem">
+            <span class="learning-track-marker" aria-hidden="true">{{ index + 1 }}</span>
+            <span>{{ step }}</span>
+          </div>
+        </div>
+
+        <div class="learning-metrics">
+          <div class="learning-metric">
+            <strong>{{ genTask.learningProgress.completedNeeds }}/{{ genTask.learningProgress.totalNeeds }}</strong>
+            <span>技术缺口</span>
+          </div>
+          <div class="learning-metric">
+            <strong>{{ genTask.learningProgress.sourceCount }}</strong>
+            <span>证据来源</span>
+          </div>
+          <div class="learning-metric">
+            <strong>{{ activeKnowledgeCount }}</strong>
+            <span>已采用</span>
+          </div>
+          <div class="learning-metric">
+            <strong>{{ reviewKnowledgeCount }}</strong>
+            <span>待审核</span>
+          </div>
+        </div>
+
+        <div v-if="learningStopped" class="learning-stop-note">
+          本次查证已降级，不阻断后续生成
+        </div>
+      </section>
+      <LearningEvidence :task-id="genTask.taskId" :knowledge-count="evidenceKnowledgeCount"
+                        :learning-job-id="genTask.learningProgress.jobId"
+                        :learning-stage="genTask.learningProgress.stage"
+                        :learning-status="genTask.learningProgress.status"
+                        :learning-revision="genTask.learningProgress.revision" />
     </div>
 
     <!-- 文件生成卡片：按生成器分组 -->
@@ -139,9 +191,9 @@
 </template>
 
 <script setup lang="ts">
-import {ref, computed, watch, nextTick} from "vue";
+import {ref, computed, watch, nextTick, onMounted, onBeforeUnmount} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
-import type {GeneratorType, GenFile} from "../logic/generateState";
+import type {GeneratorType, GenFile, LearningStatus} from "../logic/generateState";
 import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 import {buildSafeDebugExport} from "../logic/safeDebug";
@@ -153,7 +205,113 @@ const marqueeOn = computed(() =>
     ["planning", "generating", "verifying", "fixing"].includes(genTask.phase)
 );
 const canRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
-const activeKnowledgeCount = computed(() => genTask.knowledgeUsed.filter(item => item.status === "active").length);
+const activeKnowledgeCount = computed(() =>
+    genTask.knowledgeUsed.filter(item => item.status === "active").length,
+);
+const reviewKnowledgeCount = computed(() =>
+    genTask.knowledgeUsed.filter(item => item.status === "needs_review").length,
+);
+const evidenceKnowledgeCount = computed(() =>
+    activeKnowledgeCount.value + reviewKnowledgeCount.value,
+);
+
+const learningSteps = ["准备", "发现", "抓取", "验证"] as const;
+const learningTerminalStatuses = new Set<LearningStatus>([
+    "ready", "deferred", "needs_review", "failed", "cancelled",
+]);
+const learningStatusLabels: Record<LearningStatus, string> = {
+    idle: "等待联网查证",
+    queued: "准备查证公开技术资料",
+    discovering: "正在发现权威来源",
+    fetching: "正在抓取并整理证据",
+    verifying: "正在交叉验证技术结论",
+    ready: "技术证据已准备完成",
+    deferred: "已按现有知识继续",
+    needs_review: "新结论正在等待审核",
+    failed: "联网查证失败",
+    cancelled: "联网查证已取消",
+};
+const learningNow = ref(Date.now());
+let learningClock: ReturnType<typeof setInterval> | undefined;
+
+onMounted(() => {
+    learningClock = setInterval(() => {
+        learningNow.value = Date.now();
+    }, 1_000);
+});
+
+onBeforeUnmount(() => {
+    if (learningClock !== undefined) clearInterval(learningClock);
+});
+
+const learningTerminal = computed(() =>
+    learningTerminalStatuses.has(genTask.learningProgress.status),
+);
+const learningStopped = computed(() =>
+    genTask.learningDeferred
+    || genTask.learningProgress.status === "deferred"
+    || genTask.learningProgress.status === "failed"
+    || genTask.learningProgress.status === "cancelled",
+);
+const learningTitle = computed(() => {
+    if (genTask.learningProgress.stage === "fix") return "修复前联网查证";
+    if (genTask.learningProgress.stage === "planner") return "规划前联网查证";
+    return "联网查证";
+});
+const learningStatusLabel = computed(() =>
+    learningStatusLabels[genTask.learningProgress.status],
+);
+const learningOutcomeLabel = computed(() => {
+    const status = genTask.learningProgress.status;
+    if (status === "ready") return "查证完成";
+    if (status === "needs_review") return "等待审核";
+    if (status === "cancelled") return "已取消";
+    if (status === "failed") return "查证失败";
+    return "已继续生成";
+});
+const remainingTimeLabel = computed(() => {
+    const deadlineAt = genTask.learningProgress.deadlineAt;
+    if (!deadlineAt) return "剩余时间同步中";
+    const seconds = Math.max(0, Math.ceil((deadlineAt - learningNow.value) / 1_000));
+    const minutes = Math.floor(seconds / 60);
+    return `剩余 ${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+});
+
+function learningActiveStep(status: LearningStatus): number {
+    if (status === "queued") return 0;
+    if (status === "discovering") return 1;
+    if (status === "fetching") return 2;
+    if (status === "verifying") return 3;
+    return -1;
+}
+
+function learningStoppedStep(): number {
+    const progress = genTask.learningProgress;
+    const lastActiveStep = progress.lastActiveStatus
+        ? learningActiveStep(progress.lastActiveStatus)
+        : -1;
+    if (lastActiveStep >= 0) return lastActiveStep;
+    const reason = progress.reasonCode || "";
+    if (reason.startsWith("verification_") || reason === "unresolved_knowledge_needs") return 3;
+    if (reason.startsWith("source_") || reason === "no_fetchable_sources") return 2;
+    if (reason.startsWith("discovery_") || reason === "no_candidate_sources") return 1;
+    if (progress.completedNeeds > 0 || progress.sourceCount > 0) return 3;
+    if (progress.currentNeed) return 1;
+    return 0;
+}
+
+function learningTrackState(index: number): "done" | "active" | "stopped" | "pending" {
+    const status = genTask.learningProgress.status;
+    if (status === "ready" || status === "needs_review") return "done";
+    if (learningStopped.value) {
+        const stoppedAt = learningStoppedStep();
+        if (index < stoppedAt) return "done";
+        return index === stoppedAt ? "stopped" : "pending";
+    }
+    const activeAt = learningActiveStep(status);
+    if (index < activeAt) return "done";
+    return index === activeAt ? "active" : "pending";
+}
 
 const expandedPath = ref<string>("");
 const downloadUrl = computed(() => getDownloadUrl());
@@ -423,35 +581,177 @@ watch(() => genTask.streamingContent, async () => {
   flex-wrap: wrap;
 }
 .learning-progress {
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-left: 2px solid rgba(67, 128, 145, 0.72);
-  background: rgba(67, 128, 145, 0.07);
-  color: rgba(213, 229, 233, 0.72);
-  font-size: 12px;
+  min-height: 76px;
+  display: grid;
+  gap: 13px;
+  padding: 14px 16px 13px;
+  border-left: 3px solid rgba(67, 128, 145, 0.82);
+  background: rgba(67, 128, 145, 0.085);
+  color: rgba(220, 233, 236, 0.82);
 }
 .learning-progress.deferred {
-  border-left-color: rgba(198, 176, 125, 0.7);
-  background: rgba(198, 176, 125, 0.06);
-  color: rgba(226, 210, 173, 0.72);
+  border-left-color: rgba(198, 176, 125, 0.82);
+  background: rgba(198, 176, 125, 0.075);
+  color: rgba(232, 217, 183, 0.82);
 }
-.learning-progress.ready { border-left-color: rgba(93, 159, 118, 0.75); }
+.learning-progress.ready {
+  border-left-color: rgba(93, 159, 118, 0.86);
+  background: rgba(93, 159, 118, 0.07);
+}
+.learning-progress.review {
+  border-left-color: rgba(180, 143, 68, 0.86);
+  background: rgba(180, 143, 68, 0.075);
+}
+.learning-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.learning-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.learning-copy { min-width: 0; }
+.learning-title {
+  color: rgba(244, 241, 236, 0.94);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.learning-message {
+  margin-top: 3px;
+  color: currentColor;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .learning-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  margin-top: 5px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 7px currentColor;
+  box-shadow: 0 0 8px currentColor;
 }
-.learning-message { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.learning-ratio {
+.learning-dot.active { animation: learning-pulse 1.8s ease-in-out infinite; }
+@keyframes learning-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.learning-time {
   flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  padding-left: 14px;
+  border-left: 1px solid rgba(244, 241, 236, 0.12);
+}
+.learning-time strong {
+  color: rgba(244, 241, 236, 0.88);
+  font: 600 13px/1.35 monospace;
+}
+.learning-time span {
+  color: rgba(244, 241, 236, 0.38);
+  font-size: 11px;
+}
+.learning-outcome {
+  flex: 0 0 auto;
+  color: rgba(244, 241, 236, 0.66);
+  font-size: 12px;
+  font-weight: 600;
+}
+.learning-need {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(244, 241, 236, 0.1);
+}
+.learning-need-label {
+  color: rgba(244, 241, 236, 0.42);
+  font-size: 11px;
+  font-weight: 600;
+}
+.learning-need-text {
+  color: rgba(244, 241, 236, 0.76);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.learning-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.learning-track-step {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 2px solid rgba(244, 241, 236, 0.12);
+  color: rgba(244, 241, 236, 0.32);
+  font-size: 11px;
+}
+.learning-track-step.done {
+  border-top-color: rgba(93, 159, 118, 0.72);
+  color: rgba(169, 216, 186, 0.76);
+}
+.learning-track-step.active {
+  border-top-color: rgba(92, 157, 174, 0.9);
+  color: rgba(183, 219, 227, 0.92);
+}
+.learning-track-step.stopped {
+  border-top-color: rgba(198, 176, 125, 0.78);
+  color: rgba(226, 210, 173, 0.82);
+}
+.learning-track-marker {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  display: grid;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font: 10px/1 monospace;
+}
+.learning-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  padding-top: 10px;
+  border-top: 1px solid rgba(244, 241, 236, 0.1);
+}
+.learning-metric {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 0 12px;
+  border-left: 1px solid rgba(244, 241, 236, 0.09);
+}
+.learning-metric:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+.learning-metric strong {
+  color: rgba(244, 241, 236, 0.9);
+  font: 600 14px/1.3 monospace;
+}
+.learning-metric span {
   color: rgba(244, 241, 236, 0.4);
-  font: 10px monospace;
+  font-size: 11px;
+}
+.learning-stop-note {
+  padding-top: 9px;
+  border-top: 1px dashed rgba(244, 241, 236, 0.12);
+  color: rgba(232, 217, 183, 0.7);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .tag {
   padding: 3px 14px;
@@ -686,5 +986,30 @@ watch(() => genTask.streamingContent, async () => {
 @keyframes blurFadeIn {
   from { opacity: 0; filter: blur(4px); }
   to   { opacity: 1; filter: blur(0); }
+}
+
+@media (max-width: 640px) {
+  .learning-progress { padding: 13px 12px; }
+  .learning-head { align-items: stretch; flex-direction: column; gap: 10px; }
+  .learning-time {
+    justify-items: start;
+    padding: 8px 0 0;
+    border-top: 1px solid rgba(244, 241, 236, 0.1);
+    border-left: 0;
+  }
+  .learning-need { grid-template-columns: 1fr; gap: 4px; }
+  .learning-track { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 8px; }
+  .learning-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
+  .learning-metric { padding: 0 10px; }
+  .learning-metric:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .learning-dot.active,
+  .gen-spinner,
+  .gen-stream-text { animation: none; }
 }
 </style>

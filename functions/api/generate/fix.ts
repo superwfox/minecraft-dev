@@ -1,13 +1,22 @@
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
-import { getRunJobs, getJobLogs, deleteBranch } from "../../_lib/github";
+import { getRunJobs, getJobLogs } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { buildDiagnosticKnowledgeNeeds } from "../../_lib/learning/assessment";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 import type { KnowledgeNeed } from "../../_lib/learning/types";
-import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import {
+    acquireTaskOperationLease,
+    getOwnedTask,
+    markTaskQuotaExhausted,
+    putTaskState,
+    putTaskWithOperationLease,
+    releaseTaskOperationLease,
+    renewTaskOperationLease,
+    type TaskOperationLeaseMode,
+} from "../../_lib/taskStore";
 import { normalizePomRepositories } from "../../_lib/pomGuard";
 import {
     buildApiContractContext,
@@ -24,6 +33,10 @@ import {
     type BuildDiagnostic,
     type DiagnosticProgress,
 } from "../../_lib/buildDiagnostics";
+import {
+    REPAIR_LEASE_RENEW_INTERVAL_MS,
+    REPAIR_RECOVERY_LEASE_MS,
+} from "../../_lib/buildRepairRecovery";
 
 interface Env {
     DB?: D1Database;
@@ -43,10 +56,20 @@ interface PendingKnowledgeUsage {
 
 const FIX_IDLE_MS = 120000; // 空闲超时:连续这么久没字节才 abort（推理在持续吐 delta，慢但活着不误杀）
 const MAX_REPAIR_ATTEMPTS = 3;
+const REPAIR_LEASE_RENEW_TIMEOUT_MS = 10_000;
+const REPAIR_LEASE_LOCAL_SAFETY_MS = 2_000;
+
+class RepairLeaseLostError extends Error {
+    constructor() {
+        super("Repair lease lost");
+        this.name = "RepairLeaseLostError";
+    }
+}
 
 async function callAIStream(
     llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
+    parentSignal?: AbortSignal,
 ): Promise<AICallResult> {
     const model = llm.modelFor("pro");
     const body = {
@@ -60,6 +83,9 @@ async function callAIStream(
 
     // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
     const ctrl = new AbortController();
+    const abortFromParent = () => ctrl.abort();
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
     let idle: any;
     const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), FIX_IDLE_MS); };
     arm();
@@ -105,6 +131,7 @@ async function callAIStream(
         return { content: full, model, usage };
     } finally {
         clearTimeout(idle);
+        parentSignal?.removeEventListener("abort", abortFromParent);
     }
 }
 
@@ -190,7 +217,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
-    const state = JSON.parse(raw);
+    let state = JSON.parse(raw);
 
     if (mode === "repair" && state.quotaExhausted) {
         return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
@@ -206,28 +233,281 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // diagnose/inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
     const llm: LLMProvider | null = mode === "repair" ? await resolveLLM(context) : null;
+    const repairLeaseToken = mode === "repair" ? `repair:${crypto.randomUUID()}` : "";
+    let repairLeaseMode: TaskOperationLeaseMode | null = null;
+    let repairLeaseReleased = false;
+    let repairLeaseLost = false;
+    let repairLeaseValidUntil = 0;
+    let repairLeaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+    const repairAbort = new AbortController();
+    const clearRepairLeaseExpiryTimer = () => {
+        if (repairLeaseExpiryTimer === undefined) return;
+        clearTimeout(repairLeaseExpiryTimer);
+        repairLeaseExpiryTimer = undefined;
+    };
+    const markRepairLeaseLost = () => {
+        if (repairLeaseLost) return;
+        repairLeaseLost = true;
+        clearRepairLeaseExpiryTimer();
+        repairAbort.abort();
+    };
+    const armRepairLeaseExpiry = (leaseStartedAt: number) => {
+        repairLeaseValidUntil = leaseStartedAt
+            + REPAIR_RECOVERY_LEASE_MS
+            - REPAIR_LEASE_LOCAL_SAFETY_MS;
+        clearRepairLeaseExpiryTimer();
+        const remainingMs = repairLeaseValidUntil - Date.now();
+        if (remainingMs <= 0) {
+            markRepairLeaseLost();
+            return;
+        }
+        repairLeaseExpiryTimer = setTimeout(markRepairLeaseLost, remainingMs);
+    };
+    const releaseRepairLease = async () => {
+        if (!repairLeaseMode || repairLeaseReleased) return;
+        const released = await releaseTaskOperationLease(
+            context.env,
+            taskId,
+            uid,
+            repairLeaseToken,
+            repairLeaseMode,
+        );
+        if (released) {
+            repairLeaseReleased = true;
+            clearRepairLeaseExpiryTimer();
+        } else {
+            markRepairLeaseLost();
+        }
+    };
+
+    if (mode === "repair") {
+        const leaseStartedAt = Date.now();
+        try {
+            repairLeaseMode = await acquireTaskOperationLease(
+                context.env,
+                taskId,
+                uid,
+                repairLeaseToken,
+                REPAIR_RECOVERY_LEASE_MS,
+            );
+        } catch (error) {
+            console.warn("repair lease acquisition failed", error);
+            return new Response(JSON.stringify({
+                error: "自动修复状态存储暂不可用，请稍后重试",
+                code: "REPAIR_STORE_UNAVAILABLE",
+            }), {
+                status: 503,
+                headers: { "Content-Type": "application/json", "Retry-After": "2" },
+            });
+        }
+        if (!repairLeaseMode) {
+            return new Response(JSON.stringify({
+                error: "Repair is already in progress",
+                code: "REPAIR_IN_PROGRESS",
+            }), {
+                status: 409,
+                headers: { "Content-Type": "application/json", "Retry-After": "2" },
+            });
+        }
+        armRepairLeaseExpiry(leaseStartedAt);
+
+        let latestRaw: string | null = null;
+        try {
+            latestRaw = await getOwnedTask(context.env, taskId, uid);
+        } catch (error) {
+            console.warn("repair state reload failed", error);
+        }
+        if (!latestRaw) {
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            return new Response("Task state unavailable", { status: 503 });
+        }
+        try {
+            state = JSON.parse(latestRaw);
+        } catch (error) {
+            console.warn("repair state parse failed", error);
+            await releaseRepairLease().catch((releaseError) => console.warn("repair lease release failed", releaseError));
+            return new Response("Task state unavailable", { status: 503 });
+        }
+        if (state.quotaExhausted) {
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                status: 402, headers: { "Content-Type": "application/json" },
+            });
+        }
+        if (!state.runId) {
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            return new Response(JSON.stringify({ error: "No build run to fix" }), {
+                status: 400, headers: { "Content-Type": "application/json" },
+            });
+        }
+
+        state.status = "repairing";
+        state.repairStartedAt = Date.now();
+        state.error = null;
+        let committed = false;
+        try {
+            committed = await putTaskWithOperationLease(
+                context.env,
+                taskId,
+                JSON.stringify(state),
+                repairLeaseToken,
+                repairLeaseMode,
+                3600,
+                uid,
+            );
+        } catch (error) {
+            console.warn("repair state initialization failed", error);
+        }
+        if (!committed) {
+            markRepairLeaseLost();
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            return new Response(JSON.stringify({
+                error: "自动修复执行权已失效，请恢复任务状态",
+                code: "REPAIR_LEASE_LOST",
+            }), {
+                status: 409,
+                headers: { "Content-Type": "application/json", "Retry-After": "2" },
+            });
+        }
+    }
+
+    let repairLeaseRenewTimer: ReturnType<typeof setInterval> | undefined;
+    let repairLeaseRenewal: Promise<void> | null = null;
+    let repairLeaseRenewalStopped = false;
+    const assertRepairLease = () => {
+        if (mode !== "repair") return;
+        if (repairLeaseValidUntil > 0 && Date.now() >= repairLeaseValidUntil) {
+            markRepairLeaseLost();
+        }
+        if (!repairLeaseMode
+            || repairLeaseLost
+            || repairLeaseReleased
+            || repairAbort.signal.aborted) {
+            throw new RepairLeaseLostError();
+        }
+    };
+    const renewRepairLease = () => {
+        if (repairLeaseRenewalStopped
+            || !repairLeaseMode
+            || repairLeaseReleased
+            || repairLeaseLost
+            || repairLeaseRenewal) return;
+        const renewalStartedAt = Date.now();
+        let renewalTimedOut = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const renewalRequest = renewTaskOperationLease(
+            context.env,
+            taskId,
+            uid,
+            repairLeaseToken,
+            REPAIR_RECOVERY_LEASE_MS,
+        );
+        const lateRenewalCleanup = renewalRequest.then(async (renewed) => {
+            if (!renewalTimedOut || !renewed) return;
+            await releaseRepairLease();
+        }).catch((error) => {
+            if (renewalTimedOut) console.warn("late repair lease renewal cleanup failed", error);
+        });
+        context.waitUntil(lateRenewalCleanup);
+        const timeout = new Promise<boolean>((resolve) => {
+            timeoutId = setTimeout(() => {
+                renewalTimedOut = true;
+                resolve(false);
+            }, REPAIR_LEASE_RENEW_TIMEOUT_MS);
+        });
+        repairLeaseRenewal = Promise.race([renewalRequest, timeout]).then((renewed) => {
+            if (!renewed) {
+                markRepairLeaseLost();
+                return;
+            }
+            armRepairLeaseExpiry(renewalStartedAt);
+        }).catch((error) => {
+            console.warn("repair lease renewal failed", error);
+            markRepairLeaseLost();
+        }).finally(() => {
+            if (timeoutId !== undefined) clearTimeout(timeoutId);
+            repairLeaseRenewal = null;
+        });
+    };
+    const stopRepairLeaseRenewal = async () => {
+        repairLeaseRenewalStopped = true;
+        if (repairLeaseRenewTimer !== undefined) {
+            clearInterval(repairLeaseRenewTimer);
+            repairLeaseRenewTimer = undefined;
+        }
+        const pendingRenewal = repairLeaseRenewal;
+        if (pendingRenewal) await pendingRenewal;
+    };
+    const persistState = async (releaseLease = false) => {
+        if (mode !== "repair") {
+            await putTaskState(context.env, taskId, state, 3600, uid);
+            return;
+        }
+        assertRepairLease();
+        if (releaseLease) {
+            await stopRepairLeaseRenewal();
+            assertRepairLease();
+        }
+        let committed = false;
+        try {
+            committed = await putTaskWithOperationLease(
+                context.env,
+                taskId,
+                JSON.stringify(state),
+                repairLeaseToken,
+                repairLeaseMode!,
+                3600,
+                uid,
+                releaseLease,
+            );
+        } catch (error) {
+            console.warn("repair state commit failed", error);
+        }
+        if (!committed) {
+            markRepairLeaseLost();
+            throw new RepairLeaseLostError();
+        }
+        if (releaseLease) {
+            repairLeaseReleased = true;
+            clearRepairLeaseExpiryTimer();
+        }
+    };
 
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge = async (r: AICallResult) => {
+        assertRepairLease();
         if (!llm || llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         pendingUsage.push({ model: r.model, usage: r.usage });
     };
     const flushCharge = async () => {
         if (chargeFlushed || !llm || llm.byok || !uid || pendingUsage.length === 0) return;
+        assertRepairLease();
         chargeFlushed = true;
         const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
+        assertRepairLease();
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) {
             state.quotaExhausted = true;
             await markTaskQuotaExhausted(context.env, taskId, uid);
+            assertRepairLease();
         }
     };
 
-    const { readable, writable } = new TransformStream<Uint8Array>();
+    let stream: TransformStream<Uint8Array>;
+    try {
+        stream = new TransformStream<Uint8Array>();
+    } catch (error) {
+        await releaseRepairLease().catch((releaseError) => console.warn("repair lease release failed", releaseError));
+        throw error;
+    }
+    const { readable, writable } = stream;
     const encoder = new TextEncoder();
     const writer = writable.getWriter();
+    if (mode === "repair") {
+        repairLeaseRenewTimer = setInterval(renewRepairLease, REPAIR_LEASE_RENEW_INTERVAL_MS);
+    }
 
     const process = (async () => {
         // 心跳:拉日志 + 推理首 token 前那段静默期每 12s 写一个,避免被 CF 因长静默切断连接。
@@ -240,10 +520,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.logs.push("▸ 正在获取构建错误日志...");
 
             const jobs = await getRunJobs(token, state.runId);
+            assertRepairLease();
             const failedJob = jobs.find(j => j.conclusion === "failure") ?? jobs[0];
             if (!failedJob) throw new Error("未找到构建 Job");
 
             const fullLog = await getJobLogs(token, failedJob.id);
+            assertRepairLease();
             const errorSection = errorLogExcerpt(fullLog);
             const diagnostics = parseBuildDiagnostics(fullLog);
             const fingerprint = diagnosticsFingerprint(diagnostics);
@@ -253,7 +535,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
@@ -286,7 +568,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个可查证的公开技术缺口`
                     : "▸ 当前诊断没有可安全联网查证的公开知识缺口";
                 state.logs.push(msg);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
                 await writer.write(sseEvent(encoder, {
                     type: "result",
@@ -321,6 +603,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             if (pendingSnapshot && progress) {
+                assertRepairLease();
                 context.waitUntil(evaluatePendingKnowledgeUsage(
                     context.env,
                     taskId,
@@ -378,7 +661,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`× ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `× ${reason}` }));
                 await writer.write(sseEvent(encoder, {
                     type: "result", fixed: 0, changed: 0, inspected: true, reason,
@@ -395,7 +678,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -406,7 +689,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -421,7 +704,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, {
                     type: "debug", scope: "build-fix", msg: "fix:no-target", fingerprint,
                     parsedPaths: effectiveDiagnostics.map((item) => item.path),
@@ -455,9 +738,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 maxCharacters: 6_000,
                 title: "构建修复已验证公共技术知识",
             });
+            assertRepairLease();
             state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
             const appliedKnowledgeUsage: PendingKnowledgeUsage[] = [];
             const markKnowledgeApplied = (filePath: string) => {
+                assertRepairLease();
                 const stage = `fix:${filePath}`;
                 context.waitUntil(recordKnowledgeContextUsage({
                     env: context.env,
@@ -485,6 +770,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const beforeContents = new Map<string, string>();
             const beforeSummaries = new Map<string, any>();
             for (const filePath of filesToFix) {
+                assertRepairLease();
                 const fileEntry = state.generatedFiles.find((f: any) => f.path === filePath);
                 if (!fileEntry) continue;
 
@@ -527,7 +813,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     knowledge.context,
                     progressSummary(progress, rolledBackFiles),
                 );
-                let fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder);
+                let fixRes = await callAIStream(
+                    llm,
+                    prompt.system,
+                    prompt.user,
+                    writer,
+                    encoder,
+                    repairAbort.signal,
+                );
                 markKnowledgeApplied(filePath);
                 await charge(fixRes);
                 let fixedContent = stripFences(fixRes.content).trim();
@@ -547,7 +840,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         knowledge.context,
                         `${progressSummary(progress, rolledBackFiles)}\n上一候选仍有确定性问题：${knownApiIssues.join("；")}`,
                     );
-                    fixRes = await callAIStream(llm, retryPrompt.system, retryPrompt.user, writer, encoder);
+                    fixRes = await callAIStream(
+                        llm,
+                        retryPrompt.system,
+                        retryPrompt.user,
+                        writer,
+                        encoder,
+                        repairAbort.signal,
+                    );
                     markKnowledgeApplied(filePath);
                     await charge(fixRes);
                     fixedContent = stripFences(fixRes.content).trim();
@@ -615,7 +915,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.error = reason;
                 state.logs.push(`! ${reason}`);
                 await flushCharge();
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
                 await writer.write(sseEvent(encoder, {
                     type: "result", fixed: 0, changed: 0, reason, repairAttempt,
@@ -639,15 +939,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 at: Date.now(),
             };
 
-            // Delete the failed build branch on GitHub so rebuild can create a fresh one
-            if (state.buildBranch) {
-                try {
-                    await deleteBranch(token, state.buildBranch);
-                } catch (e: any) {
-                    await writer.write(sseEvent(encoder, { type: "log", msg: `! 删除旧分支失败: ${e.message}` }));
-                }
-            }
-
             // Clear error state so rebuild can proceed
             state.status = "fixed";
             state.error = null;
@@ -656,7 +947,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const changedMsg = `● 已修改 ${changedCount} 个文件，等待重新构建验证`;
             state.logs.push(changedMsg);
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await persistState(true);
 
             await writer.write(sseEvent(encoder, { type: "log", msg: changedMsg }));
             await writer.write(sseEvent(encoder, {
@@ -674,18 +965,41 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
-            state.status = "error";
-            state.error = e.message;
-            state.logs.push(`× 修复失败: ${e.message}`);
-            try { await flushCharge(); } catch { /* 计费失败不覆盖原始修复异常 */ }
-            try { await putTask(context.env, taskId, JSON.stringify(state), 3600, uid); } catch { /* 保留原始修复异常 */ }
-            await writer.write(sseEvent(encoder, { type: "log", msg: `× 修复失败: ${e.message}` }));
-            await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, error: e.message }));
+            let leaseFailure = e instanceof RepairLeaseLostError || repairLeaseLost;
+            if (!leaseFailure) {
+                const message = e?.message || "自动修复失败";
+                state.status = "error";
+                state.error = message;
+                state.logs.push(`× 修复失败: ${message}`);
+                try { await flushCharge(); } catch { /* 计费失败不覆盖原始修复异常 */ }
+                try {
+                    await persistState(true);
+                } catch (persistError) {
+                    leaseFailure = persistError instanceof RepairLeaseLostError || repairLeaseLost;
+                }
+            }
+
+            const message = leaseFailure
+                ? "自动修复执行权已失效，正在恢复最新任务状态"
+                : e?.message || "自动修复失败";
+            await writer.write(sseEvent(encoder, { type: "log", msg: `× ${message}` }));
+            await writer.write(sseEvent(encoder, {
+                type: "result",
+                fixed: 0,
+                changed: 0,
+                error: message,
+                ...(leaseFailure ? { code: "REPAIR_LEASE_LOST" } : {}),
+            }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);
-            try { await flushCharge(); } catch { /* 计费失败不覆盖修复结果 */ }
-            await writer.close();
+            await stopRepairLeaseRenewal().catch(() => { });
+            if (!repairLeaseLost && !repairLeaseReleased) {
+                try { await flushCharge(); } catch { /* 计费失败不覆盖修复结果 */ }
+            }
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            clearRepairLeaseExpiryTimer();
+            try { await writer.close(); } catch { /* 客户端可能已断开 */ }
         }
     })();
 

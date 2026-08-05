@@ -104,5 +104,42 @@ describe("public learning snapshot", () => {
         expect(snapshot.debugMeta?.reasonCode).toBe("internal_error");
         expect(json).not.toContain("private-upstream-error-sentinel");
         expect(json).not.toContain("lease-token-sentinel");
+        expect(json).not.toContain("private-need-sentinel");
+    });
+
+    it("publishes the job stage and bounded timing anchors", () => {
+        const job = makeJob("discovering");
+        job.work.deadlineAt = job.createdAt + 240_000;
+        job.work.lastActiveStatus = "discovering";
+
+        const snapshot = learningSnapshot(job);
+
+        expect(snapshot.learningProgress).toMatchObject({
+            stage: "planner",
+            startedAt: job.createdAt,
+            deadlineAt: job.createdAt + 240_000,
+            remainingMs: 0,
+            lastActiveStatus: "discovering",
+        });
+        expect(learningSnapshot(null, [], 0, {
+            status: "deferred",
+            reasonCode: "auto_learning_disabled",
+            stage: "fix",
+        }).learningProgress).toMatchObject({
+            jobId: "",
+            stage: "fix",
+            startedAt: undefined,
+            deadlineAt: undefined,
+        });
+    });
+
+    it("distinguishes the five-minute job deadline from an upstream timeout", () => {
+        const job = makeJob("deferred");
+        job.error = "job_deadline";
+
+        expect(learningSnapshot(job).learningProgress).toMatchObject({
+            reasonCode: "job_deadline",
+            message: "本轮联网查证已进入 5 分钟收尾期限，已按现有知识继续",
+        });
     });
 });

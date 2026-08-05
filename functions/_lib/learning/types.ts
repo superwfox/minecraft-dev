@@ -78,6 +78,7 @@ export type LearningReasonCode =
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
+    | "job_deadline"
     | "client_deadline"
     | "client_network"
     | "internal_error";
@@ -91,6 +92,10 @@ export type LearningJobStatus =
     | "needs_review"
     | "failed"
     | "cancelled";
+export type LearningActiveStatus = Extract<
+    LearningJobStatus,
+    "queued" | "discovering" | "fetching" | "verifying"
+>;
 
 export interface LearningCandidate {
     needId: string;
@@ -134,6 +139,8 @@ export interface LearningJobTelemetry {
 }
 
 export interface LearningJobWork {
+    deadlineAt?: number;
+    lastActiveStatus?: LearningActiveStatus;
     candidates?: LearningCandidate[];
     sourceIds?: string[];
     verifications?: VerificationResult[];
@@ -216,6 +223,11 @@ export interface LearningProgress {
     jobId: string;
     status: LearningStatus;
     revision: number;
+    stage?: LearningStage;
+    startedAt?: number;
+    deadlineAt?: number;
+    remainingMs?: number;
+    lastActiveStatus?: LearningActiveStatus;
     currentNeed?: string;
     totalNeeds: number;
     completedNeeds: number;

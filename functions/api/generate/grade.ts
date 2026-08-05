@@ -3,7 +3,7 @@ import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/comp
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
 import { assessKnowledgeNeeds } from "../../_lib/learning/assessment";
-import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GRADE_MODEL = "deepseek-v4-pro";
@@ -107,7 +107,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
                 state.knowledgeNeeds = [];
                 state.logs.push("× 分级解析失败，按直接级继续");
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -138,7 +138,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (assessment.rejected.length) {
                 state.logs.push(`▸ 已忽略 ${assessment.rejected.length} 个不符合学习边界的知识候选`);
             }
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
 
             await writer.write(sseEvent(encoder, gateRequired
                 ? { type: "result", direct: false, level, paths }
@@ -148,7 +148,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 出错兜底：重置 grade 为非门控并落库（避免上一轮 gateRequired 残留导致 plan 误判 400），按直接级继续
             state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
             state.knowledgeNeeds = [];
-            try { await putTask(context.env, taskId, JSON.stringify(state), 3600, uid); } catch { /* ignore */ }
+            try { await putTaskState(context.env, taskId, state, 3600, uid); } catch { /* ignore */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 分级错误: ${e.message}` }));
             await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

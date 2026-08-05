@@ -1,7 +1,7 @@
 import { getDefaultBranchSha, createBranch, createBlob, createTree, createCommitAndUpdateRef, triggerWorkflow, findRunByBranch, deleteBranch } from "../../_lib/github";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
-import { getOwnedTask, putTask, TaskOwnershipError } from "../../_lib/taskStore";
+import { getOwnedTask, putTaskState, TaskOwnershipError } from "../../_lib/taskStore";
 
 interface Env {
     DB?: D1Database;
@@ -108,7 +108,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (rebuiltExpiredTask) {
         try {
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
         } catch (error) {
             if (error instanceof TaskOwnershipError) {
                 return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
@@ -152,11 +152,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.status = "error";
             state.error = r.reason;
             state.logs.push(`× 安全校验拦截：${r.reason}`);
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
             return json({ error: r.reason, code: "POM_BLOCKED" }, 400);
         }
     }
 
+    delete state.repairStartedAt;
     state.status = "uploading";
     state.logs.push("正在上传文件到 GitHub...");
 
@@ -199,7 +200,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         state.status = "building";
-        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        await putTaskState(context.env, taskId, state, 3600, uid);
 
         // 通过所有校验且 GitHub 提交成功后再 increment daily 计数
         if (uid) await userBuildIncrement(context.env.TASKS, uid, userBuildUsed);
@@ -217,7 +218,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.status = "error";
         state.error = e.message;
         state.logs.push("× 构建启动失败: " + e.message);
-        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        await putTaskState(context.env, taskId, state, 3600, uid);
         return new Response(JSON.stringify({ error: e.message }), { status: 500 });
     }
 };

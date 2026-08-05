@@ -1,4 +1,4 @@
-import { getOwnedTask, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, putTaskState } from "../../_lib/taskStore";
 
 interface Env {
     TASKS: KVNamespace;
@@ -23,7 +23,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.plan.push({ ...entry });
         }
         state.logs.push(`↻ ${missing.length} 个缺失文件已加入重试队列`);
-        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        await putTaskState(context.env, taskId, state, 3600, uid);
     }
 
     return new Response(JSON.stringify({

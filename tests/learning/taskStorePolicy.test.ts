@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+    acquireTaskOperationLease,
     acquireTaskPlannerLease,
     applyTaskQuotaExhausted,
     assertBoundTaskStoreSchema,
     deleteTask,
     getOwnedTask,
+    putTask,
+    putTaskState,
+    putTaskWithOperationLease,
+    renewTaskOperationLease,
     renewTaskPlannerLease,
     TaskOwnershipError,
     TaskStoreUnavailableError,
@@ -100,18 +105,22 @@ function createPlannerLeaseD1(ownerUid: string) {
                             if (sql.includes("SET planner_lease_token = ?3")) {
                                 const requestedOwner = String(args[1] ?? "");
                                 const requestedToken = String(args[2] ?? "");
-                                const requestedUntil = Number(args[3]) || 0;
-                                const now = Number(args[4]) || 0;
-                                if (requestedOwner !== ownerUid || (leaseToken && leaseUntil > now)) return null;
+                                const leaseMs = Number(args[3]) || 0;
+                                const now = Math.floor(Date.now() / 1000) * 1000;
+                                if (requestedOwner !== ownerUid || leaseUntil > now) return null;
                                 leaseToken = requestedToken;
-                                leaseUntil = requestedUntil;
+                                leaseUntil = now + leaseMs;
                                 return { planner_lease_token: leaseToken };
                             }
-                            if (sql.includes("SET planner_lease_until = ?4")) {
+                            if (sql.includes("SET planner_lease_until =")) {
                                 const requestedOwner = String(args[1] ?? "");
                                 const requestedToken = String(args[2] ?? "");
-                                if (requestedOwner !== ownerUid || requestedToken !== leaseToken) return null;
-                                leaseUntil = Number(args[3]) || 0;
+                                const leaseMs = Number(args[3]) || 0;
+                                const now = Math.floor(Date.now() / 1000) * 1000;
+                                if (requestedOwner !== ownerUid || requestedToken !== leaseToken || leaseUntil <= now) {
+                                    return null;
+                                }
+                                leaseUntil = now + leaseMs;
                                 return { planner_lease_token: leaseToken };
                             }
                             if (sql.includes("SELECT owner_uid")) return { owner_uid: ownerUid };
@@ -123,6 +132,171 @@ function createPlannerLeaseD1(ownerUid: string) {
         },
     } as unknown as D1Database;
     return { database, currentLease: () => ({ leaseToken, leaseUntil }) };
+}
+
+function createOperationLeaseD1(
+    ownerUid: string,
+    initialRaw = JSON.stringify({ uid: ownerUid, status: "error" }),
+) {
+    let leaseToken = "";
+    let leaseUntil = 0;
+    let expiresAt = Date.now() + 3_600_000;
+    const chunks = new Map<number, string>([[0, initialRaw]]);
+    const d1Now = () => Math.floor(Date.now() / 1000) * 1000;
+    const rawPayload = () => [...chunks.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, value]) => value)
+        .join("");
+
+    const statement = (sql: string, args: unknown[] = []): any => ({
+        sql,
+        args,
+        bind: (...bound: unknown[]) => statement(sql, bound),
+        first: async () => {
+            if (sql.includes("SET planner_lease_token = ?3") && sql.includes("RETURNING planner_lease_token")) {
+                const requestedOwner = String(args[1] ?? "");
+                const requestedToken = String(args[2] ?? "");
+                const leaseMs = Number(args[3]) || 0;
+                const now = d1Now();
+                if (requestedOwner !== ownerUid || leaseUntil > now) return null;
+                leaseToken = requestedToken;
+                leaseUntil = now + leaseMs;
+                expiresAt = Math.max(expiresAt, leaseUntil);
+                return { planner_lease_token: leaseToken };
+            }
+            if (sql.includes("SET planner_lease_until =") && sql.includes("RETURNING planner_lease_token")) {
+                const requestedOwner = String(args[1] ?? "");
+                const requestedToken = String(args[2] ?? "");
+                const leaseMs = Number(args[3]) || 0;
+                const now = d1Now();
+                if (requestedOwner !== ownerUid || requestedToken !== leaseToken || leaseUntil <= now) {
+                    return null;
+                }
+                leaseUntil = now + leaseMs;
+                expiresAt = Math.max(expiresAt, leaseUntil);
+                return { planner_lease_token: leaseToken };
+            }
+            if (sql.includes("SELECT owner_uid")) return { owner_uid: ownerUid };
+            if (sql.includes("SELECT planner_lease_token")) {
+                return { planner_lease_token: leaseToken, planner_lease_until: leaseUntil };
+            }
+            throw new Error(`unexpected first query: ${sql}`);
+        },
+        all: async () => {
+            if (!sql.includes("SELECT c.payload")) throw new Error(`unexpected all query: ${sql}`);
+            return {
+                results: [...chunks.entries()]
+                    .sort(([left], [right]) => left - right)
+                    .map(([, payload]) => ({
+                        payload,
+                        quota_exhausted: 0,
+                        planner_lease_token: leaseToken,
+                        planner_lease_until: leaseUntil,
+                    })),
+            };
+        },
+        run: async () => {
+            const requestedOwner = String(args[1] ?? "");
+            const requestedToken = String(args[2] ?? "");
+            if (sql.includes("SET planner_lease_token = ?4")
+                && requestedOwner === ownerUid
+                && requestedToken === leaseToken) {
+                leaseToken = String(args[3] ?? "");
+                leaseUntil = 0;
+                return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+        },
+    });
+
+    const database = {
+        prepare(sql: string) {
+            return statement(sql);
+        },
+        async batch(statements: any[]) {
+            return statements.map((prepared) => {
+                const sql = String(prepared.sql);
+                const args = prepared.args as unknown[];
+                const now = d1Now();
+                let changes = 0;
+
+                if (sql.includes("INSERT INTO generation_tasks")) {
+                    const requestedOwner = String(args[1] ?? "");
+                    const expirationMs = Number(args[5]) || 0;
+                    const writeToken = String(args[6] ?? "");
+                    const expectedFence = String(args[7] ?? "");
+                    if (requestedOwner === ownerUid
+                        && (expiresAt <= now || (leaseToken === expectedFence && leaseUntil <= now))) {
+                        leaseToken = writeToken;
+                        leaseUntil = 0;
+                        expiresAt = now + expirationMs;
+                        changes = 1;
+                    }
+                } else if (sql.includes("SET planner_lease_token = ?4")
+                    && sql.includes("planner_lease_until >")) {
+                    const requestedOwner = String(args[1] ?? "");
+                    const requestedToken = String(args[2] ?? "");
+                    const writeToken = String(args[3] ?? "");
+                    const expirationMs = Number(args[4]) || 0;
+                    if (requestedOwner === ownerUid
+                        && requestedToken === leaseToken
+                        && leaseUntil > now) {
+                        leaseToken = writeToken;
+                        expiresAt = now + expirationMs;
+                        changes = 1;
+                    }
+                } else if (sql.includes("INSERT INTO generation_task_chunks")) {
+                    const requestedOwner = String(args[3] ?? "");
+                    const writeToken = String(args[4] ?? "");
+                    if (requestedOwner === ownerUid && writeToken === leaseToken) {
+                        chunks.set(Number(args[1]) || 0, String(args[2] ?? ""));
+                        changes = 1;
+                    }
+                } else if (sql.includes("DELETE FROM generation_task_chunks")) {
+                    const requestedOwner = String(args[2] ?? "");
+                    const writeToken = String(args[3] ?? "");
+                    if (requestedOwner === ownerUid && writeToken === leaseToken) {
+                        const firstDeleted = Number(args[1]) || 0;
+                        for (const index of chunks.keys()) {
+                            if (index >= firstDeleted) chunks.delete(index);
+                        }
+                        changes = 1;
+                    }
+                } else if (sql.includes("planner_lease_until = CASE")) {
+                    const requestedOwner = String(args[1] ?? "");
+                    const finalToken = String(args[2] ?? "");
+                    const releaseLease = Number(args[3]) === 1;
+                    const expirationMs = Number(args[4]) || 0;
+                    const writeToken = String(args[5] ?? "");
+                    if (requestedOwner === ownerUid && writeToken === leaseToken) {
+                        leaseToken = finalToken;
+                        if (releaseLease) leaseUntil = 0;
+                        expiresAt = now + expirationMs;
+                        changes = 1;
+                    }
+                } else if (sql.includes("SET planner_lease_token = ?3, planner_lease_until = 0")) {
+                    const requestedOwner = String(args[1] ?? "");
+                    const finalToken = String(args[2] ?? "");
+                    const expirationMs = Number(args[3]) || 0;
+                    const writeToken = String(args[4] ?? "");
+                    if (requestedOwner === ownerUid && writeToken === leaseToken) {
+                        leaseToken = finalToken;
+                        leaseUntil = 0;
+                        expiresAt = now + expirationMs;
+                        changes = 1;
+                    }
+                }
+                return { meta: { changes } };
+            });
+        },
+    } as unknown as D1Database;
+
+    return {
+        database,
+        currentLease: () => ({ leaseToken, leaseUntil }),
+        payload: rawPayload,
+        expireLease: () => { leaseUntil = d1Now() - 1; },
+    };
 }
 
 describe("task store schema gate", () => {
@@ -202,6 +376,67 @@ describe("task quota state overlay", () => {
     });
 });
 
+describe("task state write policy", () => {
+    it("does not expose a stale KV shadow when a bound D1 read fails", async () => {
+        const taskId = "task-d1-read-failure";
+        const ownerUid = "user-1";
+        const staleRaw = JSON.stringify({ uid: ownerUid, status: "building", runId: 123 });
+        const { namespace } = createMemoryKv({ [taskId]: staleRaw });
+        const database = {
+            prepare() {
+                return {
+                    bind() {
+                        return { first: async () => { throw new Error("d1 unavailable"); } };
+                    },
+                };
+            },
+        } as unknown as D1Database;
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+        try {
+            await expect(getOwnedTask(
+                { TASKS: namespace, DB: database },
+                taskId,
+                ownerUid,
+            )).rejects.toBeInstanceOf(TaskStoreUnavailableError);
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it("does not shadow a failed bound D1 write in KV", async () => {
+        const taskId = "task-d1-write-failure";
+        const ownerUid = "user-1";
+        const { namespace, values } = createMemoryKv();
+        const database = {
+            prepare(sql: string) {
+                return {
+                    bind(...args: unknown[]) {
+                        return { sql, args };
+                    },
+                };
+            },
+            async batch() {
+                throw new Error("d1 unavailable");
+            },
+        } as unknown as D1Database;
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+        try {
+            await expect(putTask(
+                { TASKS: namespace, DB: database },
+                taskId,
+                JSON.stringify({ uid: ownerUid, status: "planning" }),
+                3600,
+                ownerUid,
+            )).rejects.toBeInstanceOf(TaskStoreUnavailableError);
+            expect(values.has(taskId)).toBe(false);
+        } finally {
+            warn.mockRestore();
+        }
+    });
+});
+
 describe("Planner lease policy", () => {
     it("requires D1 and never creates a KV fallback lock", async () => {
         const taskId = "task-no-d1";
@@ -265,6 +500,144 @@ describe("Planner lease policy", () => {
         expect(await renewTaskPlannerLease(env, taskId, ownerUid, "planner_first", 120_000)).toBe(true);
         expect(d1.currentLease().leaseUntil).toBeGreaterThan(firstLeaseUntil);
         expect(await renewTaskPlannerLease(env, taskId, ownerUid, "planner_second", 120_000)).toBe(false);
+    });
+
+    it("retains and atomically releases a fenced operation lease", async () => {
+        const taskId = "task-operation-lease";
+        const ownerUid = "user-1";
+        const { namespace } = createMemoryKv();
+        const d1 = createOperationLeaseD1(ownerUid);
+        const env = { TASKS: namespace, DB: d1.database };
+        const token = "repair:first";
+
+        expect(await acquireTaskOperationLease(env, taskId, ownerUid, token, 45_000)).toBe("d1");
+        expect(await acquireTaskOperationLease(env, taskId, ownerUid, "repair:second", 45_000)).toBeNull();
+        expect(await putTaskWithOperationLease(
+            env,
+            taskId,
+            JSON.stringify({ status: "repairing" }),
+            token,
+            "d1",
+            3600,
+            ownerUid,
+            false,
+        )).toBe(true);
+        expect(d1.currentLease().leaseToken).toBe(token);
+        expect(await renewTaskOperationLease(env, taskId, ownerUid, token, 45_000)).toBe(true);
+
+        expect(await putTaskWithOperationLease(
+            env,
+            taskId,
+            JSON.stringify({ status: "fixed" }),
+            token,
+            "d1",
+            3600,
+            ownerUid,
+            true,
+        )).toBe(true);
+        expect(JSON.parse(d1.payload())).toEqual({ status: "fixed" });
+        expect(d1.currentLease()).toEqual({ leaseToken: `fence:${token}`, leaseUntil: 0 });
+    });
+
+    it("rejects a stale ordinary write after an operation completion fence", async () => {
+        const taskId = "task-operation-fence";
+        const ownerUid = "user-1";
+        const initialRaw = JSON.stringify({
+            uid: ownerUid,
+            status: "error",
+            generatedFiles: [{ path: "src/Main.java", content: "before" }],
+        });
+        const { namespace } = createMemoryKv();
+        const d1 = createOperationLeaseD1(ownerUid, initialRaw);
+        const env = { TASKS: namespace, DB: d1.database };
+        const token = "repair:fenced";
+
+        const staleRaw = await getOwnedTask(env, taskId, ownerUid);
+        expect(staleRaw).not.toBeNull();
+        expect(await acquireTaskOperationLease(env, taskId, ownerUid, token, 45_000)).toBe("d1");
+
+        const leasedRaw = await getOwnedTask(env, taskId, ownerUid);
+        const fixedState = JSON.parse(String(leasedRaw));
+        fixedState.status = "fixed";
+        fixedState.generatedFiles[0].content = "after";
+        expect(await putTaskWithOperationLease(
+            env,
+            taskId,
+            JSON.stringify(fixedState),
+            token,
+            "d1",
+            3600,
+            ownerUid,
+            true,
+        )).toBe(true);
+
+        await expect(putTask(env, taskId, String(staleRaw), 3600, ownerUid))
+            .rejects.toBeInstanceOf(TaskOwnershipError);
+        const freshRaw = await getOwnedTask(env, taskId, ownerUid);
+        expect(JSON.parse(String(freshRaw))).toMatchObject({
+            status: "fixed",
+            generatedFiles: [{ path: "src/Main.java", content: "after" }],
+        });
+
+        const freshState = JSON.parse(String(freshRaw));
+        freshState.note = "fresh write";
+        await expect(putTask(env, taskId, JSON.stringify(freshState), 3600, ownerUid))
+            .resolves.toBeUndefined();
+        expect(JSON.parse(d1.payload())).toMatchObject({ status: "fixed", note: "fresh write" });
+    });
+
+    it("advances the ordinary write fence while allowing sequential writes from one state", async () => {
+        const taskId = "task-ordinary-fence";
+        const ownerUid = "user-1";
+        const initialRaw = JSON.stringify({ uid: ownerUid, status: "planning" });
+        const { namespace } = createMemoryKv();
+        const d1 = createOperationLeaseD1(ownerUid, initialRaw);
+        const env = { TASKS: namespace, DB: d1.database };
+
+        const firstRaw = await getOwnedTask(env, taskId, ownerUid);
+        const staleRaw = await getOwnedTask(env, taskId, ownerUid);
+        const state = JSON.parse(String(firstRaw));
+        state.first = true;
+        await putTaskState(env, taskId, state, 3600, ownerUid);
+
+        state.second = true;
+        await putTaskState(env, taskId, state, 3600, ownerUid);
+        expect(JSON.parse(d1.payload())).toMatchObject({
+            status: "planning",
+            first: true,
+            second: true,
+        });
+
+        const staleState = JSON.parse(String(staleRaw));
+        staleState.stale = true;
+        await expect(putTaskState(env, taskId, staleState, 3600, ownerUid))
+            .rejects.toBeInstanceOf(TaskOwnershipError);
+        expect(JSON.parse(d1.payload())).not.toHaveProperty("stale");
+    });
+
+    it("does not renew or write with an expired operation token", async () => {
+        const taskId = "task-expired-operation-lease";
+        const ownerUid = "user-1";
+        const initialRaw = JSON.stringify({ uid: ownerUid, status: "error" });
+        const { namespace } = createMemoryKv();
+        const d1 = createOperationLeaseD1(ownerUid, initialRaw);
+        const env = { TASKS: namespace, DB: d1.database };
+        const token = "repair:expired";
+
+        expect(await acquireTaskOperationLease(env, taskId, ownerUid, token, 45_000)).toBe("d1");
+        d1.expireLease();
+        expect(await renewTaskOperationLease(env, taskId, ownerUid, token, 45_000)).toBe(false);
+        expect(await putTaskWithOperationLease(
+            env,
+            taskId,
+            JSON.stringify({ status: "fixed" }),
+            token,
+            "d1",
+            3600,
+            ownerUid,
+            true,
+        )).toBe(false);
+        expect(d1.payload()).toBe(initialRaw);
     });
 
     it("removes legacy KV Planner metadata when the owned task is deleted", async () => {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildKnowledgeContext } from "../../functions/_lib/learning/context";
-import { makeKnowledgeItem } from "./testData";
+import {
+    buildKnowledgeContext,
+    loadKnowledgeContext,
+    mergeKnowledgeUsed,
+} from "../../functions/_lib/learning/context";
+import { knowledgeLookupKey } from "../../functions/_lib/learning/assessment";
+import { makeKnowledgeItem, makeNeed } from "./testData";
 
 describe("runtime knowledge context", () => {
     it("removes role tags, control characters, and code fences from stored facts", () => {
@@ -50,5 +55,64 @@ describe("runtime knowledge context", () => {
         expect(result.used.map((item) => item.knowledgeId)).toEqual(["know-new"]);
         expect(result.context).toContain("new revision");
         expect(result.context).not.toContain("know-old");
+    });
+
+    it("merges cache-hit knowledge into task usage idempotently", () => {
+        const item = makeKnowledgeItem({
+            knowledgeId: "know-cache-hit",
+            summary: "verified cache hit",
+            confidence: 0.97,
+        });
+        const existing = [
+            {
+                knowledgeId: "know-existing",
+                summary: "existing fact",
+                confidence: 0.8,
+                status: "active" as const,
+            },
+            {
+                knowledgeId: item.knowledgeId,
+                summary: "stale summary",
+                confidence: 0.4,
+                status: "skipped" as const,
+            },
+        ];
+
+        const merged = mergeKnowledgeUsed(existing, [item]);
+        expect(merged).toEqual([
+            existing[0],
+            {
+                knowledgeId: item.knowledgeId,
+                summary: item.summary,
+                confidence: item.confidence,
+                status: "active",
+            },
+        ]);
+        expect(mergeKnowledgeUsed(merged, [item])).toEqual(merged);
+    });
+
+    it("falls back to an empty context when the knowledge store does not respond", async () => {
+        const need = makeNeed();
+        const pendingRows = new Promise<never>(() => { });
+        const db = {
+            prepare: () => ({
+                bind: () => ({
+                    all: () => pendingRows,
+                }),
+            }),
+        } as unknown as D1Database;
+
+        const result = await loadKnowledgeContext({
+            env: { DB: db },
+            needs: [need],
+            maxCharacters: 10_000,
+            timeoutMs: 5,
+        });
+
+        expect(result).toEqual({
+            context: "",
+            used: [],
+            lookupKeys: [knowledgeLookupKey(need)],
+        });
     });
 });

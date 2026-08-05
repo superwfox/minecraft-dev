@@ -11,7 +11,9 @@ export type GradePath = {
 };
 export type GradeInfo = { level: string; paths: GradePath[] };
 
+export type LearningStage = "planner" | "fix";
 export type LearningStatus = "idle" | "queued" | "discovering" | "fetching" | "verifying" | "ready" | "deferred" | "needs_review" | "failed" | "cancelled";
+export type LearningActiveStatus = Extract<LearningStatus, "queued" | "discovering" | "fetching" | "verifying">;
 export type LearningReasonCode =
     | "no_learning_needed"
     | "static_contract_covered"
@@ -38,6 +40,7 @@ export type LearningReasonCode =
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
+    | "job_deadline"
     | "client_deadline"
     | "client_network"
     | "internal_error";
@@ -45,6 +48,11 @@ export type LearningProgress = {
     jobId: string;
     status: LearningStatus;
     revision: number;
+    stage?: LearningStage;
+    startedAt?: number;
+    deadlineAt?: number;
+    remainingMs?: number;
+    lastActiveStatus?: LearningActiveStatus;
     currentNeed?: string;
     totalNeeds: number;
     completedNeeds: number;
@@ -92,7 +100,7 @@ export type LearningJobTelemetry = {
 export type LearningDebugMeta = {
     schemaVersion: "learning.debug.v1";
     jobId: string;
-    stage: "planner" | "fix";
+    stage: LearningStage;
     status: Exclude<LearningStatus, "idle">;
     revision: number;
     reasonCode?: LearningReasonCode;
@@ -102,7 +110,7 @@ export type LearningDebugMeta = {
 export type LearningDebugEvent = {
     at: number;
     kind: "http" | "transition" | "conflict" | "client";
-    stage: "planner" | "fix";
+    stage: LearningStage;
     endpoint: "start" | "step" | "status";
     attempt: number;
     httpStatus: number;
@@ -128,6 +136,22 @@ export type PlannerResumeState = {
     plannerReplan: boolean;
     plannerAttempt: number;
 };
+export type FixResumeStage = "" | "diagnosing" | "learning" | "repairing" | "inspecting" | "rebuilding";
+
+const FIX_RESUME_STAGES = new Set<FixResumeStage>([
+    "",
+    "diagnosing",
+    "learning",
+    "repairing",
+    "inspecting",
+    "rebuilding",
+]);
+
+export function normalizeFixResumeStage(value: unknown): FixResumeStage {
+    return typeof value === "string" && FIX_RESUME_STAGES.has(value as FixResumeStage)
+        ? value as FixResumeStage
+        : "";
+}
 
 export function normalizePlannerResumeState(value: unknown): PlannerResumeState {
     const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -163,11 +187,14 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
     "verification_failed", "unresolved_knowledge_needs", "revision_conflict", "lease_conflict",
-    "storage_unavailable", "client_deadline", "client_network", "internal_error",
+    "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const LEARNING_STATUSES = new Set<LearningStatus>([
     "idle", "queued", "discovering", "fetching", "verifying", "ready",
     "deferred", "needs_review", "failed", "cancelled",
+]);
+const LEARNING_ACTIVE_STATUSES = new Set<LearningActiveStatus>([
+    "queued", "discovering", "fetching", "verifying",
 ]);
 
 function safeCount(value: unknown): number {
@@ -175,6 +202,85 @@ function safeCount(value: unknown): number {
     return Number.isFinite(number) && number > 0
         ? Math.min(1_000_000_000, Math.floor(number))
         : 0;
+}
+
+function safeLearningText(value: unknown, max: number): string {
+    return typeof value === "string" ? value.trim().slice(0, max) : "";
+}
+
+function optionalLearningTimestamp(value: unknown): number | undefined {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 && number <= 8_640_000_000_000_000
+        ? Math.floor(number)
+        : undefined;
+}
+
+function optionalLearningDuration(value: unknown): number | undefined {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0
+        ? Math.min(300_000, Math.floor(number))
+        : undefined;
+}
+
+export function isUnconfirmedLearningProgress(
+    progress: Pick<LearningProgress, "jobId" | "reasonCode">,
+): boolean {
+    return !!progress.jobId
+        && (progress.reasonCode === "client_network" || progress.reasonCode === "client_deadline");
+}
+
+export function shouldResumeLearningProgress(
+    progress: LearningProgress,
+    stage: LearningStage,
+    resumeExisting: boolean,
+): boolean {
+    return resumeExisting
+        && progress.stage === stage
+        && !!progress.jobId
+        && (LEARNING_ACTIVE_STATUSES.has(progress.status as LearningActiveStatus)
+            || isUnconfirmedLearningProgress(progress));
+}
+
+export function normalizeLearningProgress(value: unknown): LearningProgress {
+    const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const status = typeof raw.status === "string" && LEARNING_STATUSES.has(raw.status as LearningStatus)
+        ? raw.status as LearningStatus
+        : "idle";
+    const stage = raw.stage === "planner" || raw.stage === "fix" ? raw.stage : undefined;
+    const jobId = typeof raw.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)
+        ? raw.jobId
+        : "";
+    const totalNeeds = safeCount(raw.totalNeeds);
+    const startedAt = optionalLearningTimestamp(raw.startedAt);
+    const rawDeadlineAt = optionalLearningTimestamp(raw.deadlineAt);
+    const deadlineAt = startedAt !== undefined
+        && rawDeadlineAt !== undefined
+        && rawDeadlineAt >= startedAt
+        && rawDeadlineAt - startedAt <= 300_000
+        ? rawDeadlineAt
+        : undefined;
+    const rawReason = typeof raw.reasonCode === "string" ? raw.reasonCode as LearningReasonCode : undefined;
+    const lastActiveStatus = typeof raw.lastActiveStatus === "string"
+        && LEARNING_ACTIVE_STATUSES.has(raw.lastActiveStatus as LearningActiveStatus)
+        ? raw.lastActiveStatus as LearningActiveStatus
+        : undefined;
+    const currentNeed = safeLearningText(raw.currentNeed, 500);
+    return {
+        jobId,
+        status,
+        revision: optionalCount(raw.revision) ?? 0,
+        stage,
+        startedAt,
+        deadlineAt,
+        remainingMs: optionalLearningDuration(raw.remainingMs),
+        lastActiveStatus,
+        currentNeed: currentNeed || undefined,
+        totalNeeds,
+        completedNeeds: Math.min(totalNeeds, safeCount(raw.completedNeeds)),
+        sourceCount: safeCount(raw.sourceCount),
+        message: safeLearningText(raw.message, 1_000),
+        reasonCode: rawReason && LEARNING_REASON_CODES.has(rawReason) ? rawReason : undefined,
+    };
 }
 
 export function normalizeLearningTelemetry(value: unknown): LearningJobTelemetry {
@@ -308,6 +414,7 @@ export type GenTask = {
     debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
     buildDiagnostics: any[];
     buildHistory: any[];
+    fixResumeStage: FixResumeStage;
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
     learningDeferred: boolean;
@@ -345,6 +452,7 @@ export const genTask = reactive<GenTask>({
     debugLog: [],
     buildDiagnostics: [],
     buildHistory: [],
+    fixResumeStage: "",
     learningProgress: emptyLearningProgress(),
     knowledgeUsed: [],
     learningDeferred: false,
@@ -450,6 +558,7 @@ export function resetGenTask() {
     genTask.debugLog = [];
     genTask.buildDiagnostics = [];
     genTask.buildHistory = [];
+    genTask.fixResumeStage = "";
     genTask.learningProgress = emptyLearningProgress();
     genTask.knowledgeUsed = [];
     genTask.learningDeferred = false;
@@ -503,6 +612,7 @@ function writeGenTaskSnapshot() {
             plannerAttempt: genTask.plannerAttempt,
             buildDiagnostics: genTask.buildDiagnostics,
             buildHistory: genTask.buildHistory.slice(-6),
+            fixResumeStage: genTask.fixResumeStage,
             learningProgress: genTask.learningProgress,
             knowledgeUsed: genTask.knowledgeUsed,
             learningDeferred: genTask.learningDeferred,
@@ -556,7 +666,8 @@ export function restoreGenTask(): boolean {
         genTask.plannerAttempt = plannerResume.plannerAttempt;
         genTask.buildDiagnostics = s.buildDiagnostics || [];
         genTask.buildHistory = s.buildHistory || [];
-        genTask.learningProgress = s.learningProgress || emptyLearningProgress();
+        genTask.fixResumeStage = normalizeFixResumeStage(s.fixResumeStage);
+        genTask.learningProgress = normalizeLearningProgress(s.learningProgress);
         genTask.knowledgeUsed = s.knowledgeUsed || [];
         genTask.learningDeferred = !!s.learningDeferred;
         const rawLearningDebugEvents = Array.isArray(s.learningDebugEvents) ? s.learningDebugEvents : [];
@@ -581,7 +692,8 @@ watch(
         genTask.files.filter(f => f.status === "done").length,
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
-        genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt],
+        genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt,
+        genTask.fixResumeStage],
     persistGenTask,
 );
 

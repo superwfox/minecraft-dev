@@ -31,6 +31,7 @@ const REASON_CODES = new Set<LearningReasonCode>([
     "revision_conflict",
     "lease_conflict",
     "storage_unavailable",
+    "job_deadline",
     "client_deadline",
     "client_network",
     "internal_error",
@@ -68,8 +69,9 @@ const REASON_MESSAGES: Record<LearningReasonCode, string> = {
     revision_conflict: "学习任务已由另一请求推进，正在对账最新状态",
     lease_conflict: "学习任务正在由另一请求处理，正在对账最新状态",
     storage_unavailable: "学习存储暂不可用，已按现有知识继续",
-    client_deadline: "联网学习未在等待时限内完成，已按现有知识继续",
-    client_network: "联网学习状态暂时无法确认，已按现有知识继续",
+    job_deadline: "本轮联网查证已进入 5 分钟收尾期限，已按现有知识继续",
+    client_deadline: "浏览器未在本轮时限内确认联网查证结果，已按现有知识继续",
+    client_network: "浏览器暂时无法确认联网查证状态，已按现有知识继续",
     internal_error: "联网学习未完成，已按现有知识继续",
 };
 

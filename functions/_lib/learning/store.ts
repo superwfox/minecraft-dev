@@ -32,6 +32,16 @@ interface LearningJobRow {
     updated_at: number;
 }
 
+export type KnowledgeItemCreateInput = Omit<
+    KnowledgeItemRecord,
+    "knowledgeId" | "revision" | "createdAt" | "updatedAt" | "reviewNote"
+> & {
+    knowledgeId?: string;
+    reviewNote?: string;
+    evidence?: { sourceId: string; relation: string; locator: string; excerpt: string }[];
+    now?: number;
+};
+
 interface KnowledgeItemRow {
     knowledge_id: string;
     kind: string;
@@ -241,7 +251,11 @@ export async function acquireLearningJobLease(
     },
 ): Promise<LearningJobRecord | null> {
     const now = input.now ?? Date.now();
-    const leaseUntil = now + Math.max(5_000, input.leaseMs ?? 45_000);
+    const requestedLeaseMs = Number(input.leaseMs);
+    const leaseMs = Number.isFinite(requestedLeaseMs) && requestedLeaseMs > 0
+        ? Math.floor(requestedLeaseMs)
+        : 45_000;
+    const leaseUntil = now + Math.max(1, leaseMs);
     const row = await dbOf(env).prepare(`
         UPDATE learning_jobs
         SET lease_token = ?4,
@@ -275,11 +289,314 @@ export async function completeLearningJobStep(
         work: LearningJobWork;
         resultIds?: string[];
         error?: string;
+        sources?: LearningSourceRecord[];
+        knowledge?: KnowledgeItemCreateInput & { knowledgeId: string };
         now?: number;
     },
 ): Promise<LearningJobRecord | null> {
+    const db = dbOf(env);
     const now = input.now ?? Date.now();
-    const row = await dbOf(env).prepare(`
+    const statements: D1PreparedStatement[] = [];
+    const sources = input.sources ?? [];
+
+    if (input.sources) {
+        statements.push(db.prepare(`
+            DELETE FROM learning_sources
+            WHERE job_id = ?1
+              AND EXISTS (
+                  SELECT 1 FROM learning_jobs
+                  WHERE job_id = ?1
+                    AND owner_uid = ?2
+                    AND revision = ?3
+                    AND lease_token = ?4
+                    AND lease_until > ?5
+              )
+        `).bind(
+            input.jobId,
+            input.ownerUid,
+            input.expectedRevision,
+            input.leaseToken,
+            now,
+        ));
+    }
+
+    for (const source of sources) {
+        statements.push(db.prepare(`
+            INSERT OR REPLACE INTO learning_sources (
+                source_id, job_id, need_id, canonical_url, domain, source_type,
+                authority, title, published_at, fetched_at, content_hash, excerpt,
+                verification_state
+            )
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+            WHERE EXISTS (
+                SELECT 1
+                FROM learning_jobs
+                WHERE job_id = ?14
+                  AND owner_uid = ?15
+                  AND revision = ?16
+                  AND lease_token = ?17
+                  AND lease_until > ?18
+            )
+        `).bind(
+            source.sourceId,
+            input.jobId,
+            source.needId,
+            source.canonicalUrl,
+            source.domain,
+            source.sourceType,
+            source.authority,
+            source.title,
+            source.publishedAt ?? null,
+            source.fetchedAt,
+            source.contentHash,
+            source.excerpt,
+            source.verificationState,
+            input.jobId,
+            input.ownerUid,
+            input.expectedRevision,
+            input.leaseToken,
+            now,
+        ));
+    }
+
+    const knowledge = input.knowledge;
+    if (knowledge) {
+        const knowledgeNow = knowledge.now ?? now;
+        const existing = await db.prepare(`SELECT * FROM knowledge_items WHERE knowledge_id = ?1`)
+            .bind(knowledge.knowledgeId).first<KnowledgeItemRow>();
+        if (existing && existing.lookup_key !== knowledge.lookupKey) {
+            throw new Error("Knowledge item ID conflict");
+        }
+        if (!existing) {
+            statements.push(db.prepare(`
+                INSERT INTO knowledge_items (
+                    knowledge_id, kind, lookup_key, scope_json, payload_json, summary,
+                    risk, confidence, status, valid_from, expires_at, supersedes_id,
+                    revision, review_note, created_at, updated_at
+                )
+                SELECT
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    CASE
+                        WHEN ?9 = 'active' THEN COALESCE(
+                            ?12,
+                            (
+                                SELECT knowledge_id
+                                FROM knowledge_items
+                                WHERE lookup_key = ?3 AND status = 'active'
+                                ORDER BY revision DESC
+                                LIMIT 1
+                            )
+                        )
+                        ELSE ?12
+                    END,
+                    (SELECT COALESCE(MAX(revision), 0) + 1 FROM knowledge_items WHERE lookup_key = ?3),
+                    ?13, ?14, ?14
+                FROM learning_jobs AS lease
+                WHERE lease.job_id = ?15
+                  AND lease.owner_uid = ?16
+                  AND lease.revision = ?17
+                  AND lease.lease_token = ?18
+                  AND lease.lease_until > ?19
+            `).bind(
+                knowledge.knowledgeId,
+                knowledge.kind,
+                knowledge.lookupKey,
+                JSON.stringify(knowledge.scope),
+                JSON.stringify(knowledge.payload),
+                knowledge.summary,
+                knowledge.risk,
+                knowledge.confidence,
+                knowledge.status,
+                knowledge.validFrom,
+                knowledge.expiresAt,
+                knowledge.supersedesId ?? null,
+                knowledge.reviewNote ?? "",
+                knowledgeNow,
+                input.jobId,
+                input.ownerUid,
+                input.expectedRevision,
+                input.leaseToken,
+                now,
+            ));
+            statements.push(db.prepare(`
+                UPDATE knowledge_items
+                SET status = 'deprecated', updated_at = ?3
+                WHERE ?4 = 'active'
+                  AND lookup_key = ?1
+                  AND knowledge_id <> ?2
+                  AND status = 'active'
+                  AND EXISTS (
+                      SELECT 1 FROM knowledge_items
+                      WHERE knowledge_id = ?2 AND lookup_key = ?1
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM learning_jobs
+                      WHERE job_id = ?5
+                        AND owner_uid = ?6
+                        AND revision = ?7
+                        AND lease_token = ?8
+                        AND lease_until > ?9
+                  )
+            `).bind(
+                knowledge.lookupKey,
+                knowledge.knowledgeId,
+                knowledgeNow,
+                knowledge.status,
+                input.jobId,
+                input.ownerUid,
+                input.expectedRevision,
+                input.leaseToken,
+                now,
+            ));
+        } else {
+            statements.push(db.prepare(`
+                UPDATE knowledge_items
+                SET kind = ?2,
+                    scope_json = ?4,
+                    payload_json = ?5,
+                    summary = ?6,
+                    risk = ?7,
+                    confidence = ?8,
+                    status = ?9,
+                    valid_from = ?10,
+                    expires_at = ?11,
+                    supersedes_id = CASE
+                        WHEN ?9 = 'active' THEN COALESCE(
+                            ?12,
+                            (
+                                SELECT knowledge_id
+                                FROM knowledge_items
+                                WHERE lookup_key = ?3
+                                  AND knowledge_id <> ?1
+                                  AND status = 'active'
+                                ORDER BY revision DESC
+                                LIMIT 1
+                            )
+                        )
+                        ELSE ?12
+                    END,
+                    review_note = ?13,
+                    updated_at = ?14
+                WHERE knowledge_id = ?1
+                  AND lookup_key = ?3
+                  AND EXISTS (
+                      SELECT 1 FROM learning_jobs
+                      WHERE job_id = ?15
+                        AND owner_uid = ?16
+                        AND revision = ?17
+                        AND lease_token = ?18
+                        AND lease_until > ?19
+                  )
+            `).bind(
+                knowledge.knowledgeId,
+                knowledge.kind,
+                knowledge.lookupKey,
+                JSON.stringify(knowledge.scope),
+                JSON.stringify(knowledge.payload),
+                knowledge.summary,
+                knowledge.risk,
+                knowledge.confidence,
+                knowledge.status,
+                knowledge.validFrom,
+                knowledge.expiresAt,
+                knowledge.supersedesId ?? null,
+                knowledge.reviewNote ?? "",
+                knowledgeNow,
+                input.jobId,
+                input.ownerUid,
+                input.expectedRevision,
+                input.leaseToken,
+                now,
+            ));
+            statements.push(db.prepare(`
+                UPDATE knowledge_items
+                SET status = 'deprecated', updated_at = ?3
+                WHERE ?4 = 'active'
+                  AND lookup_key = ?1
+                  AND knowledge_id <> ?2
+                  AND status = 'active'
+                  AND EXISTS (
+                      SELECT 1 FROM knowledge_items
+                      WHERE knowledge_id = ?2 AND lookup_key = ?1
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM learning_jobs
+                      WHERE job_id = ?5
+                        AND owner_uid = ?6
+                        AND revision = ?7
+                        AND lease_token = ?8
+                        AND lease_until > ?9
+                  )
+            `).bind(
+                knowledge.lookupKey,
+                knowledge.knowledgeId,
+                knowledgeNow,
+                knowledge.status,
+                input.jobId,
+                input.ownerUid,
+                input.expectedRevision,
+                input.leaseToken,
+                now,
+            ));
+        }
+        statements.push(db.prepare(`
+            DELETE FROM knowledge_evidence
+            WHERE knowledge_id = ?1
+              AND EXISTS (
+                  SELECT 1 FROM learning_jobs
+                  WHERE job_id = ?2
+                    AND owner_uid = ?3
+                    AND revision = ?4
+                    AND lease_token = ?5
+                    AND lease_until > ?6
+              )
+        `).bind(
+            knowledge.knowledgeId,
+            input.jobId,
+            input.ownerUid,
+            input.expectedRevision,
+            input.leaseToken,
+            now,
+        ));
+        for (const evidence of knowledge.evidence ?? []) {
+            statements.push(db.prepare(`
+                INSERT OR REPLACE INTO knowledge_evidence (
+                    knowledge_id, source_id, relation, locator, excerpt
+                )
+                SELECT ?1, ?2, ?3, ?4, ?5
+                WHERE EXISTS (
+                    SELECT 1 FROM knowledge_items
+                    WHERE knowledge_id = ?1 AND lookup_key = ?11
+                )
+                  AND EXISTS (
+                      SELECT 1 FROM learning_sources
+                      WHERE source_id = ?2 AND job_id = ?6
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM learning_jobs
+                      WHERE job_id = ?6
+                        AND owner_uid = ?7
+                        AND revision = ?8
+                        AND lease_token = ?9
+                        AND lease_until > ?10
+                  )
+            `).bind(
+                knowledge.knowledgeId,
+                evidence.sourceId,
+                evidence.relation,
+                evidence.locator,
+                evidence.excerpt,
+                input.jobId,
+                input.ownerUid,
+                input.expectedRevision,
+                input.leaseToken,
+                now,
+                knowledge.lookupKey,
+            ));
+        }
+    }
+
+    statements.push(db.prepare(`
         UPDATE learning_jobs
         SET status = ?5,
             work_json = ?6,
@@ -293,6 +610,7 @@ export async function completeLearningJobStep(
           AND owner_uid = ?2
           AND revision = ?3
           AND lease_token = ?4
+          AND lease_until > ?9
         RETURNING *
     `).bind(
         input.jobId,
@@ -304,7 +622,11 @@ export async function completeLearningJobStep(
         JSON.stringify(input.resultIds ?? []),
         input.error ?? "",
         now,
-    ).first<LearningJobRow>();
+    ));
+
+    const results = await db.batch(statements);
+    const completion = results[results.length - 1] as D1Result<LearningJobRow>;
+    const row = completion.results?.[0];
     return row ? mapJob(row) : null;
 }
 
@@ -368,12 +690,7 @@ export async function listLearningSources(
 
 export async function createKnowledgeItem(
     env: LearningStoreEnv,
-    input: Omit<KnowledgeItemRecord, "knowledgeId" | "revision" | "createdAt" | "updatedAt" | "reviewNote"> & {
-        knowledgeId?: string;
-        reviewNote?: string;
-        evidence?: { sourceId: string; relation: string; locator: string; excerpt: string }[];
-        now?: number;
-    },
+    input: KnowledgeItemCreateInput,
 ): Promise<KnowledgeItemRecord> {
     const db = dbOf(env);
     const now = input.now ?? Date.now();

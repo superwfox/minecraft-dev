@@ -72,6 +72,31 @@ describe("knowledge need assessment", () => {
         expect(learningLookupKeys([second, first])).toEqual([knowledgeLookupKey(first)]);
     });
 
+    it("keeps stricter risk and evidence policies out of weaker cache identities", () => {
+        const base = makeNeed({
+            acceptanceCriteria: ["Official Javadoc confirms the symbol.", "Version matches 1.21.4."],
+        });
+        const reordered = makeNeed({
+            acceptanceCriteria: ["Version matches 1.21.4.", "Official Javadoc confirms the symbol."],
+        });
+        const highRisk = makeNeed({
+            risk: "high",
+            acceptanceCriteria: base.acceptanceCriteria,
+        });
+        const releasePolicy = makeNeed({
+            sourcePolicy: "release",
+            acceptanceCriteria: base.acceptanceCriteria,
+        });
+        const stricterCriteria = makeNeed({
+            acceptanceCriteria: [...base.acceptanceCriteria, "A ground-truth source is required."],
+        });
+
+        expect(knowledgeLookupKey(reordered)).toBe(knowledgeLookupKey(base));
+        expect(knowledgeLookupKey(highRisk)).not.toBe(knowledgeLookupKey(base));
+        expect(knowledgeLookupKey(releasePolicy)).not.toBe(knowledgeLookupKey(base));
+        expect(knowledgeLookupKey(stricterCriteria)).not.toBe(knowledgeLookupKey(base));
+    });
+
     it("deduplicates semantically identical needs by lookup key", () => {
         const first = makeNeed({ id: "need-first" });
         const duplicate = makeNeed({ id: "need-duplicate" });

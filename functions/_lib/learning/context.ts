@@ -62,16 +62,27 @@ export async function loadKnowledgeContext(input: {
     maxCharacters: number;
     title?: string;
     now?: number;
+    timeoutMs?: number;
 }): Promise<{ context: string; used: KnowledgeItemRecord[]; lookupKeys: string[] }> {
     const lookupKeys = learningLookupKeys(input.needs);
     if (!input.env.DB || !lookupKeys.length) return { context: "", used: [], lookupKeys };
+    const timeoutMs = Math.max(1, Math.min(5_000, Math.floor(input.timeoutMs ?? 1_500)));
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        const items = await findActiveKnowledge(input.env, lookupKeys, input.now);
+        const items = await Promise.race([
+            findActiveKnowledge(input.env, lookupKeys, input.now),
+            new Promise<null>((resolve) => {
+                timer = setTimeout(() => resolve(null), timeoutMs);
+            }),
+        ]);
+        if (!items) return { context: "", used: [], lookupKeys };
         const formatted = buildKnowledgeContext(items, input.maxCharacters, input.title);
         return { ...formatted, lookupKeys };
     } catch (error) {
         console.warn("knowledge context load failed", error);
         return { context: "", used: [], lookupKeys };
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
     }
 }
 

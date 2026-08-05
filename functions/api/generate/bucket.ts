@@ -4,7 +4,7 @@ import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../..
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import type { KnowledgeNeed } from "../../_lib/learning/types";
-import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import {
     buildApiContractContext,
     findKnownApiIssues,
@@ -477,7 +477,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {
                 state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
@@ -571,7 +571,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.status = "error";
                 state.error = replanTriggered.reason ?? "审查未通过";
                 await flushCharge();
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "result", bucketIndex, replan: true,
                     path: replanTriggered.path, reason: replanTriggered.reason,
@@ -587,7 +587,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (bucketDone) state.currentBucket = bucketIndex + 1;
             state.currentFileIndex = state.generatedFiles.length;
             await flushCharge();
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
 
             dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
             await writer.write(sseEvent(encoder, {

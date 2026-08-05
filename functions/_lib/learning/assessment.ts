@@ -158,13 +158,20 @@ function canonicalScope(scope: KnowledgeNeed["scope"]): string {
 }
 
 export function knowledgeLookupKey(need: KnowledgeNeed): string {
+    const acceptanceCriteria = [...new Set(need.acceptanceCriteria
+        .map((criterion) => criterion.trim().replace(/\s+/g, " ").toLowerCase())
+        .filter(Boolean))].sort();
     return [
-        "v1",
+        "v2",
         need.kind,
+        need.specificity,
+        need.risk,
+        need.sourcePolicy,
         need.claim.answerType,
         need.claim.subject.trim().toLowerCase(),
         need.claim.question.trim().replace(/\s+/g, " ").toLowerCase(),
         canonicalScope(need.scope),
+        JSON.stringify(acceptanceCriteria),
     ].join("::");
 }
 

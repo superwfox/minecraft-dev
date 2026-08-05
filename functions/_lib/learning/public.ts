@@ -1,3 +1,4 @@
+import { learningJobRemainingMs, learningJobTiming } from "./deadline";
 import {
     buildLearningDebugMeta,
     learningReasonMessage,
@@ -10,6 +11,7 @@ import type {
     LearningJobRecord,
     LearningProgress,
     LearningReasonCode,
+    LearningStage,
 } from "./types";
 
 const STATUS_MESSAGES: Record<LearningJobRecord["status"], string> = {
@@ -70,6 +72,7 @@ export function learningSnapshot(
         status?: LearningProgress["status"];
         reasonCode?: LearningReasonCode;
         message?: string;
+        stage?: LearningStage;
     },
 ): PublicLearningSnapshot {
     const status = fallback?.status ?? job?.status ?? "idle";
@@ -78,6 +81,8 @@ export function learningSnapshot(
         : undefined;
     const reasonCode = fallback?.reasonCode
         ?? normalizeLearningReasonCode(job?.error, terminalFallback);
+    const timing = job ? learningJobTiming(job) : undefined;
+    const remainingMs = job ? learningJobRemainingMs(job) : undefined;
     const completedNeeds = Math.max(0, Math.min(
         job?.needs.length ?? 0,
         Number(job?.work.completedNeeds) || (job?.status === "ready" ? job.needs.length : 0),
@@ -87,7 +92,15 @@ export function learningSnapshot(
             jobId: job?.jobId ?? "",
             status,
             revision: job?.revision ?? 0,
-            currentNeed: job?.work.currentNeed,
+            stage: fallback?.stage ?? job?.stage,
+            startedAt: timing?.startedAt,
+            deadlineAt: timing?.deadlineAt,
+            remainingMs,
+            lastActiveStatus: job?.work.lastActiveStatus,
+            currentNeed: status === "queued" || status === "discovering"
+                || status === "fetching" || status === "verifying"
+                ? job?.work.currentNeed
+                : undefined,
             totalNeeds: job?.needs.length ?? 0,
             completedNeeds,
             sourceCount,

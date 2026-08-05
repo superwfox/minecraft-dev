@@ -1,7 +1,7 @@
 import { plannerClarifyPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
-import { getOwnedTask, markTaskQuotaExhausted, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const CLARIFY_MODEL = "deepseek-v4-pro";
@@ -94,7 +94,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (state.clarifyRounds.length >= MAX_CLARIFY_ROUNDS) {
                 state.clarifyDone = true;
                 state.logs.push(`● 澄清轮次达到上限 ${MAX_CLARIFY_ROUNDS}，强制结束`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", done: true, todos: [] }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 await writer.close();
@@ -129,7 +129,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     type: "log", msg: "× 澄清阶段解析失败，强制进入规划",
                 }));
                 state.clarifyDone = true;
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, { type: "result", done: true, todos: [] }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 await writer.close();
@@ -138,7 +138,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             if (parsed.needMoreInput) {
                 state.logs.push(`! 需求过于模糊，请求用户补充`);
-                await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+                await putTaskState(context.env, taskId, state, 3600, uid);
                 await writer.write(sseEvent(encoder, {
                     type: "result", needMoreInput: true, hint: parsed.hint || "请补充更具体的功能描述",
                 }));
@@ -157,7 +157,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(`● 澄清完成，共 ${state.clarifyRounds.length} 轮`);
             }
 
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
 
             await writer.write(sseEvent(encoder, { type: "result", done, todos }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));

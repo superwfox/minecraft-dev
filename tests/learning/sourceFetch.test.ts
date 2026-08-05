@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
     fetchLearningSource,
     fetchLearningSources,
+    learningNoSourcesReason,
     validatePublicSourceUrl,
 } from "../../functions/_lib/learning/sourceFetch";
 import { makeNeed } from "./testData";
@@ -271,6 +272,46 @@ describe("learning source fetch safety", () => {
         });
     });
 
+    it("continues to the next candidate after one source timeout while stage budget remains", async () => {
+        const fetchImpl = vi.fn((rawUrl: RequestInfo | URL, init?: RequestInit) => {
+            if (String(rawUrl).endsWith("/slow")) {
+                return new Promise<Response>((_, reject) => {
+                    const signal = init?.signal;
+                    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+                    if (signal?.aborted) abort();
+                    else signal?.addEventListener("abort", abort, { once: true });
+                });
+            }
+            return Promise.resolve(new Response(LONG_TEXT, {
+                status: 200,
+                headers: { "Content-Type": "text/plain" },
+            }));
+        }) as unknown as typeof fetch;
+
+        const result = await fetchLearningSources({
+            jobId: "learn-test",
+            needs: [makeNeed()],
+            candidates: [{
+                needId: "need-api",
+                urls: ["https://example.com/slow", "https://example.com/usable"],
+            }],
+            fetchImpl,
+            timeoutMs: 5,
+            budgetMs: 250,
+            maxSources: 1,
+        });
+
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(result.sources).toHaveLength(1);
+        expect(result.sources[0].canonicalUrl).toBe("https://example.com/usable");
+        expect(result.telemetry).toMatchObject({
+            sourceAttempts: 2,
+            sourceAccepted: 1,
+            sourceTimeouts: 1,
+            sourceBudgetExhausted: 0,
+        });
+    });
+
     it("stops the candidate queue when the total fetch budget expires", async () => {
         const fetchImpl = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
             new Promise<Response>((_, reject) => {
@@ -299,6 +340,25 @@ describe("learning source fetch safety", () => {
             sourceTimeouts: 1,
             sourceBudgetExhausted: 1,
         });
+    });
+
+    it("classifies an empty source result without hiding timeout causes", () => {
+        expect(learningNoSourcesReason({
+            sourceTimeouts: 0,
+            sourceBudgetExhausted: 1,
+        }, true)).toBe("job_deadline");
+        expect(learningNoSourcesReason({
+            sourceTimeouts: 1,
+            sourceBudgetExhausted: 0,
+        }, false)).toBe("source_fetch_timeout");
+        expect(learningNoSourcesReason({
+            sourceTimeouts: 0,
+            sourceBudgetExhausted: 1,
+        }, false)).toBe("source_fetch_timeout");
+        expect(learningNoSourcesReason({
+            sourceTimeouts: 0,
+            sourceBudgetExhausted: 0,
+        }, false)).toBe("no_fetchable_sources");
     });
 
     it("applies the timeout while waiting for the response body", async () => {

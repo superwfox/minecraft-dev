@@ -1,4 +1,5 @@
 import type { UsageBreakdown, UsageCostEntry } from "./quota";
+import { LEARNING_DISCOVERY_LIMIT_MS } from "./learning/deadline";
 import type {
     KnowledgeNeed,
     LearningCandidate,
@@ -8,7 +9,7 @@ import type {
 
 const RESPONSES_URL = "https://api.deepseek.com/responses";
 const RESPONSES_MODEL = "deepseek-v4-flash";
-const DEFAULT_BUDGET_MS = 30_000;
+const DEFAULT_BUDGET_MS = LEARNING_DISCOVERY_LIMIT_MS;
 const RESERVE_MS = 750;
 const RETRY_BACKOFF_MS = 250;
 const QUICK_FAILURE_MS = 5_000;
@@ -204,7 +205,10 @@ export async function discoverLearningSources(input: {
     }
 
     const fetchImpl = input.fetchImpl ?? fetch;
-    const budgetMs = Math.max(1_000, input.budgetMs ?? input.timeoutMs ?? DEFAULT_BUDGET_MS);
+    const configuredBudget = Number(input.budgetMs ?? input.timeoutMs);
+    const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
+        ? Math.min(LEARNING_DISCOVERY_LIMIT_MS, Math.max(1_000, Math.floor(configuredBudget)))
+        : DEFAULT_BUDGET_MS;
     const deadline = startedAt + Math.max(250, budgetMs - RESERVE_MS);
     let lastFailure: Extract<LearningDiscoveryResult, { ok: false }> | null = null;
 

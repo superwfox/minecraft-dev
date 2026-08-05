@@ -27,7 +27,7 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
     "verification_failed", "unresolved_knowledge_needs", "revision_conflict", "lease_conflict",
-    "storage_unavailable", "client_deadline", "client_network", "internal_error",
+    "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const BUCKET_DEBUG_MESSAGES = new Set([
     "callAI:req", "callAI:http", "callAI:http-err", "callAI:done", "callAI:throw",

@@ -7,6 +7,7 @@
 
 import { verifySession, getSessionCookie } from "../_lib/session";
 import { getQuota, consume, ipAllow } from "../_lib/quota";
+import { TaskStoreUnavailableError } from "../_lib/taskStore";
 
 interface Env {
     SESSION_SECRET: string;
@@ -55,6 +56,20 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     const { request, env } = context;
     const path = new URL(request.url).pathname;
     let session: any = null;
+    const next = async (): Promise<Response> => {
+        try {
+            return await context.next();
+        } catch (error) {
+            if (error instanceof TaskStoreUnavailableError) {
+                return json({
+                    error: "任务状态存储暂不可用，请稍后重试",
+                    code: "TASK_STORE_UNAVAILABLE",
+                    reasonCode: "storage_unavailable",
+                }, 503);
+            }
+            throw error;
+        }
+    };
 
     // 1) 登录闸门：先验证会话，避免未登录请求先消耗 KV 限流计数。
     if (needsAuth(path)) {
@@ -96,11 +111,11 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                 return json({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
             }
             // 先校验额度，仅在任务创建成功后才扣费（避免瞬时失败 + 前端重试重复扣）
-            const res = await context.next();
+            const res = await next();
             if (res.ok) await consume(env.TASKS, session.uid);
             return res;
         }
     }
 
-    return context.next();
+    return next();
 };

@@ -1,10 +1,14 @@
-import type { KnowledgeNeed, LearningSourceRecord } from "./types";
+import {
+    LEARNING_SOURCE_LIMIT_MS,
+    LEARNING_SOURCE_TIMEOUT_MS,
+} from "./deadline";
+import type { KnowledgeNeed, LearningReasonCode, LearningSourceRecord } from "./types";
 
 const MAX_REDIRECTS = 3;
 const MAX_BYTES = 256 * 1024;
-const DEFAULT_TIMEOUT_MS = 8_000;
-const DEFAULT_BUDGET_MS = 12_000;
-const MAX_BUDGET_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = LEARNING_SOURCE_TIMEOUT_MS;
+const DEFAULT_BUDGET_MS = LEARNING_SOURCE_LIMIT_MS;
+const MAX_BUDGET_MS = LEARNING_SOURCE_LIMIT_MS;
 const ALLOWED_CONTENT_TYPES = [
     "text/html",
     "text/plain",
@@ -271,40 +275,40 @@ async function readLimitedBody(response: Response, controller: AbortController):
 async function fetchOne(
     initialUrl: string,
     fetchImpl: typeof fetch,
-    timeoutMs: number,
+    controller: AbortController,
 ): Promise<{ url: URL; contentType: string; text: string }> {
     let url = validatePublicSourceUrl(initialUrl);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-            const response = await fetchImpl(url.href, {
-                method: "GET",
-                redirect: "manual",
-                headers: {
-                    Accept: "text/html,text/plain,application/json,application/xml;q=0.8,text/xml;q=0.8",
-                    "User-Agent": "TAHAI-Learning/1.0",
-                },
-                signal: controller.signal,
-            });
-            if (response.status >= 300 && response.status < 400) {
-                const location = response.headers.get("Location");
-                if (!location || redirects >= MAX_REDIRECTS) throw new Error("redirect_limit");
-                url = validatePublicSourceUrl(new URL(location, url).href);
-                continue;
-            }
-            if (!response.ok) throw new Error(`source_http_${response.status}`);
-            const contentType = (response.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase();
-            if (!ALLOWED_CONTENT_TYPES.includes(contentType)) throw new Error("unsupported_content_type");
-            const declaredSize = Number(response.headers.get("Content-Length") || 0);
-            if (declaredSize > MAX_BYTES) throw new Error("source_too_large");
-            const bytes = await readLimitedBody(response, controller);
-            return { url, contentType, text: new TextDecoder().decode(bytes) };
+    for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+        const response = await fetchImpl(url.href, {
+            method: "GET",
+            redirect: "manual",
+            headers: {
+                Accept: "text/html,text/plain,application/json,application/xml;q=0.8,text/xml;q=0.8",
+                "User-Agent": "TAHAI-Learning/1.0",
+            },
+            signal: controller.signal,
+        });
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get("Location");
+            if (!location || redirects >= MAX_REDIRECTS) throw new Error("redirect_limit");
+            url = validatePublicSourceUrl(new URL(location, url).href);
+            continue;
         }
-        throw new Error("redirect_limit");
-    } finally {
-        clearTimeout(timer);
+        if (!response.ok) throw new Error(`source_http_${response.status}`);
+        const contentType = (response.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase();
+        if (!ALLOWED_CONTENT_TYPES.includes(contentType)) throw new Error("unsupported_content_type");
+        const declaredSize = Number(response.headers.get("Content-Length") || 0);
+        if (declaredSize > MAX_BYTES) throw new Error("source_too_large");
+        const bytes = await readLimitedBody(response, controller);
+        return { url, contentType, text: new TextDecoder().decode(bytes) };
     }
+    throw new Error("redirect_limit");
+}
+
+function ensureSourceDeadline(controller: AbortController, deadlineAt: number): void {
+    if (!controller.signal.aborted && Date.now() < deadlineAt) return;
+    controller.abort();
+    throw new DOMException("Aborted", "AbortError");
 }
 
 export async function fetchLearningSource(input: {
@@ -315,31 +319,47 @@ export async function fetchLearningSource(input: {
     timeoutMs?: number;
     now?: number;
 }): Promise<LearningSourceRecord> {
-    const fetched = await fetchOne(input.url, input.fetchImpl ?? fetch, input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    const isHtml = fetched.contentType === "text/html";
-    const normalized = isHtml ? htmlToText(fetched.text) : { title: "", text: fetched.text.replace(/\s+/g, " ").trim() };
-    const excerpt = normalized.text.slice(0, 24_000);
-    if (excerpt.length < 40) throw new Error("source_too_thin");
-    const classification = sourceClassification(fetched.url, input.need);
-    const canonicalUrl = fetched.url.href;
-    const [contentHash, sourceKey] = await Promise.all([
-        sha256(excerpt),
-        sha256(JSON.stringify([input.jobId, input.need.id, canonicalUrl])),
-    ]);
-    return {
-        sourceId: `src_${sourceKey}`,
-        jobId: input.jobId,
-        needId: input.need.id,
-        canonicalUrl,
-        domain: fetched.url.hostname.toLowerCase(),
-        sourceType: classification.sourceType,
-        authority: classification.authority,
-        title: normalized.title || fetched.url.hostname,
-        fetchedAt: input.now ?? Date.now(),
-        contentHash,
-        excerpt,
-        verificationState: "pending",
-    };
+    const configuredTimeout = Number(input.timeoutMs);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+        ? Math.min(DEFAULT_TIMEOUT_MS, Math.floor(configuredTimeout))
+        : DEFAULT_TIMEOUT_MS;
+    const deadlineAt = Date.now() + timeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const fetched = await fetchOne(input.url, input.fetchImpl ?? fetch, controller);
+        ensureSourceDeadline(controller, deadlineAt);
+        const isHtml = fetched.contentType === "text/html";
+        const normalized = isHtml
+            ? htmlToText(fetched.text)
+            : { title: "", text: fetched.text.replace(/\s+/g, " ").trim() };
+        ensureSourceDeadline(controller, deadlineAt);
+        const excerpt = normalized.text.slice(0, 24_000);
+        if (excerpt.length < 40) throw new Error("source_too_thin");
+        const classification = sourceClassification(fetched.url, input.need);
+        const canonicalUrl = fetched.url.href;
+        const [contentHash, sourceKey] = await Promise.all([
+            sha256(excerpt),
+            sha256(JSON.stringify([input.jobId, input.need.id, canonicalUrl])),
+        ]);
+        ensureSourceDeadline(controller, deadlineAt);
+        return {
+            sourceId: `src_${sourceKey}`,
+            jobId: input.jobId,
+            needId: input.need.id,
+            canonicalUrl,
+            domain: fetched.url.hostname.toLowerCase(),
+            sourceType: classification.sourceType,
+            authority: classification.authority,
+            title: normalized.title || fetched.url.hostname,
+            fetchedAt: input.now ?? Date.now(),
+            contentHash,
+            excerpt,
+            verificationState: "pending",
+        };
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 export interface LearningSourceFetchTelemetry {
@@ -356,6 +376,15 @@ export interface LearningSourceFetchTelemetry {
     sourceTooThin: number;
     sourceElapsedMs: number;
     sourceBudgetExhausted: number;
+}
+
+export function learningNoSourcesReason(
+    telemetry: Pick<LearningSourceFetchTelemetry, "sourceTimeouts" | "sourceBudgetExhausted">,
+    clippedByJobDeadline: boolean,
+): LearningReasonCode {
+    if (telemetry.sourceBudgetExhausted > 0 && clippedByJobDeadline) return "job_deadline";
+    if (telemetry.sourceBudgetExhausted > 0 || telemetry.sourceTimeouts > 0) return "source_fetch_timeout";
+    return "no_fetchable_sources";
 }
 
 function recordSourceFailure(
@@ -455,7 +484,7 @@ export async function fetchLearningSources(input: {
             if (remaining <= 0) return budgetExhausted();
             const configuredTimeout = Number(input.timeoutMs);
             const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
-                ? Math.floor(configuredTimeout)
+                ? Math.min(DEFAULT_TIMEOUT_MS, Math.floor(configuredTimeout))
                 : DEFAULT_TIMEOUT_MS;
             try {
                 const source = await fetchLearningSource({

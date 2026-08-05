@@ -12,6 +12,8 @@ interface TaskCostRecord {
 interface TaskChunkRow {
     payload: string;
     quota_exhausted: number;
+    planner_lease_token: string;
+    planner_lease_until: number;
 }
 
 export interface StoredTaskCost {
@@ -19,12 +21,21 @@ export interface StoredTaskCost {
     consumed: number;
 }
 
-export type TaskPlannerLeaseMode = "d1";
+export type TaskOperationLeaseMode = "d1";
+export type TaskPlannerLeaseMode = TaskOperationLeaseMode;
+
+export interface TaskOperationLease {
+    token: string;
+    leaseUntil: number;
+}
 
 const STATE_TTL_SECONDS = 3600;
 const CHUNK_CHARACTERS = 300_000;
 // Free plan allows 50 D1 statements per invocation. Reserve headroom for task read/cost/cleanup.
 const MAX_CHUNKS = 40;
+const TASK_OPERATION_FENCE_FIELD = "__taskOperationFence";
+const TASK_OPERATION_LEASE_UNTIL_FIELD = "__taskOperationLeaseUntil";
+const D1_NOW_MS_SQL = "CAST(strftime('%s', 'now') AS INTEGER) * 1000";
 const verifiedTaskSchemas = new WeakSet<object>();
 
 export class TaskOwnershipError extends Error {
@@ -35,7 +46,7 @@ export class TaskOwnershipError extends Error {
 }
 
 export class TaskStoreUnavailableError extends Error {
-    constructor(message = "D1 is required for Planner leases") {
+    constructor(message = "D1 is required for task operation leases") {
         super(message);
         this.name = "TaskStoreUnavailableError";
     }
@@ -121,6 +132,61 @@ export function applyTaskQuotaExhausted(raw: string, exhausted: boolean): string
     }
 }
 
+function parseTaskState(raw: string): Record<string, unknown> | null {
+    try {
+        const state = JSON.parse(raw) as unknown;
+        return state && typeof state === "object" && !Array.isArray(state)
+            ? state as Record<string, unknown>
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+function prepareTaskStateForStorage(raw: string): { raw: string; expectedFence: string } {
+    const state = parseTaskState(raw);
+    if (!state) return { raw, expectedFence: "" };
+    const expectedFence = typeof state[TASK_OPERATION_FENCE_FIELD] === "string"
+        ? String(state[TASK_OPERATION_FENCE_FIELD])
+        : "";
+    delete state[TASK_OPERATION_FENCE_FIELD];
+    delete state[TASK_OPERATION_LEASE_UNTIL_FIELD];
+    return { raw: JSON.stringify(state), expectedFence };
+}
+
+function applyTaskOperationMetadataToState(
+    state: Record<string, unknown>,
+    token: string,
+    leaseUntil: number,
+): void {
+    state[TASK_OPERATION_FENCE_FIELD] = token;
+    state[TASK_OPERATION_LEASE_UNTIL_FIELD] = Math.max(0, Number(leaseUntil) || 0);
+}
+
+function applyTaskOperationMetadata(raw: string, token: string, leaseUntil: number): string {
+    const state = parseTaskState(raw);
+    if (!state) return raw;
+    applyTaskOperationMetadataToState(state, token, leaseUntil);
+    return JSON.stringify(state);
+}
+
+export function taskOperationLeaseFromState(state: unknown): TaskOperationLease | null {
+    if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+    const record = state as Record<string, unknown>;
+    const hasFence = Object.prototype.hasOwnProperty.call(record, TASK_OPERATION_FENCE_FIELD);
+    const hasLeaseUntil = Object.prototype.hasOwnProperty.call(record, TASK_OPERATION_LEASE_UNTIL_FIELD);
+    if (!hasFence && !hasLeaseUntil) return null;
+    const token = typeof record[TASK_OPERATION_FENCE_FIELD] === "string"
+        ? String(record[TASK_OPERATION_FENCE_FIELD])
+        : "";
+    const leaseUntil = Math.max(0, Number(record[TASK_OPERATION_LEASE_UNTIL_FIELD]) || 0);
+    return { token, leaseUntil };
+}
+
+function operationCompletionFence(leaseToken: string): string {
+    return `fence:${leaseToken}`;
+}
+
 function splitState(raw: string): string[] {
     const chunks: string[] = [];
     let offset = 0;
@@ -154,14 +220,16 @@ async function readD1TaskOwner(db: D1Database, taskId: string): Promise<string |
 async function readD1Task(db: D1Database, taskId: string, ownerUid?: string): Promise<string | null> {
     const statement = ownerUid
         ? db.prepare(`
-            SELECT c.payload, t.quota_exhausted
+            SELECT c.payload, t.quota_exhausted,
+                   t.planner_lease_token, t.planner_lease_until
             FROM generation_tasks AS t
             JOIN generation_task_chunks AS c ON c.task_id = t.task_id
             WHERE t.task_id = ?1 AND t.owner_uid = ?3 AND t.expires_at > ?2
             ORDER BY c.chunk_index ASC
         `).bind(taskId, Date.now(), ownerUid)
         : db.prepare(`
-            SELECT c.payload, t.quota_exhausted
+            SELECT c.payload, t.quota_exhausted,
+                   t.planner_lease_token, t.planner_lease_until
             FROM generation_tasks AS t
             JOIN generation_task_chunks AS c ON c.task_id = t.task_id
             WHERE t.task_id = ?1 AND t.expires_at > ?2
@@ -170,7 +238,12 @@ async function readD1Task(db: D1Database, taskId: string, ownerUid?: string): Pr
     const result = await statement.all<TaskChunkRow>();
     if (!result.results.length) return null;
     const raw = result.results.map((row) => row.payload).join("");
-    return applyTaskQuotaExhausted(raw, !!result.results[0]?.quota_exhausted);
+    const first = result.results[0];
+    return applyTaskOperationMetadata(
+        applyTaskQuotaExhausted(raw, !!first?.quota_exhausted),
+        String(first?.planner_lease_token ?? ""),
+        Number(first?.planner_lease_until) || 0,
+    );
 }
 
 async function writeD1Task(
@@ -180,19 +253,25 @@ async function writeD1Task(
     expirationTtl = STATE_TTL_SECONDS,
     ownerUid = "",
     legacyCost?: TaskCostRecord,
-): Promise<void> {
-    const chunks = splitState(raw);
-    const now = Date.now();
-    const expiresAt = now + Math.max(60, expirationTtl) * 1000;
+): Promise<string> {
+    const preparedState = prepareTaskStateForStorage(raw);
+    const chunks = splitState(preparedState.raw);
+    const createdAt = Date.now();
+    const expirationMs = Math.max(60, expirationTtl) * 1000;
     const total = legacyCost?.total ?? 0;
     const consumed = legacyCost?.consumed ?? 0;
     const owner = ownerUid || legacyCost?.uid || "";
+    const writeToken = `write:${crypto.randomUUID()}`;
+    const finalFence = `state:${crypto.randomUUID()}`;
 
     const statements: D1PreparedStatement[] = [
         db.prepare(`
             INSERT INTO generation_tasks (
-                task_id, owner_uid, cost_total, cost_consumed, created_at, updated_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+                task_id, owner_uid, cost_total, cost_consumed, created_at, updated_at, expires_at,
+                planner_lease_token, planner_lease_until
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ${D1_NOW_MS_SQL}, ${D1_NOW_MS_SQL} + ?6, ?7, 0
+            )
             ON CONFLICT(task_id) DO UPDATE SET
                 owner_uid = CASE
                     WHEN generation_tasks.owner_uid = '' THEN excluded.owner_uid
@@ -206,11 +285,25 @@ async function writeD1Task(
                     WHEN generation_tasks.cost_consumed = 0 THEN excluded.cost_consumed
                     ELSE generation_tasks.cost_consumed
                 END,
-                updated_at = excluded.updated_at,
-                expires_at = excluded.expires_at
-            WHERE generation_tasks.owner_uid = ''
-               OR generation_tasks.owner_uid = excluded.owner_uid
-        `).bind(taskId, owner, total, consumed, now, expiresAt),
+                updated_at = ${D1_NOW_MS_SQL},
+                expires_at = ${D1_NOW_MS_SQL} + ?6,
+                planner_lease_token = ?7,
+                planner_lease_until = 0
+            WHERE (generation_tasks.owner_uid = ''
+               OR generation_tasks.owner_uid = excluded.owner_uid)
+              AND (generation_tasks.expires_at <= ${D1_NOW_MS_SQL}
+               OR (generation_tasks.planner_lease_token = ?8
+                AND generation_tasks.planner_lease_until <= ${D1_NOW_MS_SQL}))
+        `).bind(
+            taskId,
+            owner,
+            total,
+            consumed,
+            createdAt,
+            expirationMs,
+            writeToken,
+            preparedState.expectedFence,
+        ),
     ];
 
     for (let index = 0; index < chunks.length; index++) {
@@ -219,22 +312,31 @@ async function writeD1Task(
             SELECT ?1, ?2, ?3
             WHERE EXISTS (
                 SELECT 1 FROM generation_tasks
-                WHERE task_id = ?1 AND owner_uid = ?4
+                WHERE task_id = ?1 AND owner_uid = ?4 AND planner_lease_token = ?5
             )
             ON CONFLICT(task_id, chunk_index) DO UPDATE SET payload = excluded.payload
-        `).bind(taskId, index, chunks[index], owner));
+        `).bind(taskId, index, chunks[index], owner, writeToken));
     }
     statements.push(db.prepare(`
         DELETE FROM generation_task_chunks
         WHERE task_id = ?1 AND chunk_index >= ?2
           AND EXISTS (
               SELECT 1 FROM generation_tasks
-              WHERE task_id = ?1 AND owner_uid = ?3
+              WHERE task_id = ?1 AND owner_uid = ?3 AND planner_lease_token = ?4
           )
-    `).bind(taskId, chunks.length, owner));
+    `).bind(taskId, chunks.length, owner, writeToken));
+    statements.push(db.prepare(`
+        UPDATE generation_tasks
+        SET planner_lease_token = ?3, planner_lease_until = 0,
+            updated_at = ${D1_NOW_MS_SQL}, expires_at = ${D1_NOW_MS_SQL} + ?4
+        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?5
+    `).bind(taskId, owner, finalFence, expirationMs, writeToken));
 
     const results = await db.batch(statements);
-    if (Number(results[0]?.meta?.changes) === 0) throw new TaskOwnershipError();
+    const committed = Number(results[0]?.meta?.changes) > 0
+        && Number(results[results.length - 1]?.meta?.changes) > 0;
+    if (!committed) throw new TaskOwnershipError();
+    return finalFence;
 }
 
 function taskQuotaKey(taskId: string): string {
@@ -271,23 +373,30 @@ async function applyStoredTaskQuotaMarker(
     return overlaid;
 }
 
-async function writeD1TaskWithPlannerLease(
+async function writeD1TaskWithOperationLease(
     db: D1Database,
     taskId: string,
     raw: string,
     leaseToken: string,
     expirationTtl: number,
     ownerUid: string,
+    releaseLease: boolean,
 ): Promise<boolean> {
-    const chunks = splitState(raw);
-    const now = Date.now();
-    const expiresAt = now + Math.max(60, expirationTtl) * 1000;
+    const preparedState = prepareTaskStateForStorage(raw);
+    const chunks = splitState(preparedState.raw);
+    const expirationMs = Math.max(60, expirationTtl) * 1000;
+    const writeToken = `write:${crypto.randomUUID()}`;
+    const finalToken = releaseLease ? operationCompletionFence(leaseToken) : leaseToken;
     const statements: D1PreparedStatement[] = [
         db.prepare(`
             UPDATE generation_tasks
-            SET updated_at = ?4, expires_at = ?5
-            WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?3
-        `).bind(taskId, ownerUid, leaseToken, now, expiresAt),
+            SET planner_lease_token = ?4,
+                updated_at = ${D1_NOW_MS_SQL},
+                expires_at = ${D1_NOW_MS_SQL} + ?5
+            WHERE task_id = ?1 AND owner_uid = ?2
+              AND planner_lease_token = ?3
+              AND planner_lease_until > ${D1_NOW_MS_SQL}
+        `).bind(taskId, ownerUid, leaseToken, writeToken, expirationMs),
     ];
 
     for (let index = 0; index < chunks.length; index++) {
@@ -299,7 +408,7 @@ async function writeD1TaskWithPlannerLease(
                 WHERE task_id = ?1 AND owner_uid = ?4 AND planner_lease_token = ?5
             )
             ON CONFLICT(task_id, chunk_index) DO UPDATE SET payload = excluded.payload
-        `).bind(taskId, index, chunks[index], ownerUid, leaseToken));
+        `).bind(taskId, index, chunks[index], ownerUid, writeToken));
     }
     statements.push(db.prepare(`
         DELETE FROM generation_task_chunks
@@ -308,44 +417,45 @@ async function writeD1TaskWithPlannerLease(
               SELECT 1 FROM generation_tasks
               WHERE task_id = ?1 AND owner_uid = ?3 AND planner_lease_token = ?4
           )
-    `).bind(taskId, chunks.length, ownerUid, leaseToken));
+    `).bind(taskId, chunks.length, ownerUid, writeToken));
     statements.push(db.prepare(`
         UPDATE generation_tasks
-        SET planner_lease_token = '', planner_lease_until = 0,
-            updated_at = ?4, expires_at = ?5
-        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?3
-    `).bind(taskId, ownerUid, leaseToken, now, expiresAt));
+        SET planner_lease_token = ?3,
+            planner_lease_until = CASE WHEN ?4 = 1 THEN 0 ELSE planner_lease_until END,
+            updated_at = ${D1_NOW_MS_SQL},
+            expires_at = ${D1_NOW_MS_SQL} + ?5
+        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?6
+    `).bind(taskId, ownerUid, finalToken, releaseLease ? 1 : 0, expirationMs, writeToken));
 
     const results = await db.batch(statements);
-    return Number(results[0]?.meta?.changes) > 0;
+    return Number(results[0]?.meta?.changes) > 0
+        && Number(results[results.length - 1]?.meta?.changes) > 0;
 }
 
-export async function acquireTaskPlannerLease(
+export async function acquireTaskOperationLease(
     env: TaskStoreEnv,
     taskId: string,
     ownerUid: string,
     leaseToken: string,
     leaseMs: number,
-): Promise<TaskPlannerLeaseMode | null> {
+): Promise<TaskOperationLeaseMode | null> {
     if (!taskId || !ownerUid || !leaseToken) throw new TaskOwnershipError();
     if (!env.DB) throw new TaskStoreUnavailableError();
 
-    const now = Date.now();
     const requestedLeaseMs = Number.isFinite(leaseMs) ? Math.floor(leaseMs) : 360_000;
     const boundedLeaseMs = Math.max(30_000, Math.min(600_000, requestedLeaseMs));
-    const expiresAt = now + boundedLeaseMs;
 
     try {
         const row = await env.DB.prepare(`
             UPDATE generation_tasks
             SET planner_lease_token = ?3,
-                planner_lease_until = ?4,
-                updated_at = ?5,
-                expires_at = MAX(expires_at, ?4)
+                planner_lease_until = ${D1_NOW_MS_SQL} + ?4,
+                updated_at = ${D1_NOW_MS_SQL},
+                expires_at = MAX(expires_at, ${D1_NOW_MS_SQL} + ?4)
             WHERE task_id = ?1 AND owner_uid = ?2
-              AND (planner_lease_token = '' OR planner_lease_until <= ?5)
+              AND planner_lease_until <= ${D1_NOW_MS_SQL}
             RETURNING planner_lease_token
-        `).bind(taskId, ownerUid, leaseToken, expiresAt, now)
+        `).bind(taskId, ownerUid, leaseToken, boundedLeaseMs)
             .first<{ planner_lease_token: string }>();
         if (row) return "d1";
         const storedOwner = await readD1TaskOwner(env.DB, taskId);
@@ -353,12 +463,12 @@ export async function acquireTaskPlannerLease(
         return null;
     } catch (error) {
         if (error instanceof TaskOwnershipError) throw error;
-        console.warn("D1 planner lease acquisition failed", error);
+        console.warn("D1 task operation lease acquisition failed", error);
         throw error;
     }
 }
 
-export async function renewTaskPlannerLease(
+export async function renewTaskOperationLease(
     env: TaskStoreEnv,
     taskId: string,
     ownerUid: string,
@@ -368,20 +478,89 @@ export async function renewTaskPlannerLease(
     if (!taskId || !ownerUid || !leaseToken) throw new TaskOwnershipError();
     if (!env.DB) throw new TaskStoreUnavailableError();
 
-    const now = Date.now();
     const requestedLeaseMs = Number.isFinite(leaseMs) ? Math.floor(leaseMs) : 360_000;
     const boundedLeaseMs = Math.max(30_000, Math.min(600_000, requestedLeaseMs));
-    const expiresAt = now + boundedLeaseMs;
     const row = await env.DB.prepare(`
         UPDATE generation_tasks
-        SET planner_lease_until = ?4,
-            updated_at = ?5,
-            expires_at = MAX(expires_at, ?4)
-        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?3
+        SET planner_lease_until = ${D1_NOW_MS_SQL} + ?4,
+            updated_at = ${D1_NOW_MS_SQL},
+            expires_at = MAX(expires_at, ${D1_NOW_MS_SQL} + ?4)
+        WHERE task_id = ?1 AND owner_uid = ?2
+          AND planner_lease_token = ?3
+          AND planner_lease_until > ${D1_NOW_MS_SQL}
         RETURNING planner_lease_token
-    `).bind(taskId, ownerUid, leaseToken, expiresAt, now)
+    `).bind(taskId, ownerUid, leaseToken, boundedLeaseMs)
         .first<{ planner_lease_token: string }>();
     return !!row;
+}
+
+export async function acquireTaskPlannerLease(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+    leaseToken: string,
+    leaseMs: number,
+): Promise<TaskPlannerLeaseMode | null> {
+    return acquireTaskOperationLease(env, taskId, ownerUid, leaseToken, leaseMs);
+}
+
+export async function renewTaskPlannerLease(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+    leaseToken: string,
+    leaseMs: number,
+): Promise<boolean> {
+    return renewTaskOperationLease(env, taskId, ownerUid, leaseToken, leaseMs);
+}
+
+export async function getTaskOperationLease(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+): Promise<TaskOperationLease | null> {
+    if (!taskId || !ownerUid) throw new TaskOwnershipError();
+    if (!env.DB) throw new TaskStoreUnavailableError();
+    const row = await env.DB.prepare(`
+        SELECT planner_lease_token, planner_lease_until
+        FROM generation_tasks
+        WHERE task_id = ?1 AND owner_uid = ?2
+    `).bind(taskId, ownerUid).first<{
+        planner_lease_token: string;
+        planner_lease_until: number;
+    }>();
+    if (row) {
+        return {
+            token: String(row.planner_lease_token ?? ""),
+            leaseUntil: Math.max(0, Number(row.planner_lease_until) || 0),
+        };
+    }
+    const storedOwner = await readD1TaskOwner(env.DB, taskId);
+    if (storedOwner !== null && storedOwner !== ownerUid) throw new TaskOwnershipError();
+    return null;
+}
+
+export async function putTaskWithOperationLease(
+    env: TaskStoreEnv,
+    taskId: string,
+    raw: string,
+    leaseToken: string,
+    leaseMode: TaskOperationLeaseMode,
+    expirationTtl = STATE_TTL_SECONDS,
+    ownerUid = "",
+    releaseLease = false,
+): Promise<boolean> {
+    if (!taskId || !ownerUid || !leaseToken) throw new TaskOwnershipError();
+    if (leaseMode !== "d1" || !env.DB) return false;
+    return writeD1TaskWithOperationLease(
+        env.DB,
+        taskId,
+        raw,
+        leaseToken,
+        expirationTtl,
+        ownerUid,
+        releaseLease,
+    );
 }
 
 export async function putTaskWithPlannerLease(
@@ -393,16 +572,33 @@ export async function putTaskWithPlannerLease(
     expirationTtl = STATE_TTL_SECONDS,
     ownerUid = "",
 ): Promise<boolean> {
-    if (!taskId || !ownerUid || !leaseToken) throw new TaskOwnershipError();
-    if (leaseMode !== "d1" || !env.DB) return false;
-    return writeD1TaskWithPlannerLease(
-        env.DB,
+    return putTaskWithOperationLease(
+        env,
         taskId,
         raw,
         leaseToken,
+        leaseMode,
         expirationTtl,
         ownerUid,
+        true,
     );
+}
+
+export async function releaseTaskOperationLease(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+    leaseToken: string,
+    leaseMode: TaskOperationLeaseMode,
+): Promise<boolean> {
+    if (!taskId || !ownerUid || !leaseToken || leaseMode !== "d1" || !env.DB) return false;
+    const result = await env.DB.prepare(`
+        UPDATE generation_tasks
+        SET planner_lease_token = ?4, planner_lease_until = 0,
+            updated_at = ${D1_NOW_MS_SQL}
+        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?3
+    `).bind(taskId, ownerUid, leaseToken, operationCompletionFence(leaseToken)).run();
+    return Number(result.meta?.changes) > 0;
 }
 
 export async function releaseTaskPlannerLease(
@@ -411,13 +607,8 @@ export async function releaseTaskPlannerLease(
     ownerUid: string,
     leaseToken: string,
     leaseMode: TaskPlannerLeaseMode,
-): Promise<void> {
-    if (!taskId || !ownerUid || !leaseToken || leaseMode !== "d1" || !env.DB) return;
-    await env.DB.prepare(`
-        UPDATE generation_tasks
-        SET planner_lease_token = '', planner_lease_until = 0, updated_at = ?4
-        WHERE task_id = ?1 AND owner_uid = ?2 AND planner_lease_token = ?3
-    `).bind(taskId, ownerUid, leaseToken, Date.now()).run();
+): Promise<boolean> {
+    return releaseTaskOperationLease(env, taskId, ownerUid, leaseToken, leaseMode);
 }
 
 async function readKvTask(env: TaskStoreEnv, taskId: string): Promise<string | null> {
@@ -464,7 +655,7 @@ export async function getTask(env: TaskStoreEnv, taskId: string): Promise<string
             const parsed = JSON.parse(legacyRaw) as { uid?: unknown };
             const ownerUid = typeof parsed.uid === "string" ? parsed.uid : "";
             const legacyCostRaw = await env.TASKS.get(`taskCost:${taskId}`);
-            await writeD1Task(
+            const fence = await writeD1Task(
                 env.DB,
                 taskId,
                 legacyRaw,
@@ -478,7 +669,7 @@ export async function getTask(env: TaskStoreEnv, taskId: string): Promise<string
                 env.TASKS.delete(taskQuotaKey(taskId)),
                 env.TASKS.delete(taskPlannerLeaseKey(taskId)),
             ]);
-            return legacyRaw;
+            return applyTaskOperationMetadata(legacyRaw, fence, 0);
         } catch (error) {
             console.warn("D1 task read failed; falling back to KV", error);
         }
@@ -509,8 +700,9 @@ export async function getOwnedTask(
 
                 const parsed = JSON.parse(raw) as { uid?: unknown };
                 if (parsed.uid !== ownerUid) return null;
-                await writeD1Task(env.DB, taskId, raw, STATE_TTL_SECONDS, ownerUid);
-                return applyStoredTaskQuotaMarker(env, taskId, raw, ownerUid);
+                const fence = await writeD1Task(env.DB, taskId, raw, STATE_TTL_SECONDS, ownerUid);
+                const promotedRaw = applyTaskOperationMetadata(raw, fence, 0);
+                return applyStoredTaskQuotaMarker(env, taskId, promotedRaw, ownerUid);
             }
 
             const legacyRaw = await readKvTask(env, taskId);
@@ -518,7 +710,7 @@ export async function getOwnedTask(
             const parsed = JSON.parse(legacyRaw) as { uid?: unknown };
             if (parsed.uid !== ownerUid) return null;
             const legacyCostRaw = await env.TASKS.get(`taskCost:${taskId}`);
-            await writeD1Task(
+            const fence = await writeD1Task(
                 env.DB,
                 taskId,
                 legacyRaw,
@@ -532,10 +724,11 @@ export async function getOwnedTask(
                 env.TASKS.delete(taskQuotaKey(taskId)),
                 env.TASKS.delete(taskPlannerLeaseKey(taskId)),
             ]);
-            return legacyRaw;
+            return applyTaskOperationMetadata(legacyRaw, fence, 0);
         } catch (error) {
             if (error instanceof TaskOwnershipError) return null;
-            console.warn("D1 owned task read failed; falling back to KV", error);
+            console.warn("D1 owned task read failed", error);
+            throw new TaskStoreUnavailableError("D1 task state read failed");
         }
     }
     const raw = await readKvTask(env, taskId);
@@ -548,21 +741,20 @@ export async function getOwnedTask(
     }
 }
 
-/** Store task state in D1, with KV fallback for unbound preview/local environments. */
-export async function putTask(
+async function storeTask(
     env: TaskStoreEnv,
     taskId: string,
     raw: string,
-    expirationTtl = STATE_TTL_SECONDS,
-    ownerUid = "",
-): Promise<void> {
+    expirationTtl: number,
+    ownerUid: string,
+): Promise<string | null> {
     if (env.DB) {
         try {
-            await writeD1Task(env.DB, taskId, raw, expirationTtl, ownerUid);
-            return;
+            return await writeD1Task(env.DB, taskId, raw, expirationTtl, ownerUid);
         } catch (error) {
             if (error instanceof TaskOwnershipError) throw error;
-            console.warn("D1 task write failed; falling back to KV", error);
+            console.warn("D1 task write failed", error);
+            throw new TaskStoreUnavailableError("D1 task state write failed");
         }
     }
     if (ownerUid) {
@@ -577,7 +769,31 @@ export async function putTask(
             }
         }
     }
-    await env.TASKS.put(taskId, raw, { expirationTtl });
+    await env.TASKS.put(taskId, prepareTaskStateForStorage(raw).raw, { expirationTtl });
+    return null;
+}
+
+/** Store task state in D1, with KV fallback for unbound preview/local environments. */
+export async function putTask(
+    env: TaskStoreEnv,
+    taskId: string,
+    raw: string,
+    expirationTtl = STATE_TTL_SECONDS,
+    ownerUid = "",
+): Promise<void> {
+    await storeTask(env, taskId, raw, expirationTtl, ownerUid);
+}
+
+/** Store a mutable task state and advance its in-memory D1 fence for sequential writes. */
+export async function putTaskState(
+    env: TaskStoreEnv,
+    taskId: string,
+    state: Record<string, any>,
+    expirationTtl = STATE_TTL_SECONDS,
+    ownerUid = "",
+): Promise<void> {
+    const fence = await storeTask(env, taskId, JSON.stringify(state), expirationTtl, ownerUid);
+    if (fence) applyTaskOperationMetadataToState(state, fence, 0);
 }
 
 export async function markTaskQuotaExhausted(

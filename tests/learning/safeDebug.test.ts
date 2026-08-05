@@ -197,6 +197,26 @@ describe("safe Debug export", () => {
         }
     });
 
+    it("keeps job deadline diagnostics without exporting timing anchors or the current need", () => {
+        const startedAt = 7_777_777_777_777;
+        const deadlineAt = startedAt + 240_000;
+        const payload = buildSafeDebugExport(makeSource({
+            learningProgress: makeProgress({
+                stage: "fix",
+                startedAt,
+                deadlineAt,
+                currentNeed: "private-current-need-sentinel",
+                reasonCode: "job_deadline",
+            }),
+        }), 1_700_000_000_000);
+        const json = JSON.stringify(payload);
+
+        expect(payload.learning.current.reasonCode).toBe("job_deadline");
+        expect(json).not.toContain(String(startedAt));
+        expect(json).not.toContain(String(deadlineAt));
+        expect(json).not.toContain("private-current-need-sentinel");
+    });
+
     it("clears an earlier failure reason after a newer successful status", () => {
         const events: LearningDebugEvent[] = [
             {

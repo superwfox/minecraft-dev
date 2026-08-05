@@ -1,6 +1,7 @@
 import { getRunStatus, getArtifactInfo, findRunByBranch, deleteBranch } from "../../_lib/github";
-import { getOwnedTask, putTask } from "../../_lib/taskStore";
+import { getOwnedTask, putTaskState, taskOperationLeaseFromState } from "../../_lib/taskStore";
 import { compareDiagnostics } from "../../_lib/buildDiagnostics";
+import { buildRepairRecoverySnapshot } from "../../_lib/buildRepairRecovery";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 
 interface Env {
@@ -41,6 +42,27 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    const now = Date.now();
+    const operationLease = context.env.DB ? taskOperationLeaseFromState(state) : null;
+    const repairLeaseUntil = operationLease?.token.startsWith("repair:")
+        ? operationLease.leaseUntil
+        : 0;
+    if (state.status === "repairing" && context.env.DB && !operationLease) {
+        return new Response(JSON.stringify({
+            status: "repairing",
+            repairRetryAfterMs: 2_000,
+        }), {
+            status: 503,
+            headers: { "Content-Type": "application/json", "Retry-After": "2" },
+        });
+    }
+    const repairRecovery = buildRepairRecoverySnapshot(state, now, repairLeaseUntil);
+    if (repairRecovery) {
+        return new Response(JSON.stringify(repairRecovery), {
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+
     state.uid = uid;
     let discoveredRun = false;
 
@@ -64,7 +86,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (status !== "completed") {
         // 仅在首次发现 runId 时落一次；若本次已完成，则与终态合并为下方一次写入。
         if (discoveredRun) {
-            await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+            await putTaskState(context.env, taskId, state, 3600, uid);
         }
         return new Response(JSON.stringify({ status: "building", runStatus: status }), {
             headers: { "Content-Type": "application/json" },
@@ -107,12 +129,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         state.logs.push(`× 构建结果: ${conclusion}`);
     }
 
-    // 成功时删除临时分支；失败时保留以供 fix 端点读取日志
-    if (state.buildBranch && state.status === "done") {
-        deleteBranch(token, state.buildBranch).catch(() => { });
-    }
+    const completedBranch = state.buildBranch && state.status === "done"
+        ? String(state.buildBranch)
+        : "";
+    await putTaskState(context.env, taskId, state, 3600, uid);
 
-    await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+    // 只有任务终态已落库后才清理临时分支；失败时保留以供 fix 端点读取日志。
+    if (completedBranch) {
+        context.waitUntil(deleteBranch(token, completedBranch).catch((error) => {
+            console.warn("completed build branch cleanup failed", error);
+        }));
+    }
 
     return new Response(JSON.stringify({
         status: state.status,

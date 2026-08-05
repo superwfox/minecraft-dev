@@ -12,7 +12,7 @@ import {
     cleanupExpiredTasks,
     getOwnedTask,
     markTaskQuotaExhausted,
-    putTask,
+    putTaskState,
     putTaskWithPlannerLease,
     releaseTaskPlannerLease,
     renewTaskPlannerLease,
@@ -319,7 +319,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             skills,
             logs: ["任务已创建，进入澄清阶段"],
         };
-        await putTask(context.env, taskId, JSON.stringify(state), 3600, uid);
+        await putTaskState(context.env, taskId, state, 3600, uid);
         context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
         return new Response(JSON.stringify({ taskId }), {
             headers: { "Content-Type": "application/json" },
@@ -449,12 +449,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             ? state.grade.knowledgeNeeds
             : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
         const needs = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawNeeds).uncovered;
-        const knowledge = await withPlannerDeadline(() => loadKnowledgeContext({
+        const knowledge = await loadKnowledgeContext({
             env: context.env,
             needs,
             maxCharacters: 4_800,
             title: "Planner 已验证公共技术知识",
-        }), preparationDeadline.signal, "加载 Planner 知识超时");
+        });
         state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
 
         const { system, user } = plannerPrompt(

@@ -1,5 +1,6 @@
 import type { UsageBreakdown } from "../quota";
 import type { LLMProvider } from "../llm";
+import { LEARNING_VERIFIER_LIMIT_MS } from "./deadline";
 import type {
     KnowledgeNeed,
     KnowledgeStatus,
@@ -8,7 +9,7 @@ import type {
     VerificationResult,
 } from "./types";
 
-const VERIFIER_TIMEOUT_MS = 25_000;
+const VERIFIER_TIMEOUT_MS = LEARNING_VERIFIER_LIMIT_MS;
 const VERDICTS = new Set(["supported", "contradicted", "insufficient"]);
 const RELATIONS = new Set(["supports", "contradicts"]);
 
@@ -171,8 +172,12 @@ export async function verifyKnowledgeNeed(input: {
             retryable: false,
         };
     }
+    const configuredTimeout = Number(input.timeoutMs);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+        ? Math.min(VERIFIER_TIMEOUT_MS, Math.floor(configuredTimeout))
+        : VERIFIER_TIMEOUT_MS;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? VERIFIER_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const response = await (input.fetchImpl ?? fetch)(input.llm.url, {
             method: "POST",

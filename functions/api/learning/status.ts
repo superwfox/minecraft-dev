@@ -50,9 +50,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         return json(learningSnapshot(job, items, sources.length));
     } catch (error) {
         if (!(error instanceof LearningStoreUnavailableError)) console.warn("learning status failed", error);
-        return json(learningSnapshot(null, [], 0, {
-            status: "deferred",
+        return json({
+            error: "Learning storage is temporarily unavailable",
             reasonCode: "storage_unavailable",
-        }), 503);
+        }, 503);
     }
 };

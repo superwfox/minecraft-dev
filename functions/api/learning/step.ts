@@ -1,28 +1,43 @@
 import { discoverLearningSources } from "../../_lib/deepseekResponses";
 import { resolveLLM } from "../../_lib/llm";
 import { knowledgeLookupKey } from "../../_lib/learning/assessment";
+import {
+    LEARNING_DISCOVERY_LIMIT_MS,
+    LEARNING_MIN_OUTBOUND_MS,
+    LEARNING_SOURCE_LIMIT_MS,
+    LEARNING_SOURCE_TIMEOUT_MS,
+    LEARNING_VERIFIER_LIMIT_MS,
+    learningLeaseMs,
+    learningOutboundRemainingMs,
+    learningStageBudget,
+    learningVerificationFailureReason,
+} from "../../_lib/learning/deadline";
 import { normalizeLearningTelemetry } from "../../_lib/learning/debug";
 import {
     learningCompletionStatus,
     learningKnowledgeIds,
     learningSnapshot,
 } from "../../_lib/learning/public";
-import { fetchLearningSources } from "../../_lib/learning/sourceFetch";
+import {
+    fetchLearningSources,
+    learningNoSourcesReason,
+} from "../../_lib/learning/sourceFetch";
 import {
     acquireLearningJobLease,
     completeLearningJobStep,
-    createKnowledgeItem,
     getKnowledgeItemsByIds,
     getLearningJob,
-    insertLearningSources,
     knowledgeIdForLearningResult,
     listLearningSources,
+    type KnowledgeItemCreateInput,
 } from "../../_lib/learning/store";
 import type {
+    LearningActiveStatus,
     LearningJobRecord,
     LearningJobStatus,
     LearningJobTelemetry,
     LearningReasonCode,
+    LearningSourceRecord,
 } from "../../_lib/learning/types";
 import { decideKnowledgeStatus, verifyKnowledgeNeed } from "../../_lib/learning/verification";
 import { accumulateCosts, type UsageCostEntry } from "../../_lib/quota";
@@ -37,9 +52,27 @@ interface Env {
 
 type LearningConflictReason = "revision" | "lease";
 
+interface LearningStepSideEffects {
+    sources?: LearningSourceRecord[];
+    knowledge?: KnowledgeItemCreateInput & { knowledgeId: string };
+}
+
 const MAX_VERIFICATION_ATTEMPTS = 2;
-const PLANNER_SOURCE_BUDGET_MS = 10_000;
-const FIX_SOURCE_BUDGET_MS = 5_000;
+
+function learningStepLimitMs(status: LearningJobStatus): number {
+    if (status === "discovering") return LEARNING_DISCOVERY_LIMIT_MS;
+    if (status === "fetching") return LEARNING_SOURCE_LIMIT_MS;
+    if (status === "verifying") return LEARNING_VERIFIER_LIMIT_MS;
+    return 0;
+}
+
+function learningJobNeedsFinalization(job: LearningJobRecord): boolean {
+    return learningOutboundRemainingMs(job) < LEARNING_MIN_OUTBOUND_MS;
+}
+
+function isLearningActiveStatus(status: LearningJobStatus): status is LearningActiveStatus {
+    return status === "queued" || status === "discovering" || status === "fetching" || status === "verifying";
+}
 
 function json(value: unknown, status = 200): Response {
     return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
@@ -53,11 +86,11 @@ async function snapshot(env: Env, job: LearningJobRecord) {
     return learningSnapshot(job, items, sources.length);
 }
 
-function storageUnavailable(job: LearningJobRecord | null): Response {
-    return json(learningSnapshot(job, [], 0, {
-        status: "deferred",
+function storageUnavailable(): Response {
+    return json({
+        error: "Learning storage is temporarily unavailable",
         reasonCode: "storage_unavailable",
-    }), 503);
+    }, 503);
 }
 
 async function conflictResponse(
@@ -130,7 +163,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
     } catch (error) {
         console.warn("learning step read failed", error);
-        return storageUnavailable(current);
+        return storageUnavailable();
     }
 
     let llm: Awaited<ReturnType<typeof resolveLLM>>;
@@ -150,7 +183,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     let preflightReason: LearningReasonCode | undefined;
-    if (state.quotaExhausted) preflightReason = "quota_exhausted";
+    if (learningJobNeedsFinalization(current)) preflightReason = "job_deadline";
+    else if (state.quotaExhausted) preflightReason = "quota_exhausted";
     else if (!llm.canAutoLearn || llm.providerId !== "deepseek") {
         preflightReason = llm.providerId === "glm"
             ? "glm_auto_learning_disabled"
@@ -165,7 +199,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             ownerUid: uid,
             expectedRevision,
             leaseToken,
-            leaseMs: 120_000,
+            leaseMs: learningLeaseMs(current, learningStepLimitMs(current.status)),
         });
         if (!leased) {
             const latest = await getLearningJob(context.env, jobId, uid);
@@ -178,7 +212,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
     } catch (error) {
         console.warn("learning lease failed", error);
-        return storageUnavailable(current);
+        return storageUnavailable();
     }
 
     const persist = async (
@@ -186,17 +220,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         work: LearningJobRecord["work"],
         resultIds: string[],
         reasonCode?: LearningReasonCode,
+        sideEffects: LearningStepSideEffects = {},
     ): Promise<Response> => {
         try {
+            const terminal = status === "ready" || status === "deferred" || status === "needs_review"
+                || status === "failed" || status === "cancelled";
+            const persistedWork = terminal && isLearningActiveStatus(leased!.status)
+                ? { ...work, lastActiveStatus: leased!.status }
+                : work;
             const completed = await completeLearningJobStep(context.env, {
                 jobId,
                 ownerUid: uid,
                 expectedRevision: leased!.revision,
                 leaseToken,
                 status,
-                work,
+                work: persistedWork,
                 resultIds,
                 error: reasonCode ?? "",
+                ...sideEffects,
             });
             if (!completed) {
                 const latest = await getLearningJob(context.env, jobId, uid);
@@ -206,10 +247,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return json(await snapshot(context.env, completed));
         } catch (error) {
             console.warn("learning step persist failed", error);
-            return storageUnavailable(leased);
+            return storageUnavailable();
         }
     };
 
+    if (!preflightReason && learningJobNeedsFinalization(leased)) {
+        preflightReason = "job_deadline";
+    }
     if (preflightReason) {
         return persist("deferred", {
             ...leased.work,
@@ -235,16 +279,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (leased.status === "discovering") {
         const telemetry = normalizeLearningTelemetry(leased.work.telemetry);
+        const discoveryBudget = learningStageBudget(leased, LEARNING_DISCOVERY_LIMIT_MS);
+        if (discoveryBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "job_deadline");
+        }
+
         let discovery: Awaited<ReturnType<typeof discoverLearningSources>>;
         try {
             discovery = await discoverLearningSources({
                 apiKey: context.env.DEEPSEEK_API_KEY,
                 needs: leased.needs,
-                budgetMs: leased.stage === "planner" ? 30_000 : 12_000,
+                budgetMs: discoveryBudget.budgetMs,
             });
         } catch (error) {
             console.warn("learning discovery failed", error);
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "internal_error");
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds,
+                learningJobNeedsFinalization(leased) ? "job_deadline" : "internal_error");
         }
         applyDiscoveryTelemetry(telemetry, discovery);
 
@@ -259,61 +309,73 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "quota_exhausted");
         }
         if (!discovery.ok) {
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, discovery.reasonCode);
+            const reasonCode = discovery.reasonCode === "discovery_timeout"
+                && discoveryBudget.clippedByJobDeadline
+                ? "job_deadline"
+                : discovery.reasonCode;
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, reasonCode);
         }
-        return persist("fetching", {
+
+        const work = {
             ...leased.work,
             candidates: discovery.candidates,
             telemetry,
-        }, leased.resultIds);
+        };
+        if (learningJobNeedsFinalization(leased)) {
+            return persist("deferred", work, leased.resultIds, "job_deadline");
+        }
+        return persist("fetching", work, leased.resultIds);
     }
 
     if (leased.status === "fetching") {
         const telemetry = normalizeLearningTelemetry(leased.work.telemetry);
+        const sourceBudget = learningStageBudget(leased, LEARNING_SOURCE_LIMIT_MS);
+        if (sourceBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "job_deadline");
+        }
+
         let fetched: Awaited<ReturnType<typeof fetchLearningSources>>;
         try {
             fetched = await fetchLearningSources({
                 jobId,
                 needs: leased.needs,
                 candidates: leased.work.candidates ?? [],
-                budgetMs: leased.stage === "planner"
-                    ? PLANNER_SOURCE_BUDGET_MS
-                    : FIX_SOURCE_BUDGET_MS,
+                budgetMs: sourceBudget.budgetMs,
+                timeoutMs: LEARNING_SOURCE_TIMEOUT_MS,
                 maxSources: 6,
             });
         } catch (error) {
             console.warn("learning source fetch failed", error);
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "no_fetchable_sources");
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds,
+                learningJobNeedsFinalization(leased) ? "job_deadline" : "no_fetchable_sources");
         }
         Object.assign(telemetry, {
             ...fetched.telemetry,
             version: 1,
         });
 
-        let accumulatedSources;
-        try {
-            await insertLearningSources(context.env, fetched.sources);
-            accumulatedSources = await listLearningSources(context.env, jobId, uid);
-        } catch (error) {
-            console.warn("learning source storage failed", error);
-            return storageUnavailable(leased);
-        }
-        if (!accumulatedSources.length) {
-            return persist("deferred", {
-                ...leased.work,
-                sourceIds: [],
-                telemetry,
-            }, leased.resultIds, fetched.telemetry.sourceBudgetExhausted
-                ? "source_fetch_timeout"
-                : "no_fetchable_sources");
-        }
-        return persist("verifying", {
+        const accumulatedSources = fetched.sources;
+        const sourceEffects: LearningStepSideEffects = { sources: fetched.sources };
+        const work = {
             ...leased.work,
             sourceIds: accumulatedSources.map((source) => source.sourceId),
+            telemetry,
+        };
+        if (!accumulatedSources.length) {
+            const reasonCode = learningNoSourcesReason(
+                fetched.telemetry,
+                sourceBudget.clippedByJobDeadline,
+            );
+            return persist("deferred", work, leased.resultIds, reasonCode, sourceEffects);
+        }
+        if (learningJobNeedsFinalization(leased)) {
+            return persist("deferred", work, leased.resultIds, "job_deadline", sourceEffects);
+        }
+        return persist("verifying", {
+            ...work,
             currentNeed: leased.needs[0]?.claim.question,
             completedNeeds: 0,
-            telemetry,
-        }, leased.resultIds);
+        }, leased.resultIds, undefined, sourceEffects);
     }
 
     if (leased.status === "verifying") {
@@ -326,13 +388,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ): Promise<Response> => {
             const completed = Math.min(leased!.needs.length, completedNeeds);
             let nextStatus: LearningJobStatus = "verifying";
-            if (completed >= leased!.needs.length) {
+            let reasonCode: LearningReasonCode | undefined;
+            if (learningJobNeedsFinalization(leased!)) {
+                nextStatus = "deferred";
+                reasonCode = "job_deadline";
+            } else if (completed >= leased!.needs.length) {
                 try {
                     const items = await getKnowledgeItemsByIds(context.env, resultIds);
                     nextStatus = learningCompletionStatus(leased!.needs.length, items);
+                    if (nextStatus === "deferred") reasonCode = "unresolved_knowledge_needs";
                 } catch (error) {
                     console.warn("learning result read failed", error);
-                    return storageUnavailable(leased);
+                    return storageUnavailable();
                 }
             }
             return persist(nextStatus, {
@@ -340,7 +407,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 completedNeeds: completed,
                 currentNeed: leased!.needs[completed]?.claim.question,
                 telemetry,
-            }, resultIds, nextStatus === "deferred" ? "unresolved_knowledge_needs" : undefined);
+            }, resultIds, reasonCode);
         };
 
         const need = leased.needs[index];
@@ -353,7 +420,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             allSources = await listLearningSources(context.env, jobId, uid);
         } catch (error) {
             console.warn("learning verification source read failed", error);
-            return storageUnavailable(leased);
+            return storageUnavailable();
         }
         const needSources = allSources.filter((source) => source.needId === need.id);
         if (!needSources.length) {
@@ -361,12 +428,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return advanceVerification(leased.resultIds, leased.work, index + 1);
         }
 
+        const verificationBudget = learningStageBudget(leased, LEARNING_VERIFIER_LIMIT_MS);
+        if (verificationBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "job_deadline");
+        }
+
         const verificationAttemptsByNeed = { ...leased.work.verificationAttemptsByNeed };
         const previousAttempts = Math.max(0, Number(verificationAttemptsByNeed[need.id]) || 0);
         const verificationAttempt = Math.min(MAX_VERIFICATION_ATTEMPTS, previousAttempts + 1);
         verificationAttemptsByNeed[need.id] = verificationAttempt;
 
-        const verified = await verifyKnowledgeNeed({ llm, need, sources: needSources });
+        const verified = await verifyKnowledgeNeed({
+            llm,
+            need,
+            sources: needSources,
+            timeoutMs: verificationBudget.budgetMs,
+        });
         telemetry.verificationAttempts++;
         telemetry.verificationElapsedMs += verified.elapsedMs;
         try {
@@ -391,7 +468,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         if (!verified.ok) {
             applyVerificationFailureTelemetry(telemetry, verified);
-            if (verified.retryable && verificationAttempt < MAX_VERIFICATION_ATTEMPTS) {
+            const reasonCode = learningVerificationFailureReason(
+                verified.reasonCode,
+                verificationBudget.clippedByJobDeadline,
+            );
+            const canRetry = reasonCode !== "job_deadline"
+                && verified.retryable
+                && verificationAttempt < MAX_VERIFICATION_ATTEMPTS;
+            const retryBlockedByDeadline = canRetry && learningJobNeedsFinalization(leased);
+            if (canRetry && !retryBlockedByDeadline) {
                 return persist("verifying", {
                     ...leased.work,
                     verificationAttemptsByNeed,
@@ -402,7 +487,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 ...leased.work,
                 verificationAttemptsByNeed,
                 telemetry,
-            }, leased.resultIds, verified.reasonCode);
+            }, leased.resultIds, reasonCode);
+        }
+
+        if (learningJobNeedsFinalization(leased)) {
+            return persist("deferred", {
+                ...leased.work,
+                verificationAttemptsByNeed,
+                telemetry,
+            }, leased.resultIds, "job_deadline");
         }
 
         telemetry.verificationCompleted++;
@@ -413,35 +506,52 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const resultIds = leased.resultIds.slice();
         const verifications = leased.work.verifications?.slice() ?? [];
         verifications.push(verified.verification);
-        try {
-            const now = Date.now();
-            const activation = decideKnowledgeStatus(need, verified.verification, needSources, now);
-            const item = await createKnowledgeItem(context.env, {
-                knowledgeId: knowledgeIdForLearningResult(jobId, index),
-                kind: need.kind,
-                lookupKey: knowledgeLookupKey(need),
-                scope: need.scope,
-                payload: verified.verification.normalizedClaim ?? {},
-                summary: verified.verification.runtimeSummary || need.claim.question,
-                risk: need.risk,
-                confidence: verified.verification.confidence,
-                status: activation.status,
-                validFrom: now,
-                expiresAt: activation.expiresAt,
-                evidence: verified.verification.evidence,
-                now,
-            });
-            if (!resultIds.includes(item.knowledgeId)) resultIds.push(item.knowledgeId);
-        } catch (error) {
-            console.warn("learning knowledge persist failed", error);
-            return storageUnavailable(leased);
+        const now = Date.now();
+        const activation = decideKnowledgeStatus(need, verified.verification, needSources, now);
+        const knowledgeId = knowledgeIdForLearningResult(jobId, index);
+        if (!resultIds.includes(knowledgeId)) resultIds.push(knowledgeId);
+        const knowledge: KnowledgeItemCreateInput & { knowledgeId: string } = {
+            knowledgeId,
+            kind: need.kind,
+            lookupKey: knowledgeLookupKey(need),
+            scope: need.scope,
+            payload: verified.verification.normalizedClaim ?? {},
+            summary: verified.verification.runtimeSummary || need.claim.question,
+            risk: need.risk,
+            confidence: verified.verification.confidence,
+            status: activation.status,
+            validFrom: now,
+            expiresAt: activation.expiresAt,
+            evidence: verified.verification.evidence,
+            now,
+        };
+
+        const completedNeeds = Math.min(leased.needs.length, index + 1);
+        let nextStatus: LearningJobStatus = "verifying";
+        let reasonCode: LearningReasonCode | undefined;
+        if (completedNeeds >= leased.needs.length) {
+            try {
+                const items = await getKnowledgeItemsByIds(context.env, resultIds);
+                const completionItems = [
+                    ...items.filter((item) => item.knowledgeId !== knowledgeId),
+                    { status: activation.status },
+                ];
+                nextStatus = learningCompletionStatus(leased.needs.length, completionItems);
+                if (nextStatus === "deferred") reasonCode = "unresolved_knowledge_needs";
+            } catch (error) {
+                console.warn("learning result read failed", error);
+                return storageUnavailable();
+            }
         }
 
-        return advanceVerification(resultIds, {
+        return persist(nextStatus, {
             ...leased.work,
             verifications,
             verificationAttemptsByNeed,
-        }, index + 1);
+            completedNeeds,
+            currentNeed: leased.needs[completedNeeds]?.claim.question,
+            telemetry,
+        }, resultIds, reasonCode, { knowledge });
     }
 
     return persist("failed", {
