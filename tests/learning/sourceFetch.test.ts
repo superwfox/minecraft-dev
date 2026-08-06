@@ -3,6 +3,7 @@ import {
     fetchLearningSource,
     fetchLearningSources,
     learningNoSourcesReason,
+    publicLearningCandidateUrl,
     validatePublicSourceUrl,
 } from "../../functions/_lib/learning/sourceFetch";
 import { makeNeed } from "./testData";
@@ -47,6 +48,13 @@ describe("learning source fetch safety", () => {
             expect(() => validatePublicSourceUrl(url), url).toThrow(error);
         }
         expect(validatePublicSourceUrl("https://example.com/docs#section").href).toBe("https://example.com/docs");
+    });
+
+    it("projects candidate URLs without credentials, fragments, or sensitive query values", () => {
+        expect(publicLearningCandidateUrl(
+            "https://user:secret@example.com/docs?token=private&lang=en#section",
+        )).toBe("https://example.com/docs?lang=en");
+        expect(publicLearningCandidateUrl("not a url")).toBe("");
     });
 
     it("rejects redirects to an IP literal without issuing the second request", async () => {
@@ -140,13 +148,43 @@ describe("learning source fetch safety", () => {
         expect(mirroredPom).toMatchObject({ sourceType: "artifact", authority: "secondary" });
     });
 
-    it("keeps official immutable repository revisions as ground truth", async () => {
+    it("does not promote SHA-shaped GitHub objects without trusted ref ancestry", async () => {
         const commit = "a".repeat(40);
         const officialCommit = await fetchAt(`https://github.com/PaperMC/Paper/blob/${commit}/README.md`);
-        const unknownCommit = await fetchAt(`https://github.com/example-fork/Paper/blob/${commit}/README.md`);
+        const officialRawCommit = await fetchAt(
+            `https://raw.githubusercontent.com/PaperMC/Paper/${commit}/README.md`,
+        );
+        const officialRelease = await fetchAt(
+            "https://github.com/PaperMC/Paper/releases/tag/ver/1.21.4-123",
+        );
+        const unlistedRelease = await fetchAt(
+            "https://github.com/PaperMC/Website/releases/tag/example",
+        );
 
-        expect(officialCommit).toMatchObject({ sourceType: "repository", authority: "ground_truth" });
-        expect(unknownCommit).toMatchObject({ sourceType: "repository", authority: "secondary" });
+        expect(officialCommit).toMatchObject({ sourceType: "repository", authority: "secondary" });
+        expect(officialRawCommit).toMatchObject({ sourceType: "repository", authority: "secondary" });
+        expect(officialRelease).toMatchObject({ sourceType: "release", authority: "official" });
+        expect(unlistedRelease).toMatchObject({ sourceType: "release", authority: "secondary" });
+    });
+
+    it("does not treat user-published or nested subdomains as official sources", async () => {
+        const paperForum = await fetchAt(
+            "https://forums.papermc.io/threads/user-posted-implementation",
+        );
+        const spigotResource = await fetchAt(
+            "https://www.spigotmc.org/resources/user-published-library.12345/",
+        );
+        const nestedDocsHost = await fetchAt(
+            "https://community.docs.papermc.io/paper/reference",
+        );
+        const officialDocs = await fetchAt(
+            "https://docs.papermc.io/paper/reference/overview",
+        );
+
+        expect(paperForum).toMatchObject({ sourceType: "community", authority: "untrusted" });
+        expect(spigotResource).toMatchObject({ sourceType: "community", authority: "untrusted" });
+        expect(nestedDocsHost).toMatchObject({ sourceType: "community", authority: "untrusted" });
+        expect(officialDocs).toMatchObject({ sourceType: "documentation", authority: "official" });
     });
 
     it("requires official Javadoc to match both the need version and symbol", async () => {
@@ -340,6 +378,64 @@ describe("learning source fetch safety", () => {
             sourceTimeouts: 1,
             sourceBudgetExhausted: 1,
         });
+        expect(result.outcomes).toMatchObject([
+            { status: "rejected", rejectionCode: "timeout" },
+            { status: "skipped", rejectionCode: "budget_exhausted" },
+        ]);
+    });
+
+    it("marks unattempted candidates as skipped after reaching the source limit", async () => {
+        const fetchImpl = responseFetch();
+        const result = await fetchLearningSources({
+            jobId: "learn-test",
+            needs: [makeNeed()],
+            candidates: [{
+                needId: "need-api",
+                sources: [
+                    {
+                        url: "https://example.com/first",
+                        reason: "Check the first versioned source for the target contract.",
+                    },
+                    {
+                        url: "https://example.com/second",
+                        reason: "Check a backup source if the first source is insufficient.",
+                    },
+                ],
+            }],
+            fetchImpl,
+            maxSources: 1,
+        });
+
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(result.outcomes).toMatchObject([
+            { status: "fetched" },
+            { status: "skipped", rejectionCode: "source_limit" },
+        ]);
+    });
+
+    it("rejects malformed recovered candidate payloads before issuing requests", async () => {
+        const fetchImpl = responseFetch();
+        const sources = ["a", "b", "c", "d"].map((suffix) => ({
+            url: `https://example.com/${suffix}`,
+            reason: `Check versioned source ${suffix} for the exact API contract.`,
+        }));
+
+        await expect(fetchLearningSources({
+            jobId: "learn-test",
+            needs: [makeNeed()],
+            candidates: [{ needId: "need-api", sources }],
+            fetchImpl,
+        })).rejects.toThrow("learning_candidate_bounds");
+        await expect(fetchLearningSources({
+            jobId: "learn-test",
+            needs: [makeNeed()],
+            candidates: [{
+                needId: "need-unknown",
+                sources: sources.slice(0, 1),
+            }],
+            fetchImpl,
+        })).rejects.toThrow("learning_candidate_bounds");
+        expect(fetchImpl).not.toHaveBeenCalled();
     });
 
     it("classifies an empty source result without hiding timeout causes", () => {
@@ -405,10 +501,19 @@ describe("learning source fetch safety", () => {
             needs: [makeNeed()],
             candidates: [{
                 needId: "need-api",
-                urls: [
-                    "https://example.com/docs#first",
-                    "https://example.com/docs#second",
-                    "http://example.com/not-https",
+                sources: [
+                    {
+                        url: "https://example.com/docs#first",
+                        reason: "Check the versioned documentation for the exact method.",
+                    },
+                    {
+                        url: "https://example.com/docs#second",
+                        reason: "Check whether the second anchor contains a distinct contract.",
+                    },
+                    {
+                        url: "http://example.com/not-https?token=private",
+                        reason: "Audit a candidate that does not satisfy the HTTPS policy.",
+                    },
                 ],
             }],
             fetchImpl,
@@ -423,5 +528,25 @@ describe("learning source fetch safety", () => {
             sourceDeduplicated: 1,
         });
         expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(result.outcomes).toEqual([
+            expect.objectContaining({
+                reason: "Check the versioned documentation for the exact method.",
+                status: "fetched",
+                url: "https://example.com/docs",
+                canonicalUrl: "https://example.com/docs",
+            }),
+            expect.objectContaining({
+                reason: "Check whether the second anchor contains a distinct contract.",
+                status: "rejected",
+                rejectionCode: "duplicate",
+                url: "https://example.com/docs",
+            }),
+            expect.objectContaining({
+                reason: "Audit a candidate that does not satisfy the HTTPS policy.",
+                status: "rejected",
+                rejectionCode: "invalid_url",
+                url: "http://example.com/not-https",
+            }),
+        ]);
     });
 });

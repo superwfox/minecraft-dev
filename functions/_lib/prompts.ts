@@ -264,6 +264,9 @@ export function graderPrompt(
       "kind": "fact",
       "trigger": "contract_miss|version_gap|dependency_gap|skill_staleness",
       "specificity": "exact|scoped",
+      "integrationKind": "nms|craftbukkit|version_reflection|external_plugin",
+      "triggerReason": "nms_version_sensitive|reflection_contract|external_plugin_contract",
+      "pathIds": ["p1"],
       "claim": {
         "subject": "明确的依赖、包名或 API 符号",
         "question": "目标版本下需要查证的单一技术事实",
@@ -324,14 +327,16 @@ export function graderPrompt(
 - 必须是合法可渲染的 mermaid flowchart；节点文字用中文并以 A["中文标签"] 形式包裹，避免括号/特殊字符导致语法错误。
 - 不要用 style / classDef 给节点自定义填充色或文字色（深色背景下常不可读）；统一用默认主题配色，强调关键节点请靠形状（菱形判断、子图分组）而非颜色。
 
-【knowledgeNeeds：公开技术知识缺口，最多 3 条】
-- 只提出会影响 Planner 或代码正确性的单一事实；没有明确缺口时必须返回 []。
-- 禁止提出“学习 Paper API”“研究 Minecraft 插件”等泛化主题；必须落到目标版本 + 公开依赖、包名或 API 符号。
-- 用户意图不清属于澄清问题，不属于知识缺口；不要输出 specificity=ambiguous。
-- 普通 Bukkit/Paper 基础结构、Java 语法、以及上文已经明确给出的固定规则不需要联网查证。
+【knowledgeNeeds：外部 API 实现缺口，最多 3 条】
+- 只允许四类：NMS、CraftBukkit、与 NMS/CraftBukkit 绑定的 Spigot/Paper 版本反射、用户需求中明确点名的第三方插件/API（如 PlaceholderAPI、Vault、WorldGuard）。没有这四类明确缺口时必须返回 []。
+- 普通 Java、普通 Bukkit/Paper API、Kyori、配置/YAML/PDC、命令/事件/GUI 等常规业务逻辑一律不学习；禁止提出“学习 Paper API”“研究 Minecraft 插件”等泛化主题。
+- 每条必须是 kind=fact，并完整输出 integrationKind 与 triggerReason：NMS/CraftBukkit 用 nms_version_sensitive；反射用 reflection_contract；第三方插件用 external_plugin_contract。
+- external_plugin 只能来自用户需求中明确出现、且已写入 vector.external_deps 的插件/API；不得凭空扩展依赖。subject、dependency 或 symbol 必须能明确回指该名称。
+- 仅某条实现路径需要的知识必须填写对应 pathIds；所有路径都需要时可返回空数组。路径 ID 必须来自本次 paths。
+- 必须落到目标版本 + 公开依赖、包名或 API 符号；用户意图不清属于澄清问题，不属于知识缺口。
 - 每条只问一个可验证问题，searchQueries 必须包含目标版本和核心符号，acceptanceCriteria 必须说明什么证据可直接支持或推翻结论。
 - 不得包含用户源码、用户包名、完整 Prompt、密钥、私有仓库或构建日志；只允许公开可共享的技术主题。
-- MVP 以 fact 为主；不要把实现偏好、代码风格或“最佳实践”包装成事实。
+- 不要把实现偏好、代码风格或“最佳实践”包装成事实。
 
 核心类型：${coreType}，MC 版本：${version}${skillContext ?? ""}`,
         user: `用户需求：${userPrompt}${clarifyBlock}${correctionBlock}\n\n请输出分级 JSON。`,

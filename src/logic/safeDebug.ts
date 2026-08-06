@@ -26,7 +26,7 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "discovery_provider_incomplete", "discovery_provider_failed", "discovery_invalid_response",
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
-    "verification_failed", "unresolved_knowledge_needs", "revision_conflict", "lease_conflict",
+    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired", "revision_conflict", "lease_conflict",
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const BUCKET_DEBUG_MESSAGES = new Set([

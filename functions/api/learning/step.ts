@@ -11,8 +11,15 @@ import {
     learningOutboundRemainingMs,
     learningStageBudget,
     learningVerificationFailureReason,
+    refreshLearningInactivity,
 } from "../../_lib/learning/deadline";
 import { normalizeLearningTelemetry } from "../../_lib/learning/debug";
+import { learningJobAuthorizationFailure } from "../../_lib/learning/authorization";
+import {
+    containsSharedKnowledgeForbiddenTerm,
+    sharedKnowledgeForbiddenTerms,
+    unprovenSharedKnowledgeForbiddenTerms,
+} from "../../_lib/learning/privacy";
 import {
     learningCompletionStatus,
     learningKnowledgeIds,
@@ -21,6 +28,7 @@ import {
 import {
     fetchLearningSources,
     learningNoSourcesReason,
+    publicLearningCandidateUrl,
 } from "../../_lib/learning/sourceFetch";
 import {
     acquireLearningJobLease,
@@ -33,11 +41,17 @@ import {
 } from "../../_lib/learning/store";
 import type {
     LearningActiveStatus,
+    ImplementationRecipeV1,
+    KnowledgeNeed,
+    LearningCandidate,
     LearningJobRecord,
     LearningJobStatus,
     LearningJobTelemetry,
+    LearningNeedTriggerReason,
     LearningReasonCode,
+    LearningSearchedSource,
     LearningSourceRecord,
+    VerificationResult,
 } from "../../_lib/learning/types";
 import { decideKnowledgeStatus, verifyKnowledgeNeed } from "../../_lib/learning/verification";
 import { accumulateCosts, type UsageCostEntry } from "../../_lib/quota";
@@ -120,7 +134,68 @@ function applyDiscoveryTelemetry(
     telemetry.discoveryLastHttpStatus = last?.httpStatus ?? 0;
     telemetry.discoveryLastProviderStatus = last?.providerStatus ?? "unknown";
     telemetry.candidateNeedCount = result.candidates.length;
-    telemetry.candidateUrlCount = result.candidates.reduce((sum, candidate) => sum + candidate.urls.length, 0);
+    telemetry.candidateUrlCount = result.candidates.reduce((sum, candidate) =>
+        sum + candidateSources(candidate).length, 0);
+}
+
+function candidateSources(candidate: LearningCandidate): Array<{ url: string; reason: string }> {
+    if (Array.isArray(candidate.sources)) return candidate.sources;
+    return Array.isArray(candidate.urls)
+        ? candidate.urls.map((url) => ({
+            url,
+            reason: "旧版发现结果未记录该 URL 的搜索理由",
+        }))
+        : [];
+}
+
+function discoveredSources(candidates: LearningCandidate[]): LearningSearchedSource[] {
+    return candidates.flatMap((candidate) => candidateSources(candidate).map((source) => ({
+        needId: candidate.needId,
+        url: publicLearningCandidateUrl(source.url),
+        reason: source.reason.trim().replace(/\s+/g, " ").slice(0, 240)
+            || "该候选未提供可用的搜索理由",
+        status: "discovered" as const,
+    })));
+}
+
+function applyEvidenceRelations(
+    searchedSources: LearningSearchedSource[] | undefined,
+    verification: VerificationResult,
+): LearningSearchedSource[] {
+    const relations = new Map<string, "supports" | "contradicts">();
+    for (const evidence of verification.evidence) {
+        const current = relations.get(evidence.sourceId);
+        if (current !== "contradicts") relations.set(evidence.sourceId, evidence.relation);
+    }
+    return (searchedSources ?? []).map((source) => {
+        if (!source.sourceId) return source;
+        const relation = relations.get(source.sourceId);
+        return relation ? { ...source, status: relation } : source;
+    });
+}
+
+function learningReasonFor(
+    need: KnowledgeNeed,
+    recipe?: ImplementationRecipeV1,
+): { code: LearningNeedTriggerReason; message: string } | null {
+    const integrationKind = recipe?.integrationKind ?? need.integrationKind;
+    const code = need.triggerReason ?? (
+        integrationKind === "external_plugin"
+            ? "external_plugin_contract"
+            : integrationKind === "version_reflection"
+                ? "reflection_contract"
+                : integrationKind === "nms" || integrationKind === "craftbukkit"
+                    ? "nms_version_sensitive"
+                    : null
+    );
+    if (!code) return null;
+    const messages: Record<LearningNeedTriggerReason, string> = {
+        nms_version_sensitive: "目标 Minecraft 版本中的 NMS/CraftBukkit 接口需要公开来源核对",
+        reflection_contract: "目标版本的 Spigot/Paper 反射契约需要公开来源核对",
+        external_plugin_contract: "用户明确要求的第三方插件或 API 契约需要公开来源核对",
+        persistent_diagnostic_gap: "普通修复后仍存在外部 API 或版本契约诊断缺口",
+    };
+    return { code, message: messages[code] };
 }
 
 function applyVerificationFailureTelemetry(
@@ -148,6 +223,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
+    let forbiddenTerms: string[] = [];
 
     let current: LearningJobRecord | null = null;
     try {
@@ -155,8 +231,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!current || current.generationTaskId !== taskId) {
             return json({ error: "Learning job not found" }, 404);
         }
+        forbiddenTerms = sharedKnowledgeForbiddenTerms({
+            taskId,
+            projectName: state.projectName,
+            packageName: state.packageName,
+            generatedFilePaths: Array.isArray(state.generatedFiles)
+                ? state.generatedFiles
+                    .map((file: any) => typeof file?.path === "string" ? file.path : "")
+                    .filter(Boolean)
+                : [],
+            userPrompt: state.userPrompt,
+            clarifyRounds: Array.isArray(state.clarifyRounds) ? state.clarifyRounds : [],
+            externalDeps: Array.isArray(state.grade?.vector?.external_deps)
+                ? state.grade.vector.external_deps.filter((value: unknown) => typeof value === "string")
+                : [],
+            knowledgeNeeds: current.needs,
+        });
         if (current.revision !== expectedRevision) {
             return await conflictResponse(context.env, current, "revision");
+        }
+        const authorizationFailure = await learningJobAuthorizationFailure(state, current);
+        if (authorizationFailure) {
+            return json({
+                error: "Learning job authorization is no longer current",
+                reasonCode: authorizationFailure,
+            }, 409);
         }
         if (["ready", "deferred", "needs_review", "failed", "cancelled"].includes(current.status)) {
             return json(await snapshot(context.env, current));
@@ -221,13 +320,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         resultIds: string[],
         reasonCode?: LearningReasonCode,
         sideEffects: LearningStepSideEffects = {},
+        progressed = false,
     ): Promise<Response> => {
         try {
             const terminal = status === "ready" || status === "deferred" || status === "needs_review"
                 || status === "failed" || status === "cancelled";
-            const persistedWork = terminal && isLearningActiveStatus(leased!.status)
+            let persistedWork = terminal && isLearningActiveStatus(leased!.status)
                 ? { ...work, lastActiveStatus: leased!.status }
                 : work;
+            const persistedAt = Date.now();
+            if (progressed) persistedWork = refreshLearningInactivity(persistedWork, persistedAt);
             const completed = await completeLearningJobStep(context.env, {
                 jobId,
                 ownerUid: uid,
@@ -237,6 +339,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 work: persistedWork,
                 resultIds,
                 error: reasonCode ?? "",
+                taskStateFence: leased!.work.taskStateFence,
+                now: persistedAt,
                 ...sideEffects,
             });
             if (!completed) {
@@ -247,6 +351,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return json(await snapshot(context.env, completed));
         } catch (error) {
             console.warn("learning step persist failed", error);
+            return storageUnavailable();
+        }
+    };
+
+    const revalidateAuthorization = async (
+        work: LearningJobRecord["work"],
+        resultIds: string[] = leased!.resultIds,
+    ): Promise<Response | null> => {
+        try {
+            const latestRaw = await getOwnedTask(context.env, taskId, uid);
+            const latestState = latestRaw ? JSON.parse(latestRaw) : null;
+            const reasonCode = latestState
+                ? await learningJobAuthorizationFailure(latestState, leased!)
+                : leased!.stage === "fix"
+                    ? "fix_authorization_expired"
+                    : "planner_authorization_expired";
+            return reasonCode
+                ? persist("deferred", work, resultIds, reasonCode)
+                : null;
+        } catch (error) {
+            console.warn("learning authorization refresh failed", error);
             return storageUnavailable();
         }
     };
@@ -274,7 +399,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             currentNeed: leased.needs[0]?.claim.question,
             completedNeeds: 0,
             telemetry: normalizeLearningTelemetry(leased.work.telemetry),
-        }, leased.resultIds);
+        }, leased.resultIds, undefined, {}, true);
     }
 
     if (leased.status === "discovering") {
@@ -283,6 +408,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (discoveryBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "job_deadline");
         }
+
+        let authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
 
         let discovery: Awaited<ReturnType<typeof discoverLearningSources>>;
         try {
@@ -298,6 +426,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
         applyDiscoveryTelemetry(telemetry, discovery);
 
+        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
+
         let quotaExhausted = false;
         try {
             quotaExhausted = await charge(discovery.usageEntries);
@@ -305,6 +436,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             console.warn("learning discovery charge failed", error);
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "storage_unavailable");
         }
+        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
         if (quotaExhausted) {
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "quota_exhausted");
         }
@@ -319,12 +452,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const work = {
             ...leased.work,
             candidates: discovery.candidates,
+            searchedSources: discoveredSources(discovery.candidates),
             telemetry,
         };
-        if (learningJobNeedsFinalization(leased)) {
-            return persist("deferred", work, leased.resultIds, "job_deadline");
-        }
-        return persist("fetching", work, leased.resultIds);
+        return persist("fetching", work, leased.resultIds, undefined, {}, true);
     }
 
     if (leased.status === "fetching") {
@@ -333,6 +464,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (sourceBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "job_deadline");
         }
+
+        let authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
 
         let fetched: Awaited<ReturnType<typeof fetchLearningSources>>;
         try {
@@ -346,18 +480,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             });
         } catch (error) {
             console.warn("learning source fetch failed", error);
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds,
-                learningJobNeedsFinalization(leased) ? "job_deadline" : "no_fetchable_sources");
+            const reasonCode = error instanceof Error && error.message === "learning_candidate_bounds"
+                ? "discovery_invalid_response"
+                : learningJobNeedsFinalization(leased) ? "job_deadline" : "no_fetchable_sources";
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, reasonCode);
         }
         Object.assign(telemetry, {
             ...fetched.telemetry,
             version: 1,
         });
 
+        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
+
         const accumulatedSources = fetched.sources;
         const sourceEffects: LearningStepSideEffects = { sources: fetched.sources };
         const work = {
             ...leased.work,
+            searchedSources: fetched.outcomes,
             sourceIds: accumulatedSources.map((source) => source.sourceId),
             telemetry,
         };
@@ -366,16 +506,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 fetched.telemetry,
                 sourceBudget.clippedByJobDeadline,
             );
-            return persist("deferred", work, leased.resultIds, reasonCode, sourceEffects);
-        }
-        if (learningJobNeedsFinalization(leased)) {
-            return persist("deferred", work, leased.resultIds, "job_deadline", sourceEffects);
+            return persist("deferred", work, leased.resultIds, reasonCode, sourceEffects, true);
         }
         return persist("verifying", {
             ...work,
             currentNeed: leased.needs[0]?.claim.question,
             completedNeeds: 0,
-        }, leased.resultIds, undefined, sourceEffects);
+        }, leased.resultIds, undefined, sourceEffects, true);
     }
 
     if (leased.status === "verifying") {
@@ -389,10 +526,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const completed = Math.min(leased!.needs.length, completedNeeds);
             let nextStatus: LearningJobStatus = "verifying";
             let reasonCode: LearningReasonCode | undefined;
-            if (learningJobNeedsFinalization(leased!)) {
-                nextStatus = "deferred";
-                reasonCode = "job_deadline";
-            } else if (completed >= leased!.needs.length) {
+            if (completed >= leased!.needs.length) {
                 try {
                     const items = await getKnowledgeItemsByIds(context.env, resultIds);
                     nextStatus = learningCompletionStatus(leased!.needs.length, items);
@@ -407,7 +541,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 completedNeeds: completed,
                 currentNeed: leased!.needs[completed]?.claim.question,
                 telemetry,
-            }, resultIds, reasonCode);
+            }, resultIds, reasonCode, {}, true);
         };
 
         const need = leased.needs[index];
@@ -427,6 +561,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             telemetry.verificationFailures++;
             return advanceVerification(leased.resultIds, leased.work, index + 1);
         }
+        const verifierForbiddenTerms = unprovenSharedKnowledgeForbiddenTerms(
+            forbiddenTerms,
+            needSources,
+        );
+        if (containsSharedKnowledgeForbiddenTerm(need, verifierForbiddenTerms)) {
+            telemetry.verificationFailures++;
+            telemetry.verificationInvalidResponses++;
+            return advanceVerification(leased.resultIds, leased.work, index + 1);
+        }
 
         const verificationBudget = learningStageBudget(leased, LEARNING_VERIFIER_LIMIT_MS);
         if (verificationBudget.budgetMs < LEARNING_MIN_OUTBOUND_MS) {
@@ -438,14 +581,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const verificationAttempt = Math.min(MAX_VERIFICATION_ATTEMPTS, previousAttempts + 1);
         verificationAttemptsByNeed[need.id] = verificationAttempt;
 
+        let authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
+
         const verified = await verifyKnowledgeNeed({
             llm,
             need,
             sources: needSources,
             timeoutMs: verificationBudget.budgetMs,
+            forbiddenTerms: verifierForbiddenTerms,
         });
         telemetry.verificationAttempts++;
         telemetry.verificationElapsedMs += verified.elapsedMs;
+        authorizationResponse = await revalidateAuthorization({
+            ...leased.work,
+            verificationAttemptsByNeed,
+            telemetry,
+        });
+        if (authorizationResponse) return authorizationResponse;
         try {
             const quotaExhausted = await charge(verified.usage
                 ? [{ model: verified.model, usage: verified.usage }]
@@ -465,6 +618,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 telemetry,
             }, leased.resultIds, "storage_unavailable");
         }
+        authorizationResponse = await revalidateAuthorization({
+            ...leased.work,
+            verificationAttemptsByNeed,
+            telemetry,
+        });
+        if (authorizationResponse) return authorizationResponse;
 
         if (!verified.ok) {
             applyVerificationFailureTelemetry(telemetry, verified);
@@ -481,21 +640,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     ...leased.work,
                     verificationAttemptsByNeed,
                     telemetry,
-                }, leased.resultIds);
+                }, leased.resultIds, undefined, {}, true);
             }
             return persist("deferred", {
                 ...leased.work,
                 verificationAttemptsByNeed,
                 telemetry,
             }, leased.resultIds, reasonCode);
-        }
-
-        if (learningJobNeedsFinalization(leased)) {
-            return persist("deferred", {
-                ...leased.work,
-                verificationAttemptsByNeed,
-                telemetry,
-            }, leased.resultIds, "job_deadline");
         }
 
         telemetry.verificationCompleted++;
@@ -510,13 +661,39 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const activation = decideKnowledgeStatus(need, verified.verification, needSources, now);
         const knowledgeId = knowledgeIdForLearningResult(jobId, index);
         if (!resultIds.includes(knowledgeId)) resultIds.push(knowledgeId);
+        const learningReason = learningReasonFor(need, verified.verification.recipe);
+        const payload = {
+            claim: verified.verification.normalizedClaim ?? {},
+            ...(learningReason ? { learningReason } : {}),
+            ...(verified.verification.recipe ? { recipe: verified.verification.recipe } : {}),
+        };
+        const summary = verified.verification.runtimeSummary || need.claim.question;
+        const citedSourceIds = new Set(
+            verified.verification.evidence.map((item) => item.sourceId),
+        );
+        const commitForbiddenTerms = unprovenSharedKnowledgeForbiddenTerms(
+            forbiddenTerms,
+            needSources.filter((source) => citedSourceIds.has(source.sourceId)),
+        );
+        if (containsSharedKnowledgeForbiddenTerm({
+            need,
+            payload,
+            summary,
+        }, commitForbiddenTerms)) {
+            telemetry.verificationFailures++;
+            telemetry.verificationInvalidResponses++;
+            return advanceVerification(leased.resultIds, {
+                ...leased.work,
+                verificationAttemptsByNeed,
+            }, index + 1);
+        }
         const knowledge: KnowledgeItemCreateInput & { knowledgeId: string } = {
             knowledgeId,
             kind: need.kind,
             lookupKey: knowledgeLookupKey(need),
             scope: need.scope,
-            payload: verified.verification.normalizedClaim ?? {},
-            summary: verified.verification.runtimeSummary || need.claim.question,
+            payload,
+            summary,
             risk: need.risk,
             confidence: verified.verification.confidence,
             status: activation.status,
@@ -546,12 +723,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         return persist(nextStatus, {
             ...leased.work,
+            searchedSources: applyEvidenceRelations(
+                leased.work.searchedSources,
+                verified.verification,
+            ),
             verifications,
             verificationAttemptsByNeed,
             completedNeeds,
             currentNeed: leased.needs[completedNeeds]?.claim.question,
             telemetry,
-        }, resultIds, reasonCode, { knowledge });
+        }, resultIds, reasonCode, { knowledge }, true);
     }
 
     return persist("failed", {

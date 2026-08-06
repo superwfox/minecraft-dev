@@ -5,7 +5,7 @@ import {
     parseVerificationResult,
     verifyKnowledgeNeed,
 } from "../../functions/_lib/learning/verification";
-import { makeNeed, makeSource, makeVerification } from "./testData";
+import { makeNeed, makeRecipe, makeSource, makeVerification } from "./testData";
 
 describe("knowledge verification", () => {
     it("strictly validates verifier identity, fields, and evidence source IDs", () => {
@@ -47,6 +47,88 @@ describe("knowledge verification", () => {
         })), need, [source]).expiresInDays).toBeUndefined();
     });
 
+    it("requires a complete Java recipe bound to supporting source IDs", () => {
+        const need = makeNeed({
+            integrationKind: "external_plugin",
+            triggerReason: "external_plugin_contract",
+        });
+        const source = makeSource();
+
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: undefined,
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({
+                code: "```java\npublic static void broken() { }\n```",
+            }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({
+                code: "package com.example;\npublic static void brokenMethod() { return; }",
+            }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ sourceIds: ["src-unknown"] }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ integrationKind: "nms" }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ imports: [] }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ notes: [] }),
+        })), need, [source])).toThrow("verification_support_missing");
+    });
+
+    it("rejects verifier fields that exceed their declared limits", () => {
+        const need = makeNeed();
+        const source = makeSource();
+
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            runtimeSummary: "x".repeat(1_001),
+        })), need, [source])).toThrow("verification_summary_bounds");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ title: "x".repeat(161) }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({
+                imports: Array.from({ length: 25 }, (_, index) => `import example.Type${index};`),
+            }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ notes: ["x".repeat(501)] }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: makeRecipe({ code: "x".repeat(10_001) }),
+        })), need, [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            normalizedClaim: { detail: "x".repeat(4_001) },
+        })), need, [source])).toThrow("verification_claim_bounds");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            evidence: [{
+                sourceId: source.sourceId,
+                relation: "supports",
+                locator: "x".repeat(301),
+                excerpt: "sendMessage(java.lang.String message)",
+            }],
+        })), need, [source])).toThrow("verification_evidence");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            expiresInDays: 3_651,
+        })), need, [source])).toThrow("verification_expiry_bounds");
+    });
+
+    it("rejects project-private markers before they reach shared knowledge", () => {
+        expect(() => parseVerificationResult(
+            JSON.stringify(makeVerification({
+                runtimeSummary: "Call com.example.privateplugin.SecretManager from the server thread.",
+            })),
+            makeNeed(),
+            [makeSource()],
+            { forbiddenTerms: ["com.example.privateplugin", "secretmanager"] },
+        )).toThrow("verification_private_content");
+    });
+
     it("activates ground truth but keeps weak, high-risk, and strategy conclusions bounded", () => {
         const now = 1_800_000_000_000;
         const officialA = makeSource({
@@ -66,12 +148,41 @@ describe("knowledge verification", () => {
                 { sourceId: "src-a", relation: "supports", locator: "A", excerpt: "support A" },
                 { sourceId: "src-b", relation: "supports", locator: "B", excerpt: "support B" },
             ],
+            recipe: makeRecipe({ sourceIds: ["src-a", "src-b"] }),
         });
 
         expect(decideKnowledgeStatus(makeNeed(), makeVerification(), [makeSource()], now)).toEqual({
             status: "active",
             expiresAt: 0,
         });
+        const artifact = makeSource({
+            sourceId: "src-artifact",
+            domain: "repo.maven.apache.org",
+            sourceType: "artifact",
+            authority: "ground_truth",
+        });
+        expect(decideKnowledgeStatus(makeNeed(), makeVerification({
+            evidence: [{
+                sourceId: "src-artifact",
+                relation: "supports",
+                locator: "POM",
+                excerpt: "artifact coordinate",
+            }],
+            recipe: makeRecipe({ sourceIds: ["src-artifact"] }),
+        }), [artifact], now).status).toBe("needs_review");
+        const officialDocs = makeSource({
+            sourceId: "src-docs",
+            domain: "docs.example-b.com",
+            sourceType: "documentation",
+            authority: "official",
+        });
+        expect(decideKnowledgeStatus(makeNeed(), makeVerification({
+            evidence: [
+                { sourceId: "src-official", relation: "supports", locator: "Javadoc", excerpt: "support" },
+                { sourceId: "src-docs", relation: "supports", locator: "Guide", excerpt: "example" },
+            ],
+            recipe: makeRecipe({ sourceIds: ["src-docs"] }),
+        }), [makeSource(), officialDocs], now).status).toBe("needs_review");
         expect(decideKnowledgeStatus(makeNeed(), dualEvidence, [officialA, officialB], now)).toEqual({
             status: "active",
             expiresAt: now + 30 * 86_400_000,
@@ -89,6 +200,10 @@ describe("knowledge verification", () => {
         });
         expect(decideKnowledgeStatus(makeNeed({ risk: "high" }), dualEvidence, [officialA, officialB], now).status)
             .toBe("needs_review");
+        expect(decideKnowledgeStatus(makeNeed({
+            integrationKind: "nms",
+            triggerReason: "nms_version_sensitive",
+        }), makeVerification(), [makeSource()], now).status).toBe("needs_review");
         expect(decideKnowledgeStatus(makeNeed({ kind: "strategy" }), makeVerification(), [makeSource()], now).status)
             .toBe("needs_review");
         expect(decideKnowledgeStatus(makeNeed(), makeVerification({ confidence: 0.7 }), [makeSource()], now).status)
@@ -156,7 +271,7 @@ describe("knowledge verification", () => {
         expect(result).toMatchObject({
             ok: false,
             reasonCode: "verification_timeout",
-            retryable: false,
+            retryable: true,
         });
         expect(fetchImpl).toHaveBeenCalledOnce();
     });

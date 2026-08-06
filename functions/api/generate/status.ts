@@ -3,6 +3,7 @@ import { getOwnedTask, putTaskState, taskOperationLeaseFromState } from "../../_
 import { compareDiagnostics } from "../../_lib/buildDiagnostics";
 import { buildRepairRecoverySnapshot } from "../../_lib/buildRepairRecovery";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
+import { currentFixRepairAuthorization } from "../../_lib/learning/fixAuthorization";
 
 interface Env {
     DB?: D1Database;
@@ -43,6 +44,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
     const now = Date.now();
+    const repairAuthorization = currentFixRepairAuthorization(state);
     const operationLease = context.env.DB ? taskOperationLeaseFromState(state) : null;
     const repairLeaseUntil = operationLease?.token.startsWith("repair:")
         ? operationLease.leaseUntil
@@ -58,16 +60,32 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
     const repairRecovery = buildRepairRecoverySnapshot(state, now, repairLeaseUntil);
     if (repairRecovery) {
-        return new Response(JSON.stringify(repairRecovery), {
+        return new Response(JSON.stringify({
+            ...repairRecovery,
+            ...(repairAuthorization ? { repairAuthorization } : {}),
+        }), {
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+    if (state.status === "error" && repairAuthorization) {
+        return new Response(JSON.stringify({
+            status: "error",
+            repairPending: true,
+            repairAuthorization,
+        }), {
             headers: { "Content-Type": "application/json" },
         });
     }
 
     state.uid = uid;
     let discoveredRun = false;
+    const buildRunStartedAfter = typeof state.buildRunStartedAfter === "string"
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(state.buildRunStartedAfter)
+        ? state.buildRunStartedAfter
+        : "";
 
-    if (!state.runId && state.buildBranch) {
-        const runId = await findRunByBranch(token, state.buildBranch, "");
+    if (!state.runId && state.buildBranch && buildRunStartedAfter) {
+        const runId = await findRunByBranch(token, state.buildBranch, buildRunStartedAfter);
         if (runId) {
             state.runId = runId;
             state.logs.push(`构建 run #${runId} 已找到`);
@@ -98,6 +116,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         if (artifact) {
             state.artifactId = artifact.id;
             state.status = "done";
+            delete state.fixLearningAuthorization;
+            delete state.fixRepairAuthorization;
+            delete state.fixKnowledgeNeeds;
+            delete state.fixDiagnosticsFingerprint;
             state.logs.push("● 构建成功，JAR 已就绪");
             if (state.pendingFixSnapshot?.diagnostics) {
                 const usageEvaluated = await evaluateResolvedKnowledgeUsage(
@@ -122,10 +144,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         } else {
             state.status = "error";
             state.error = "构建成功但未找到 artifact";
+            delete state.fixLearningAuthorization;
+            delete state.fixRepairAuthorization;
+            delete state.fixKnowledgeNeeds;
+            delete state.fixDiagnosticsFingerprint;
         }
     } else {
         state.status = "error";
         state.error = `构建失败: ${conclusion}`;
+        delete state.fixLearningAuthorization;
+        delete state.fixRepairAuthorization;
+        delete state.fixKnowledgeNeeds;
+        delete state.fixDiagnosticsFingerprint;
         state.logs.push(`× 构建结果: ${conclusion}`);
     }
 

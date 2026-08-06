@@ -3,13 +3,13 @@ import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompt
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
-import type { KnowledgeNeed } from "../../_lib/learning/types";
-import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import {
-    buildApiContractContext,
-    findKnownApiIssues,
-    partitionKnowledgeNeedsByApiContracts,
-} from "../../_lib/apiContracts";
+    assessPlannerLearningAuthorization,
+    assessPlannerResultAuthorization,
+    samePlannerResultAuthorization,
+} from "../../_lib/learning/plannerAuthorization";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
+import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
@@ -245,7 +245,6 @@ async function generateSingleFile(
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId } = await context.request.json() as any;
     const uid: string = (context.data as any)?.uid || "";
-    const llm = await resolveLLM(context);
 
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
@@ -257,12 +256,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
+    const [plannerAssessment, plannerResultAuthorization] = await Promise.all([
+        assessPlannerLearningAuthorization(state),
+        assessPlannerResultAuthorization(state),
+    ]);
+    if (!plannerAssessment || !plannerResultAuthorization || !samePlannerResultAuthorization(
+        state.plannerResultAuthorization,
+        plannerResultAuthorization,
+    )) {
+        return new Response(JSON.stringify({
+            error: "Planner 路径授权已失效，请重新规划",
+            code: "PLANNER_AUTHORIZATION_EXPIRED",
+        }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+
     if (state.currentFileIndex >= state.plan.length) {
         return new Response(JSON.stringify({ done: true, fileIndex: state.currentFileIndex }), {
             headers: { "Content-Type": "application/json" },
         });
     }
 
+    const llm = await resolveLLM(context);
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -304,10 +321,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 .map((summary) => ({ path: summary.path, apiSummary: summary })),
         ],
     };
-    const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
-        ? state.grade.knowledgeNeeds
-        : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
-    const needs = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawNeeds).uncovered;
+    const needs = plannerAssessment.needs;
     const knowledge = await loadKnowledgeContext({
         env: context.env,
         needs,

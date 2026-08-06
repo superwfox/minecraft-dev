@@ -37,6 +37,8 @@ export type LearningReasonCode =
     | "verification_invalid_response"
     | "verification_failed"
     | "unresolved_knowledge_needs"
+    | "planner_authorization_expired"
+    | "fix_authorization_expired"
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
@@ -57,6 +59,7 @@ export type LearningProgress = {
     totalNeeds: number;
     completedNeeds: number;
     sourceCount: number;
+    searchedSourceCount: number;
     message: string;
     reasonCode?: LearningReasonCode;
 };
@@ -138,6 +141,12 @@ export type PlannerResumeState = {
 };
 export type FixResumeStage = "" | "diagnosing" | "learning" | "repairing" | "inspecting" | "rebuilding";
 
+export function normalizeBuildRequestId(value: unknown): string {
+    return typeof value === "string" && /^build_[a-f0-9]{32}$/i.test(value.trim())
+        ? value.trim().toLowerCase()
+        : "";
+}
+
 const FIX_RESUME_STAGES = new Set<FixResumeStage>([
     "",
     "diagnosing",
@@ -175,6 +184,7 @@ function emptyLearningProgress(): LearningProgress {
         totalNeeds: 0,
         completedNeeds: 0,
         sourceCount: 0,
+        searchedSourceCount: 0,
         message: "",
     };
 }
@@ -186,7 +196,7 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "discovery_provider_incomplete", "discovery_provider_failed", "discovery_invalid_response",
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
-    "verification_failed", "unresolved_knowledge_needs", "revision_conflict", "lease_conflict",
+    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired", "revision_conflict", "lease_conflict",
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const LEARNING_STATUSES = new Set<LearningStatus>([
@@ -256,7 +266,6 @@ export function normalizeLearningProgress(value: unknown): LearningProgress {
     const deadlineAt = startedAt !== undefined
         && rawDeadlineAt !== undefined
         && rawDeadlineAt >= startedAt
-        && rawDeadlineAt - startedAt <= 300_000
         ? rawDeadlineAt
         : undefined;
     const rawReason = typeof raw.reasonCode === "string" ? raw.reasonCode as LearningReasonCode : undefined;
@@ -278,6 +287,7 @@ export function normalizeLearningProgress(value: unknown): LearningProgress {
         totalNeeds,
         completedNeeds: Math.min(totalNeeds, safeCount(raw.completedNeeds)),
         sourceCount: safeCount(raw.sourceCount),
+        searchedSourceCount: safeCount(raw.searchedSourceCount),
         message: safeLearningText(raw.message, 1_000),
         reasonCode: rawReason && LEARNING_REASON_CODES.has(rawReason) ? rawReason : undefined,
     };
@@ -411,9 +421,12 @@ export type GenTask = {
     plannerRequestId: string;
     plannerReplan: boolean;
     plannerAttempt: number;
+    plannerLearningRequired: boolean;
+    plannerLearningNeedCount: number;
     debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
     buildDiagnostics: any[];
     buildHistory: any[];
+    buildRequestId: string;
     fixResumeStage: FixResumeStage;
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
@@ -449,9 +462,12 @@ export const genTask = reactive<GenTask>({
     plannerRequestId: "",
     plannerReplan: false,
     plannerAttempt: 0,
+    plannerLearningRequired: false,
+    plannerLearningNeedCount: 0,
     debugLog: [],
     buildDiagnostics: [],
     buildHistory: [],
+    buildRequestId: "",
     fixResumeStage: "",
     learningProgress: emptyLearningProgress(),
     knowledgeUsed: [],
@@ -555,9 +571,12 @@ export function resetGenTask() {
     genTask.plannerRequestId = "";
     genTask.plannerReplan = false;
     genTask.plannerAttempt = 0;
+    genTask.plannerLearningRequired = false;
+    genTask.plannerLearningNeedCount = 0;
     genTask.debugLog = [];
     genTask.buildDiagnostics = [];
     genTask.buildHistory = [];
+    genTask.buildRequestId = "";
     genTask.fixResumeStage = "";
     genTask.learningProgress = emptyLearningProgress();
     genTask.knowledgeUsed = [];
@@ -610,8 +629,11 @@ function writeGenTaskSnapshot() {
             plannerRequestId: genTask.plannerRequestId,
             plannerReplan: genTask.plannerReplan,
             plannerAttempt: genTask.plannerAttempt,
+            plannerLearningRequired: genTask.plannerLearningRequired,
+            plannerLearningNeedCount: genTask.plannerLearningNeedCount,
             buildDiagnostics: genTask.buildDiagnostics,
             buildHistory: genTask.buildHistory.slice(-6),
+            buildRequestId: genTask.buildRequestId,
             fixResumeStage: genTask.fixResumeStage,
             learningProgress: genTask.learningProgress,
             knowledgeUsed: genTask.knowledgeUsed,
@@ -664,8 +686,11 @@ export function restoreGenTask(): boolean {
         genTask.plannerRequestId = plannerResume.plannerRequestId;
         genTask.plannerReplan = plannerResume.plannerReplan;
         genTask.plannerAttempt = plannerResume.plannerAttempt;
+        genTask.plannerLearningRequired = s.plannerLearningRequired === true;
+        genTask.plannerLearningNeedCount = safeCount(s.plannerLearningNeedCount);
         genTask.buildDiagnostics = s.buildDiagnostics || [];
         genTask.buildHistory = s.buildHistory || [];
+        genTask.buildRequestId = normalizeBuildRequestId(s.buildRequestId);
         genTask.fixResumeStage = normalizeFixResumeStage(s.fixResumeStage);
         genTask.learningProgress = normalizeLearningProgress(s.learningProgress);
         genTask.knowledgeUsed = s.knowledgeUsed || [];
@@ -693,7 +718,8 @@ watch(
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
         genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt,
-        genTask.fixResumeStage],
+        genTask.plannerLearningRequired, genTask.plannerLearningNeedCount,
+        genTask.buildRequestId, genTask.fixResumeStage],
     persistGenTask,
 );
 

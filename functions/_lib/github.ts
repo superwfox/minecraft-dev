@@ -73,8 +73,9 @@ export async function triggerWorkflow(token: string, branch: string, javaVersion
 }
 
 export async function findRunByBranch(token: string, branch: string, afterTime: string): Promise<number | null> {
-    const q = afterTime ? `&created=>${afterTime}` : "";
-    const resp = await ghFetch(token, `/actions/workflows/maven.yml/runs?branch=${branch}${q}&per_page=1`);
+    const params = new URLSearchParams({ branch, per_page: "1" });
+    if (afterTime) params.set("created", `>${afterTime}`);
+    const resp = await ghFetch(token, `/actions/workflows/maven.yml/runs?${params.toString()}`);
     const data = await resp.json() as any;
     return data.workflow_runs?.[0]?.id ?? null;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     isUnconfirmedLearningProgress,
+    normalizeBuildRequestId,
     normalizeFixResumeStage,
     normalizeLearningProgress,
     shouldResumeLearningProgress,
@@ -22,6 +23,7 @@ describe("learning progress normalization", () => {
             totalNeeds: 2,
             completedNeeds: 9,
             sourceCount: 3,
+            searchedSourceCount: 7,
             message: "  正在交叉验证  ",
             reasonCode: "job_deadline",
         });
@@ -39,12 +41,13 @@ describe("learning progress normalization", () => {
             totalNeeds: 2,
             completedNeeds: 2,
             sourceCount: 3,
+            searchedSourceCount: 7,
             message: "正在交叉验证",
             reasonCode: "job_deadline",
         });
     });
 
-    it("rejects unknown states, reasons, IDs, and deadlines beyond 300 seconds", () => {
+    it("rejects unknown public fields while accepting a renewed inactivity deadline", () => {
         const startedAt = 1_700_000_000_000;
         const progress = normalizeLearningProgress({
             jobId: "invalid job id",
@@ -52,12 +55,13 @@ describe("learning progress normalization", () => {
             revision: -1,
             stage: "private_stage",
             startedAt,
-            deadlineAt: startedAt + 300_001,
+            deadlineAt: startedAt + 900_000,
             remainingMs: -1,
             lastActiveStatus: "private_status",
             totalNeeds: -3,
             completedNeeds: 10,
             sourceCount: Number.NaN,
+            searchedSourceCount: -1,
             message: 123,
             reasonCode: "private_error_body",
         });
@@ -68,13 +72,14 @@ describe("learning progress normalization", () => {
             revision: 0,
             stage: undefined,
             startedAt,
-            deadlineAt: undefined,
+            deadlineAt: startedAt + 900_000,
             remainingMs: undefined,
             lastActiveStatus: undefined,
             currentNeed: undefined,
             totalNeeds: 0,
             completedNeeds: 0,
             sourceCount: 0,
+            searchedSourceCount: 0,
             message: "",
             reasonCode: undefined,
         });
@@ -142,6 +147,14 @@ describe("learning progress normalization", () => {
 
         expect(progress.startedAt).toBeUndefined();
         expect(progress.deadlineAt).toBeUndefined();
+    });
+
+    it("restores only canonical build request IDs", () => {
+        const requestId = `build_${"A".repeat(32)}`;
+        expect(normalizeBuildRequestId(requestId)).toBe(requestId.toLowerCase());
+        expect(normalizeBuildRequestId("build_short")).toBe("");
+        expect(normalizeBuildRequestId("plan_" + "a".repeat(32))).toBe("");
+        expect(normalizeBuildRequestId({ requestId })).toBe("");
     });
 
     it("restores only explicit build repair substages", () => {

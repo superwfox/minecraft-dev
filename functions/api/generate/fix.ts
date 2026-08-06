@@ -3,8 +3,18 @@ import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
-import { buildDiagnosticKnowledgeNeeds } from "../../_lib/learning/assessment";
+import {
+    buildDiagnosticKnowledgeNeeds,
+    filterFixKnowledgeNeeds,
+} from "../../_lib/learning/assessment";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import {
+    createFixLearningAuthorization,
+    createFixRepairAuthorization,
+    currentFixRepairAuthorization,
+    sameFixRepairAuthorization,
+    type FixRepairAuthorization,
+} from "../../_lib/learning/fixAuthorization";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 import type { KnowledgeNeed } from "../../_lib/learning/types";
 import {
@@ -206,18 +216,52 @@ function progressSummary(progress: DiagnosticProgress | null, rolledBackFiles: s
     return parts.join("；") + "。仍存在的诊断必须优先消除，不得重新引入已解决问题。";
 }
 
+function revokeFixAuthorizations(state: any): void {
+    delete state.fixLearningAuthorization;
+    delete state.fixRepairAuthorization;
+    delete state.fixKnowledgeNeeds;
+    delete state.fixDiagnosticsFingerprint;
+}
+
+function repairAuthorizationExpired(): Response {
+    return new Response(JSON.stringify({
+        error: "Repair authorization is no longer current",
+        code: "REPAIR_AUTHORIZATION_EXPIRED",
+    }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
     const taskId = body.taskId as string;
     const mode: "diagnose" | "repair" | "inspect" = body.mode === "diagnose"
         ? "diagnose"
         : body.mode === "inspect" ? "inspect" : "repair";
+    const requestedRepairAuthorization = body.repairAuthorization as FixRepairAuthorization | undefined;
     const token = context.env.GITHUB_PAT;
     const uid: string = (context.data as any)?.uid || "";
 
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     let state = JSON.parse(raw);
+
+    if (mode !== "repair" && state.status !== "error") {
+        return new Response(JSON.stringify({
+            error: "Build is not in a failed state",
+            code: "FIX_STATE_NOT_FAILED",
+        }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+    if (mode === "repair" && !sameFixRepairAuthorization(
+        currentFixRepairAuthorization(state),
+        requestedRepairAuthorization,
+    )) {
+        return repairAuthorizationExpired();
+    }
 
     if (mode === "repair" && state.quotaExhausted) {
         return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
@@ -340,10 +384,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 status: 400, headers: { "Content-Type": "application/json" },
             });
         }
+        if (!sameFixRepairAuthorization(
+            currentFixRepairAuthorization(state),
+            requestedRepairAuthorization,
+        )) {
+            await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
+            return repairAuthorizationExpired();
+        }
 
         state.status = "repairing";
         state.repairStartedAt = Date.now();
         state.error = null;
+        delete state.fixLearningAuthorization;
         let committed = false;
         try {
             committed = await putTaskWithOperationLease(
@@ -534,10 +586,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const reason = "未能从构建日志提取可处理的编译或依赖诊断";
                 state.status = "error";
                 state.error = reason;
+                revokeFixAuthorizations(state);
                 state.logs.push(`! ${reason}`);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `! ${reason}` }));
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason }));
+                await writer.write(encoder.encode("data: [DONE]\n\n"));
+                return;
+            }
+
+            if (mode === "repair"
+                && fingerprint !== requestedRepairAuthorization?.diagnosticsFingerprint) {
+                const reason = "构建诊断已变化，当前修复授权已失效";
+                state.status = "error";
+                state.error = reason;
+                revokeFixAuthorizations(state);
+                state.logs.push(`! ${reason}`);
+                await persistState(true);
+                await writer.write(sseEvent(encoder, {
+                    type: "result",
+                    fixed: 0,
+                    changed: 0,
+                    reason,
+                    code: "REPAIR_AUTHORIZATION_EXPIRED",
+                }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
@@ -552,7 +624,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 files: { path: string; content: string; apiSummary?: any }[];
                 knowledgeUsage?: PendingKnowledgeUsage[];
             } | undefined;
-            state.fixKnowledgeNeeds = buildDiagnosticKnowledgeNeeds({
+            const diagnosticNeeds = buildDiagnosticKnowledgeNeeds({
                 diagnostics,
                 previousDiagnostics: pendingSnapshot?.diagnostics,
                 coreType: state.coreType,
@@ -560,13 +632,41 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 projectPackage: state.packageName,
                 externalDeps: state.grade?.vector?.external_deps ?? [],
             });
+            state.fixKnowledgeNeeds = filterFixKnowledgeNeeds(diagnosticNeeds, {
+                repairAttempts: state.repairAttempts,
+            }).accepted;
             state.fixDiagnosticsFingerprint = fingerprint;
 
             if (mode === "diagnose") {
                 state.lastBuildDiagnostics = diagnostics;
-                const msg = state.fixKnowledgeNeeds.length
-                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个可查证的公开技术缺口`
-                    : "▸ 当前诊断没有可安全联网查证的公开知识缺口";
+                const repairAuthorization = createFixRepairAuthorization(state, fingerprint);
+                if (!repairAuthorization) {
+                    const reason = "无法为当前失败构建签发修复授权";
+                    state.status = "error";
+                    state.error = reason;
+                    revokeFixAuthorizations(state);
+                    state.logs.push(`! ${reason}`);
+                    await persistState(true);
+                    await writer.write(sseEvent(encoder, {
+                        type: "result",
+                        diagnosed: false,
+                        fixed: 0,
+                        changed: 0,
+                        reason,
+                    }));
+                    await writer.write(encoder.encode("data: [DONE]\n\n"));
+                    return;
+                }
+                state.fixRepairAuthorization = repairAuthorization;
+                const learningAuthorization = state.fixKnowledgeNeeds.length
+                    ? createFixLearningAuthorization(state, fingerprint)
+                    : null;
+                if (learningAuthorization) state.fixLearningAuthorization = learningAuthorization;
+                else delete state.fixLearningAuthorization;
+                const learningEligible = !!learningAuthorization && state.fixKnowledgeNeeds.length > 0;
+                const msg = learningEligible
+                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个持续存在的外部 API 技术缺口`
+                    : "▸ 当前诊断先按普通修复处理，不启动联网学习";
                 state.logs.push(msg);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
@@ -575,7 +675,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     diagnosed: true,
                     fingerprint,
                     diagnostics,
-                    knowledgeNeeds: state.fixKnowledgeNeeds.length,
+                    repairAuthorization,
+                    ...(learningAuthorization ? { learningAuthorization } : {}),
+                    knowledgeNeeds: learningEligible ? state.fixKnowledgeNeeds.length : 0,
+                    learningEligible,
                 }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -660,6 +763,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const reason = `最终构建仍有 ${diagnostics.length} 条诊断，已停止自动修复`;
                 state.status = "error";
                 state.error = reason;
+                revokeFixAuthorizations(state);
                 state.logs.push(`× ${reason}`);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg: `× ${reason}` }));
@@ -677,6 +781,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const reason = `已达到 ${MAX_REPAIR_ATTEMPTS} 轮自动修复上限`;
                 state.status = "error";
                 state.error = reason;
+                revokeFixAuthorizations(state);
                 state.logs.push(`! ${reason}`);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
@@ -688,6 +793,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const reason = "连续两轮未解决任何旧诊断，已提前停止重复返工";
                 state.status = "error";
                 state.error = reason;
+                revokeFixAuthorizations(state);
                 state.logs.push(`! ${reason}`);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0, reason, diagnostics, progress, rolledBackFiles }));
@@ -703,6 +809,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const reason = "无法从构建诊断定位可安全修改的文件，已停止自动修复；不会重写全部 Java 文件";
                 state.status = "error";
                 state.error = reason;
+                revokeFixAuthorizations(state);
                 state.logs.push(`! ${reason}`);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, {
@@ -731,7 +838,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             };
             const apiContractCtx = buildApiContractContext(apiContractInput);
             const rawFixNeeds = (Array.isArray(state.fixKnowledgeNeeds) ? state.fixKnowledgeNeeds : []) as KnowledgeNeed[];
-            const fixNeeds = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawFixNeeds).uncovered;
+            const eligibleFixNeeds = filterFixKnowledgeNeeds(rawFixNeeds, {
+                repairAttempts: state.repairAttempts,
+            }).accepted;
+            const fixNeeds = partitionKnowledgeNeedsByApiContracts(apiContractInput, eligibleFixNeeds).uncovered;
             const knowledge = await loadKnowledgeContext({
                 env: context.env,
                 needs: fixNeeds,
@@ -888,6 +998,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(msg);
             }
 
+            revokeFixAuthorizations(state);
+
             const failedRunId = state.runId;
             const history = Array.isArray(state.buildFixHistory) ? state.buildFixHistory : [];
             history.push({
@@ -970,6 +1082,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const message = e?.message || "自动修复失败";
                 state.status = "error";
                 state.error = message;
+                revokeFixAuthorizations(state);
                 state.logs.push(`× 修复失败: ${message}`);
                 try { await flushCharge(); } catch { /* 计费失败不覆盖原始修复异常 */ }
                 try {

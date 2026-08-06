@@ -1,3 +1,4 @@
+import { learningJobAuthorizationFailure } from "../../_lib/learning/authorization";
 import { learningKnowledgeIds, learningSnapshot } from "../../_lib/learning/public";
 import {
     getKnowledgeItemsByIds,
@@ -38,6 +39,15 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             : await getLatestLearningJobForTask(context.env, taskId, uid, stage);
         if (jobId && (!job || job.generationTaskId !== taskId || (stage && job.stage !== stage))) {
             return json({ error: "Learning job not found" }, 404);
+        }
+        if (job) {
+            const authorizationFailure = await learningJobAuthorizationFailure(state, job);
+            if (authorizationFailure) {
+                return json({
+                    error: "Learning job authorization is no longer current",
+                    reasonCode: authorizationFailure,
+                }, 404);
+            }
         }
         const ids = learningKnowledgeIds(
             job,

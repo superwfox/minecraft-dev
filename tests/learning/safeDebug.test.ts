@@ -15,6 +15,7 @@ function makeProgress(overrides: Partial<LearningProgress> = {}): LearningProgre
         totalNeeds: 1,
         completedNeeds: 0,
         sourceCount: 0,
+        searchedSourceCount: 0,
         message: "redacted-message-sentinel",
         reasonCode: "discovery_timeout",
         ...overrides,
@@ -138,6 +139,10 @@ describe("safe Debug export", () => {
                 telemetry: telemetry(),
                 body: "responses-content-sentinel",
                 headers: "authorization-header-sentinel",
+                url: "https://private-url-sentinel.example/path",
+                searchReason: "search-reason-sentinel",
+                recipe: "recipe-code-sentinel",
+                excerpt: "evidence-excerpt-sentinel",
             } as LearningDebugEvent],
         });
         const unsafeSource = source as SafeDebugSource & Record<string, unknown>;
@@ -147,6 +152,9 @@ describe("safe Debug export", () => {
         unsafeSource.logs = ["full-log-sentinel"];
         unsafeSource.buildHistory = [{ content: "history-content-sentinel" }];
         unsafeSource.knowledgeUsed = [{ summary: "knowledge-summary-sentinel" }];
+        unsafeSource.searchedSources = [{ url: "https://audit-url-sentinel.example" }];
+        unsafeSource.learningEvidence = [{ excerpt: "stored-excerpt-sentinel" }];
+        unsafeSource.implementationRecipe = { code: "stored-recipe-sentinel" };
 
         const payload = buildSafeDebugExport(source, 1_700_000_000_000);
         const json = JSON.stringify(payload, null, 2);
@@ -192,6 +200,9 @@ describe("safe Debug export", () => {
             "responses-content-sentinel", "authorization-header-sentinel", "user-prompt-sentinel",
             "project-name-sentinel", "package-name-sentinel", "full-log-sentinel",
             "history-content-sentinel", "knowledge-summary-sentinel", "redacted-message-sentinel",
+            "private-url-sentinel", "search-reason-sentinel", "recipe-code-sentinel",
+            "evidence-excerpt-sentinel", "audit-url-sentinel", "stored-excerpt-sentinel",
+            "stored-recipe-sentinel",
         ]) {
             expect(json).not.toContain(sentinel);
         }

@@ -9,8 +9,8 @@ export const LEARNING_OUTBOUND_RESERVE_MS =
 export const LEARNING_DISCOVERY_LIMIT_MS = 90_000;
 export const LEARNING_SOURCE_LIMIT_MS = 30_000;
 export const LEARNING_SOURCE_TIMEOUT_MS = 8_000;
-export const LEARNING_VERIFIER_LIMIT_MS = 40_000;
-export const LEARNING_CLIENT_REQUEST_LIMIT_MS = 96_000;
+export const LEARNING_VERIFIER_LIMIT_MS = 90_000;
+export const LEARNING_CLIENT_REQUEST_LIMIT_MS = 126_000;
 export const LEARNING_LEASE_LIMIT_MS = 120_000;
 export const LEARNING_MIN_OUTBOUND_MS = 1_000;
 
@@ -31,16 +31,32 @@ export function createLearningDeadlineAt(now: number, remainingMs: unknown): num
     return timestamp(now) + clampLearningRemainingMs(remainingMs);
 }
 
+export function refreshLearningInactivity<T extends LearningJobRecord["work"]>(
+    work: T,
+    now = Date.now(),
+): T {
+    const progressedAt = timestamp(now);
+    return {
+        ...work,
+        lastProgressAt: progressedAt,
+        inactivityDeadlineAt: progressedAt + LEARNING_JOB_BUDGET_MS,
+    };
+}
+
 export function learningJobTiming(
     job: Pick<LearningJobRecord, "createdAt" | "work">,
-): { startedAt: number; deadlineAt: number } {
+): { startedAt: number; lastProgressAt: number; deadlineAt: number } {
     const startedAt = timestamp(job.createdAt);
-    const maximumDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
-    const storedDeadline = timestamp(job.work.deadlineAt);
-    const deadlineAt = storedDeadline > startedAt
-        ? Math.min(storedDeadline, maximumDeadline)
-        : maximumDeadline;
-    return { startedAt, deadlineAt };
+    const storedProgressAt = timestamp(job.work.lastProgressAt);
+    const lastProgressAt = storedProgressAt >= startedAt ? storedProgressAt : startedAt;
+    const storedInactivityDeadline = timestamp(job.work.inactivityDeadlineAt);
+    const legacyDeadline = timestamp(job.work.deadlineAt);
+    const deadlineAt = storedInactivityDeadline > lastProgressAt
+        ? storedInactivityDeadline
+        : legacyDeadline > startedAt
+            ? legacyDeadline
+            : lastProgressAt + LEARNING_JOB_BUDGET_MS;
+    return { startedAt, lastProgressAt, deadlineAt };
 }
 
 export function learningJobRemainingMs(

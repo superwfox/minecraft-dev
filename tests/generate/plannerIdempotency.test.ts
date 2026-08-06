@@ -3,6 +3,11 @@ import { getSkillBundles } from "../../functions/_lib/skills";
 import { shouldReusePersistedPlannerResult } from "../../functions/api/generate/plan";
 import { normalizePlannerResumeState } from "../../src/logic/generateState";
 
+const RESULT_AUTHORIZATION = {
+    chosenPathId: "p1",
+    selectedNeedsFingerprint: "a".repeat(64),
+};
+
 function persistedPlannerState(overrides: Record<string, unknown> = {}) {
     const file = {
         path: "src/main/java/example/Main.java",
@@ -104,6 +109,53 @@ describe("Planner Skill deadline", () => {
 describe("Planner persisted-result idempotency", () => {
     it("reuses a completed Planner result for a normal retry", () => {
         expect(shouldReusePersistedPlannerResult(persistedPlannerState(), undefined)).toBe(true);
+    });
+
+    it("requires the persisted result to match the current path authorization", () => {
+        const state = persistedPlannerState({
+            grade: {
+                gateRequired: true,
+                chosenPathId: "p1",
+                paths: [{ id: "p1" }, { id: "p2" }],
+            },
+            plannerResultAuthorization: RESULT_AUTHORIZATION,
+        });
+
+        expect(shouldReusePersistedPlannerResult(
+            state,
+            undefined,
+            "",
+            RESULT_AUTHORIZATION,
+        )).toBe(true);
+        expect(shouldReusePersistedPlannerResult(
+            state,
+            undefined,
+            "",
+            { ...RESULT_AUTHORIZATION, chosenPathId: "p2" },
+        )).toBe(false);
+        expect(shouldReusePersistedPlannerResult(
+            state,
+            undefined,
+            "",
+            { ...RESULT_AUTHORIZATION, selectedNeedsFingerprint: "b".repeat(64) },
+        )).toBe(false);
+    });
+
+    it("does not reuse a legacy gated result without persisted authorization", () => {
+        const state = persistedPlannerState({
+            grade: {
+                gateRequired: true,
+                chosenPathId: "p1",
+                paths: [{ id: "p1" }, { id: "p2" }],
+            },
+        });
+
+        expect(shouldReusePersistedPlannerResult(
+            state,
+            undefined,
+            "",
+            RESULT_AUTHORIZATION,
+        )).toBe(false);
     });
 
     it("does not reuse the old result for an explicit replan", () => {

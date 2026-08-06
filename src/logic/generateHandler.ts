@@ -97,6 +97,9 @@ async function post(url: string, body: any, maxRetries = 3) {
                 if (apiError.code === "POM_BLOCKED") {
                     throw noRetry(`pom.xml 安全校验未通过：${apiError.message}`);
                 }
+                if (apiError.code === "BUILD_START_FAILED") {
+                    throw noRetry(apiError.message);
+                }
                 if (resp.status === 400
                     || resp.status === 404
                     || resp.status === 429
@@ -117,6 +120,10 @@ async function post(url: string, body: any, maxRetries = 3) {
 
 function createPlannerRequestId(): string {
     return `plan_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function createBuildRequestId(): string {
+    return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
@@ -183,7 +190,7 @@ const LEARNING_TERMINAL = new Set<LearningStatus>([
 
 const LEARNING_JOB_BUDGET_MS = 300_000;
 const LEARNING_FINAL_RECONCILE_MS = 12_000;
-const LEARNING_REQUEST_LIMIT_MS = 96_000;
+const LEARNING_REQUEST_LIMIT_MS = 126_000;
 const LEARNING_FINALIZE_REQUEST_MS = 1_500;
 const LEARNING_STATUS_REQUEST_MS = 2_500;
 const LEARNING_STEP_INTERVAL_MS = 250;
@@ -436,14 +443,47 @@ async function learningRequestBefore(input: {
     }
 }
 
+interface FixRepairAuthorization {
+    runId: number;
+    diagnosticsFingerprint: string;
+    repairAttempts: number;
+}
+
+interface FixLearningAuthorization extends FixRepairAuthorization {
+    previousRunId: number;
+}
+
+function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | null {
+    const runId = Number(value?.runId);
+    const repairAttempts = Number(value?.repairAttempts);
+    const diagnosticsFingerprint = typeof value?.diagnosticsFingerprint === "string"
+        ? value.diagnosticsFingerprint.trim().toLowerCase()
+        : "";
+    if (!Number.isInteger(runId)
+        || runId <= 0
+        || !Number.isInteger(repairAttempts)
+        || repairAttempts < 0
+        || !/^[a-f0-9]{8,128}$/.test(diagnosticsFingerprint)) return null;
+    return { runId, diagnosticsFingerprint, repairAttempts };
+}
+
+function normalizeFixLearningAuthorization(value: any): FixLearningAuthorization | null {
+    const repairAuthorization = normalizeFixRepairAuthorization(value);
+    const previousRunId = Number(value?.previousRunId);
+    if (!repairAuthorization
+        || !Number.isInteger(previousRunId)
+        || previousRunId <= 0
+        || repairAuthorization.repairAttempts < 1) return null;
+    return { ...repairAuthorization, previousRunId };
+}
+
 async function runLearning(
     stage: LearningStage,
     chosenPathId?: string,
-    options?: { resumeExisting?: boolean },
-) {
+    options?: { resumeExisting?: boolean; fixAuthorization?: FixLearningAuthorization },
+): Promise<void> {
     const startedAt = Date.now();
-    const clientDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
-    let jobDeadline = clientDeadline;
+    let jobDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
     let lastMessage = "";
     let lastEndpoint: LearningEndpoint = "start";
     let lastFailureReason: LearningReasonCode = "client_network";
@@ -455,12 +495,13 @@ async function runLearning(
     const resumeRequested = options?.resumeExisting === true
         && restoredProgress.stage === stage;
     const unconfirmedLocalLearning = isUnconfirmedLearningProgress(restoredProgress);
-    if (resumeRequested
+    if (stage !== "fix"
+        && resumeRequested
         && LEARNING_TERMINAL.has(restoredProgress.status)
         && !unconfirmedLocalLearning) {
         return;
     }
-    const canResumeExactJob = shouldResumeLearningProgress(
+    const canResumeExactJob = stage !== "fix" && shouldResumeLearningProgress(
         restoredProgress,
         stage,
         options?.resumeExisting === true,
@@ -485,20 +526,18 @@ async function runLearning(
             revision: 0,
             stage,
             startedAt,
-            deadlineAt: clientDeadline,
+            deadlineAt: jobDeadline,
             remainingMs: LEARNING_JOB_BUDGET_MS,
             totalNeeds: 0,
             completedNeeds: 0,
             sourceCount: 0,
+            searchedSourceCount: 0,
             message: "准备查证公开技术资料",
         });
     }
     persistGenTaskNow();
 
-    const outboundDeadline = () => Math.min(
-        clientDeadline - LEARNING_FINAL_RECONCILE_MS,
-        jobDeadline - LEARNING_FINAL_RECONCILE_MS,
-    );
+    const outboundDeadline = () => jobDeadline - LEARNING_FINAL_RECONCILE_MS;
     const isTerminal = () => LEARNING_TERMINAL.has(genTask.learningProgress.status);
     const rememberFailure = (error: any): boolean => {
         const failure = learningFailure(error);
@@ -509,9 +548,12 @@ async function runLearning(
     };
     const announce = (snapshot: any) => {
         applyLearningSnapshot(snapshot);
+        const deadlineAt = genTask.learningProgress.deadlineAt;
         const remainingMs = genTask.learningProgress.remainingMs;
-        if (remainingMs !== undefined) {
-            jobDeadline = Math.min(jobDeadline, Date.now() + remainingMs);
+        if (deadlineAt !== undefined) {
+            jobDeadline = deadlineAt;
+        } else if (remainingMs !== undefined) {
+            jobDeadline = Date.now() + remainingMs;
         }
         const message = genTask.learningProgress.message;
         if (message && message !== lastMessage) {
@@ -526,7 +568,7 @@ async function runLearning(
     const reconcile = async (
         exactJobId: string,
         maxAttempts: number,
-        deadline = clientDeadline,
+        deadline = jobDeadline,
     ): Promise<{ snapshot: any | null; confirmed: boolean }> => {
         let latest: any = null;
         let confirmed = false;
@@ -539,7 +581,7 @@ async function runLearning(
                     url: statusUrl(exactJobId),
                     method: "GET",
                     deadline,
-                    deadlineReason: deadline < clientDeadline ? "client_network" : "client_deadline",
+                    deadlineReason: deadline < jobDeadline ? "client_network" : "client_deadline",
                     maxWaitMs: LEARNING_STATUS_REQUEST_MS,
                     attempt: ++statusAttempt,
                 });
@@ -569,7 +611,7 @@ async function runLearning(
         const message = reasonCode === "client_network"
             ? "浏览器暂时无法确认联网查证状态，已按现有知识继续"
             : reasonCode === "client_deadline"
-                ? "浏览器未在本轮 5 分钟内确认联网查证结果，已按现有知识继续"
+                ? "连续 5 分钟没有可确认的联网查证进展，已按现有知识继续"
                 : "联网学习未完成，已按现有知识继续";
         const fromStatus = genTask.learningProgress.status;
         const lastActiveStatus = fromStatus === "queued" || fromStatus === "discovering"
@@ -611,18 +653,19 @@ async function runLearning(
             lastFailureHttpStatus = 0;
             lastFailureReason = "client_network";
             jobId = "";
-            jobDeadline = clientDeadline;
+            jobDeadline = Date.now() + LEARNING_JOB_BUDGET_MS;
             genTask.learningProgress = normalizeLearningProgress({
                 jobId: "",
                 status: "queued",
                 revision: 0,
                 stage,
                 startedAt,
-                deadlineAt: clientDeadline,
-                remainingMs: Math.max(0, clientDeadline - Date.now()),
+                deadlineAt: jobDeadline,
+                remainingMs: LEARNING_JOB_BUDGET_MS,
                 totalNeeds: 0,
                 completedNeeds: 0,
                 sourceCount: 0,
+                searchedSourceCount: 0,
                 message: "准备重新确认联网查证任务",
             });
             persistGenTaskNow();
@@ -646,7 +689,8 @@ async function runLearning(
                     taskId: genTask.taskId,
                     stage,
                     chosenPathId,
-                    remainingMs: Math.max(1, clientDeadline - Date.now()),
+                    fixAuthorization: options?.fixAuthorization,
+                    remainingMs: Math.max(1, jobDeadline - Date.now()),
                 },
                 deadline: outboundDeadline(),
                 deadlineReason: "client_network",
@@ -674,7 +718,7 @@ async function runLearning(
     }
 
     if (!jobId) {
-        markClientDeferred(Date.now() >= clientDeadline ? "client_deadline" : lastFailureReason);
+        markClientDeferred(Date.now() >= jobDeadline ? "client_deadline" : lastFailureReason);
         return;
     }
 
@@ -752,7 +796,7 @@ async function runLearning(
     }
 
     let finalAttempt = 0;
-    const finalDeadline = () => Math.min(clientDeadline, jobDeadline);
+    const finalDeadline = () => jobDeadline;
     while (!isTerminal() && !stopRetrying && Date.now() < finalDeadline()) {
         let delayMs = LEARNING_STEP_INTERVAL_MS;
         const requestDeadline = finalDeadline();
@@ -769,7 +813,7 @@ async function runLearning(
                     revision: genTask.learningProgress.revision,
                 },
                 deadline: requestDeadline,
-                deadlineReason: requestDeadline < clientDeadline ? "client_network" : "client_deadline",
+                deadlineReason: "client_deadline",
                 maxWaitMs: LEARNING_FINALIZE_REQUEST_MS,
                 attempt: ++stepAttempt,
             });
@@ -799,7 +843,14 @@ async function runLearning(
     }
 
     if (isTerminal()) return;
-    markClientDeferred(Date.now() >= clientDeadline ? "client_deadline" : lastFailureReason);
+    if (!stopRetrying && Date.now() < outboundDeadline()) {
+        await runLearning(stage, chosenPathId, {
+            ...options,
+            resumeExisting: true,
+        });
+        return;
+    }
+    markClientDeferred(Date.now() >= jobDeadline ? "client_deadline" : lastFailureReason);
 }
 
 /** 从流式 JSON 文本中提取 "todos":[...] 数组里已完整闭合的对象 */
@@ -1064,13 +1115,26 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
 }
 
 /** SSE streaming build fix */
-async function streamBuildFix(taskId: string, mode: "diagnose" | "repair" | "inspect" = "repair"): Promise<any> {
+async function streamBuildFix(
+    taskId: string,
+    mode: "diagnose" | "repair" | "inspect" = "repair",
+    repairAuthorization?: FixRepairAuthorization,
+): Promise<any> {
     const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId, mode }),
+        body: JSON.stringify({
+            taskId,
+            mode,
+            ...(mode === "repair" ? { repairAuthorization } : {}),
+        }),
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) {
+        const apiError = await readApiError(resp, "自动修复请求失败");
+        const error = new Error(apiError.message);
+        (error as any).code = apiError.code;
+        throw error;
+    }
 
     const contentType = resp.headers.get("Content-Type") || "";
     if (contentType.includes("application/json")) {
@@ -1095,16 +1159,32 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
         if (status.status === "fixed") {
             return { changed: Math.max(0, Number(status.repairChanged) || 0) };
         }
+        const repairAuthorization = normalizeFixRepairAuthorization(status.repairAuthorization);
         if (status.status === "repairing") {
             const remainingMs = Math.max(0, Number(status.repairRetryAfterMs) || 0);
-            if (remainingMs <= 0) return streamBuildFix(taskId, "repair");
+            if (remainingMs <= 0) {
+                if (!repairAuthorization) {
+                    throw new Error("现有自动修复缺少可恢复授权，请重新读取构建诊断");
+                }
+                return streamBuildFix(taskId, "repair", repairAuthorization);
+            }
             await new Promise(resolve => setTimeout(resolve, Math.min(2_000, remainingMs)));
             continue;
         }
         if (status.status === "error" && status.repairStarted) {
             throw new Error(status.error || "自动修复失败");
         }
-        if (Date.now() >= startGraceDeadline) return streamBuildFix(taskId, "repair");
+        if (status.status === "error" && status.repairPending && repairAuthorization) {
+            return streamBuildFix(taskId, "repair", repairAuthorization);
+        }
+        if (Date.now() >= startGraceDeadline) {
+            const diagnosis = await streamBuildFix(taskId, "diagnose");
+            const recoveredAuthorization = normalizeFixRepairAuthorization(diagnosis?.repairAuthorization);
+            if (!recoveredAuthorization) {
+                throw new Error(diagnosis?.reason || "未能恢复当前构建的修复授权");
+            }
+            return streamBuildFix(taskId, "repair", recoveredAuthorization);
+        }
         await new Promise(resolve => setTimeout(resolve, 1_000));
     }
     throw new Error("等待自动修复结果超时，请稍后恢复任务状态");
@@ -1134,26 +1214,35 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
         genTask.logs.push("↻ 页面恢复：等待自动修复写回");
         fixResult = await recoverBuildRepair(taskId);
     } else {
-        if (stage === "diagnosing") {
-            genTask.logs.push("↻ 页面恢复：重新读取构建诊断");
+        genTask.logs.push("↻ 页面恢复：重新读取构建诊断并复核学习条件");
+        const diagnosis = await streamBuildFix(taskId, "diagnose");
+        const repairAuthorization = normalizeFixRepairAuthorization(diagnosis?.repairAuthorization);
+        if (!repairAuthorization) {
+            throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
+        }
+        if (diagnosis?.learningEligible === true && Number(diagnosis?.knowledgeNeeds) > 0) {
+            const learningAuthorization = normalizeFixLearningAuthorization(diagnosis?.learningAuthorization);
+            if (!learningAuthorization) {
+                throw new Error("服务端未返回当前诊断的联网学习授权");
+            }
+            genTask.logs.push(`▸ ${diagnosis.knowledgeNeeds} 个外部 API 技术缺口在普通修复后仍存在，继续查证`);
+            genTask.fixResumeStage = "learning";
+            persistGenTaskNow();
             try {
-                const diagnosis = await streamBuildFix(taskId, "diagnose");
-                if (Number(diagnosis?.knowledgeNeeds) > 0) {
-                    genTask.logs.push(`▸ 构建诊断包含 ${diagnosis.knowledgeNeeds} 个公开技术缺口，继续限时查证`);
-                    genTask.fixResumeStage = "learning";
-                    await runLearning("fix");
-                }
+                await runLearning("fix", undefined, {
+                    resumeExisting: stage === "learning",
+                    fixAuthorization: learningAuthorization,
+                });
             } catch (error: any) {
-                genTask.logs.push(`! 构建诊断学习准备失败，直接进入修复: ${error?.message || error}`);
+                genTask.logs.push(`! 联网查证未完成，继续使用现有知识修复: ${error?.message || error}`);
             }
         } else if (stage === "learning") {
-            genTask.logs.push("↻ 页面恢复：继续修复前联网查证");
-            await runLearning("fix", undefined, { resumeExisting: true });
+            genTask.logs.push("▸ 服务端复核后不再满足学习条件，直接继续普通修复");
         }
 
         genTask.fixResumeStage = "repairing";
         persistGenTaskNow();
-        fixResult = await streamBuildFix(taskId, "repair");
+        fixResult = await streamBuildFix(taskId, "repair", repairAuthorization);
     }
 
     const changed = repairedFileCount(fixResult);
@@ -1215,8 +1304,13 @@ export async function resumeGenerate() {
         return;
     }
 
-    // uploading / fixing 的服务端请求可能尚未完成，沿用原恢复策略。
-    if (["uploading", "fixing"].includes(p)) {
+    // uploading 阶段优先复用已持久化的请求 ID，继续同一次服务端启动流程。
+    if (p === "uploading") {
+        try { await buildWithRetry(undefined, undefined, !!genTask.buildRequestId); }
+        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
+        return;
+    }
+    if (p === "fixing") {
         try { await buildWithRetry(); }
         catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
         return;
@@ -1403,6 +1497,11 @@ export async function startGenerate(
             genTask.reasoningContent = "";
             setPhase("grading", "正在分析需求复杂度...");
             const gradeRes = await streamGrade(genTask.taskId, correction);
+            genTask.plannerLearningRequired = gradeRes?.learningRequired === true;
+            genTask.plannerLearningNeedCount = genTask.plannerLearningRequired
+                ? Math.max(0, Number(gradeRes?.learningNeedCount) || 0)
+                : 0;
+            persistGenTaskNow();
             correction = undefined;
             // 直接级 / 兜底 → 走原路径，不出确认门
             if (!gradeRes || gradeRes.direct) break;
@@ -1429,13 +1528,25 @@ export async function startGenerate(
         }
         // 分级异常不阻断生成：按原路径继续（plan 仍会按 vector 注入轴要求）
         genTask.grade = null;
+        genTask.plannerLearningRequired = false;
+        genTask.plannerLearningNeedCount = 0;
         genTask.logs.push("! 分级阶段异常，按原路径继续: " + (e.message || e));
     }
     }
 
-    // ── Phase 2.8: Planner 前限时查证公开技术缺口 ──
-    setPhase("planning", "正在查证目标版本 API 与依赖...");
-    await runLearning("planner", chosenPathId, { resumeExisting: resumePrepared });
+    // ── Phase 2.8: Planner 前只查证明确的外部 API 实现缺口 ──
+    const hasPreparedPlannerLearning = resumePrepared
+        && genTask.learningProgress.stage === "planner"
+        && genTask.learningProgress.status !== "idle"
+        && (!LEARNING_TERMINAL.has(genTask.learningProgress.status)
+            || isUnconfirmedLearningProgress(genTask.learningProgress));
+    if (genTask.plannerLearningRequired || hasPreparedPlannerLearning) {
+        setPhase("planning", "正在查证外部 API 与目标版本实现...");
+        await runLearning("planner", chosenPathId, { resumeExisting: resumePrepared });
+    } else {
+        setPhase("planning", "未发现需要联网查证的外部 API，开始规划...");
+        genTask.logs.push("▸ 未发现 NMS、版本反射或明确第三方插件 API 缺口，跳过联网学习");
+    }
 
     // ── Phase 3: planning + generating + build (with replan loop) ──
     const firstPlannerAttempt = resumePrepared && genTask.plannerRequestId
@@ -1629,19 +1740,36 @@ async function buildWithRetry(
 ) {
     for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
         const reuseExisting = resumeExistingBuild && attempt === 0;
-        if (reuseExisting) {
+        let buildResult: any = null;
+        if (reuseExisting && genTask.buildRequestId) {
+            setPhase("uploading", "正在恢复已有构建启动请求...");
+            genTask.logs.push("↻ 页面恢复：使用原 build request ID 对账，不重复触发 workflow");
+            buildResult = await post("/api/generate/build", {
+                taskId: genTask.taskId,
+                buildRequestId: genTask.buildRequestId,
+            });
+        } else if (reuseExisting) {
             setPhase("building", "正在恢复已有构建的状态...");
             genTask.logs.push("↻ 页面恢复：继续等待已有构建，不重复触发 workflow");
         } else {
             setPhase("uploading", "正在上传到 GitHub 并触发构建...");
-            const payload: any = { taskId: genTask.taskId };
+            const buildRequestId = createBuildRequestId();
+            genTask.buildRequestId = buildRequestId;
+            persistGenTaskNow();
+            const payload: any = {
+                taskId: genTask.taskId,
+                buildRequestId,
+            };
             // 首次构建带上 IDE 的最新内容 + 元数据（供 KV 任务过期后重建）；
             // 后续 fix 后重建用 KV 里已被 fix 改过的版本
             if (attempt === 0 && initialFiles) {
                 payload.files = initialFiles;
                 if (meta) payload.meta = meta;
             }
-            const buildResult = await post("/api/generate/build", payload);
+            buildResult = await post("/api/generate/build", payload);
+        }
+
+        if (buildResult) {
             if (genTask.fixResumeStage === "rebuilding") {
                 genTask.fixResumeStage = "";
                 persistGenTaskNow();
@@ -1650,7 +1778,7 @@ async function buildWithRetry(
             if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
             if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
             if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
-            genTask.logs.push(`构建已触发 (run #${buildResult.runId || "pending"})`);
+            genTask.logs.push(`构建已确认 (run #${buildResult.runId || "pending"})`);
         }
 
         setPhase("building", "正在等待 GitHub Actions 构建...");
@@ -1667,18 +1795,28 @@ async function buildWithRetry(
             setPhase("fixing", "正在获取最终构建诊断...");
         }
 
+        let repairAuthorization: FixRepairAuthorization | null = null;
         if (canRepair) {
             genTask.fixResumeStage = "diagnosing";
             persistGenTaskNow();
-            try {
-                const diagnosis = await streamBuildFix(genTask.taskId, "diagnose");
-                if (Number(diagnosis?.knowledgeNeeds) > 0) {
-                    genTask.logs.push(`▸ 构建诊断包含 ${diagnosis.knowledgeNeeds} 个公开技术缺口，开始限时查证`);
-                    genTask.fixResumeStage = "learning";
-                    await runLearning("fix");
+            const diagnosis = await streamBuildFix(genTask.taskId, "diagnose");
+            repairAuthorization = normalizeFixRepairAuthorization(diagnosis?.repairAuthorization);
+            if (!repairAuthorization) {
+                throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
+            }
+            if (diagnosis?.learningEligible === true && Number(diagnosis?.knowledgeNeeds) > 0) {
+                const learningAuthorization = normalizeFixLearningAuthorization(diagnosis?.learningAuthorization);
+                if (!learningAuthorization) {
+                    throw new Error("服务端未返回当前诊断的联网学习授权");
                 }
-            } catch (error: any) {
-                genTask.logs.push(`! 构建诊断学习准备失败，直接进入修复: ${error?.message || error}`);
+                genTask.logs.push(`▸ ${diagnosis.knowledgeNeeds} 个外部 API 技术缺口在普通修复后仍存在，开始查证`);
+                genTask.fixResumeStage = "learning";
+                persistGenTaskNow();
+                try {
+                    await runLearning("fix", undefined, { fixAuthorization: learningAuthorization });
+                } catch (error: any) {
+                    genTask.logs.push(`! 联网查证未完成，继续使用现有知识修复: ${error?.message || error}`);
+                }
             }
             genTask.fixResumeStage = "repairing";
             persistGenTaskNow();
@@ -1687,7 +1825,11 @@ async function buildWithRetry(
             persistGenTaskNow();
         }
 
-        const fixResult = await streamBuildFix(genTask.taskId, canRepair ? "repair" : "inspect");
+        const fixResult = await streamBuildFix(
+            genTask.taskId,
+            canRepair ? "repair" : "inspect",
+            repairAuthorization ?? undefined,
+        );
         if (!canRepair) {
             genTask.fixResumeStage = "";
             persistGenTaskNow();
@@ -1715,6 +1857,7 @@ async function pollBuildStatus(): Promise<boolean> {
         const result = await get(`/api/generate/status?taskId=${genTask.taskId}`);
 
         if (result.status === "done") {
+            genTask.buildRequestId = "";
             genTask.fixResumeStage = "";
             setPhase("done", "● 构建成功，JAR 已就绪！");
             persistGenTaskNow();

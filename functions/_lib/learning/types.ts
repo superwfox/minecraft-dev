@@ -9,6 +9,12 @@ export type KnowledgeSpecificity = "exact" | "scoped" | "ambiguous";
 export type KnowledgeAnswerType = "signature" | "coordinate" | "behavior" | "migration" | "rule";
 export type KnowledgeRisk = "low" | "medium" | "high";
 export type SourcePolicy = "api_signature" | "dependency" | "behavior" | "release";
+export type LearningIntegrationKind = "nms" | "craftbukkit" | "version_reflection" | "external_plugin";
+export type LearningNeedTriggerReason =
+    | "nms_version_sensitive"
+    | "reflection_contract"
+    | "external_plugin_contract"
+    | "persistent_diagnostic_gap";
 
 export interface KnowledgeNeed {
     id: string;
@@ -31,6 +37,9 @@ export interface KnowledgeNeed {
     sourcePolicy: SourcePolicy;
     searchQueries: string[];
     acceptanceCriteria: string[];
+    integrationKind?: LearningIntegrationKind;
+    triggerReason?: LearningNeedTriggerReason;
+    pathIds?: string[];
 }
 
 export interface VerificationEvidence {
@@ -38,6 +47,19 @@ export interface VerificationEvidence {
     relation: "supports" | "contradicts";
     locator: string;
     excerpt: string;
+}
+
+export interface ImplementationRecipeV1 {
+    schemaVersion: "implementation_recipe.v1";
+    language: "java";
+    integrationKind: LearningIntegrationKind;
+    title: string;
+    code: string;
+    imports: string[];
+    versionScope: string;
+    prerequisites: string[];
+    notes: string[];
+    sourceIds: string[];
 }
 
 export interface VerificationResult {
@@ -48,6 +70,7 @@ export interface VerificationResult {
     confidence: number;
     runtimeSummary?: string;
     expiresInDays?: number;
+    recipe?: ImplementationRecipeV1;
 }
 
 export type LearningStage = "planner" | "fix";
@@ -75,6 +98,8 @@ export type LearningReasonCode =
     | "verification_invalid_response"
     | "verification_failed"
     | "unresolved_knowledge_needs"
+    | "planner_authorization_expired"
+    | "fix_authorization_expired"
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
@@ -97,9 +122,48 @@ export type LearningActiveStatus = Extract<
     "queued" | "discovering" | "fetching" | "verifying"
 >;
 
+export interface LearningCandidateSource {
+    url: string;
+    reason: string;
+}
+
 export interface LearningCandidate {
     needId: string;
-    urls: string[];
+    sources?: LearningCandidateSource[];
+    urls?: string[];
+}
+
+export type LearningSearchedSourceStatus =
+    | "discovered"
+    | "fetched"
+    | "supports"
+    | "contradicts"
+    | "rejected"
+    | "skipped";
+
+export type LearningSourceRejectionCode =
+    | "invalid_url"
+    | "timeout"
+    | "http_4xx"
+    | "http_5xx"
+    | "too_large"
+    | "unsupported_type"
+    | "too_thin"
+    | "duplicate"
+    | "budget_exhausted"
+    | "source_limit";
+
+export interface LearningSearchedSource {
+    needId: string;
+    url: string;
+    canonicalUrl?: string;
+    reason: string;
+    status: LearningSearchedSourceStatus;
+    rejectionCode?: LearningSourceRejectionCode;
+    sourceId?: string;
+    title?: string;
+    sourceType?: string;
+    authority?: string;
 }
 
 export interface LearningJobTelemetry {
@@ -140,12 +204,26 @@ export interface LearningJobTelemetry {
 
 export interface LearningJobWork {
     deadlineAt?: number;
+    lastProgressAt?: number;
+    inactivityDeadlineAt?: number;
     lastActiveStatus?: LearningActiveStatus;
     candidates?: LearningCandidate[];
+    searchedSources?: LearningSearchedSource[];
     sourceIds?: string[];
     verifications?: VerificationResult[];
     cachedKnowledgeIds?: string[];
     verificationAttemptsByNeed?: Record<string, number>;
+    taskStateFence?: string;
+    plannerAuthorization?: {
+        chosenPathId: string;
+        needsFingerprint: string;
+    };
+    fixAuthorization?: {
+        runId: number;
+        previousRunId: number;
+        diagnosticsFingerprint: string;
+        repairAttempts: number;
+    };
     currentNeed?: string;
     completedNeeds?: number;
     telemetry?: LearningJobTelemetry;
@@ -232,6 +310,7 @@ export interface LearningProgress {
     totalNeeds: number;
     completedNeeds: number;
     sourceCount: number;
+    searchedSourceCount?: number;
     message: string;
     reasonCode?: LearningReasonCode;
 }
@@ -255,6 +334,11 @@ export interface LearningEvidenceSource {
     relation: string;
 }
 
+export interface LearningEvidenceReason {
+    code: LearningNeedTriggerReason;
+    message: string;
+}
+
 export interface LearningEvidenceItem {
     knowledgeId: string;
     summary: string;
@@ -262,5 +346,29 @@ export interface LearningEvidenceItem {
     confidence: number;
     status: string;
     scope: string;
+    reason?: LearningEvidenceReason;
+    recipe?: ImplementationRecipeV1;
     sources: LearningEvidenceSource[];
+}
+
+export interface PublicLearningSearchedSource {
+    needId: string;
+    question: string;
+    url: string;
+    canonicalUrl?: string;
+    reason: string;
+    status: LearningSearchedSourceStatus;
+    rejectionCode?: LearningSourceRejectionCode;
+    title: string;
+    sourceType: string;
+    authority: string;
+}
+
+export interface PublicLearningEvidenceSnapshot {
+    learningJobId: string;
+    learningStage: "" | LearningStage;
+    learningStatus: LearningStatus;
+    learningRevision: number;
+    items: LearningEvidenceItem[];
+    searchedSources: PublicLearningSearchedSource[];
 }

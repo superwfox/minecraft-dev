@@ -1,22 +1,33 @@
 import { partitionKnowledgeNeedsByApiContracts } from "../../_lib/apiContracts";
 import { resolveLLM } from "../../_lib/llm";
-import { createLearningDeadlineAt } from "../../_lib/learning/deadline";
+import { createLearningDeadlineAt, LEARNING_JOB_BUDGET_MS } from "../../_lib/learning/deadline";
 import {
     assessKnowledgeNeeds,
     deduplicateKnowledgeNeeds,
+    filterFixKnowledgeNeeds,
     knowledgeLookupKey,
     learningLookupHash,
     learningLookupKeys,
 } from "../../_lib/learning/assessment";
 import { mergeKnowledgeUsed } from "../../_lib/learning/context";
+import { bindLearningJobLookupHashToTaskFence } from "../../_lib/learning/authorization";
+import {
+    currentFixLearningAuthorization,
+    sameFixLearningAuthorization,
+    type FixLearningAuthorization,
+} from "../../_lib/learning/fixAuthorization";
+import {
+    assessPlannerLearningAuthorization,
+    type PlannerLearningAuthorization,
+} from "../../_lib/learning/plannerAuthorization";
 import { learningSnapshot } from "../../_lib/learning/public";
 import {
     createOrGetLearningJob,
     findActiveKnowledge,
     LearningStoreUnavailableError,
 } from "../../_lib/learning/store";
-import type { LearningStage } from "../../_lib/learning/types";
-import { getOwnedTask, putTaskState } from "../../_lib/taskStore";
+import type { KnowledgeNeed, LearningStage } from "../../_lib/learning/types";
+import { getOwnedTask, putTaskState, taskOperationLeaseFromState } from "../../_lib/taskStore";
 
 interface Env {
     DB?: D1Database;
@@ -49,46 +60,93 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const state = JSON.parse(raw);
 
     const chosenPathId = typeof body.chosenPathId === "string" ? body.chosenPathId.trim() : "";
-    if (chosenPathId && state.grade?.gateRequired) {
-        const valid = Array.isArray(state.grade.paths)
-            && state.grade.paths.some((path: any) => path?.id === chosenPathId);
-        if (!valid) return json({ error: "Invalid chosenPathId" }, 400);
+    let pathSelectionChanged = false;
+    if (stage === "planner") {
+        const paths = Array.isArray(state.grade?.paths) ? state.grade.paths : [];
+        const validChosenPath = !!chosenPathId && paths.some((path: any) => path?.id === chosenPathId);
+        if (state.grade?.gateRequired && !chosenPathId) {
+            return json({ error: "Missing chosenPathId", code: "PATH_NOT_CONFIRMED" }, 400);
+        }
+        if (chosenPathId && !validChosenPath) return json({ error: "Invalid chosenPathId" }, 400);
+        if (chosenPathId && state.grade?.chosenPathId !== chosenPathId) {
+            state.grade.chosenPathId = chosenPathId;
+            pathSelectionChanged = true;
+        }
     }
 
-    const rawNeeds = stage === "fix"
-        ? state.fixKnowledgeNeeds
-        : state.grade?.knowledgeNeeds ?? state.knowledgeNeeds;
-    const assessment = assessKnowledgeNeeds(rawNeeds, {
-        coreType: state.coreType,
-        mcVersion: state.version,
-    });
-    const contractCoverage = partitionKnowledgeNeedsByApiContracts({
-        coreType: state.coreType,
-        version: state.version,
-        externalDeps: Array.isArray(state.grade?.vector?.external_deps)
-            ? state.grade.vector.external_deps
-            : [],
-        generatedFiles: Array.isArray(state.generatedFiles)
-            ? state.generatedFiles
-                .filter((file: any) => file && typeof file.path === "string")
-                .map((file: any) => ({
-                    path: file.path,
-                    content: typeof file.content === "string" ? file.content : undefined,
-                }))
-            : [],
-    }, assessment.accepted);
-    const needs = deduplicateKnowledgeNeeds(contractCoverage.uncovered);
+    const requestedFixAuthorization = body.fixAuthorization as FixLearningAuthorization | undefined;
+    const fixAuthorization = stage === "fix" ? currentFixLearningAuthorization(state) : null;
+    if (stage === "fix" && !sameFixLearningAuthorization(
+        fixAuthorization,
+        requestedFixAuthorization,
+    )) {
+        return json({
+            error: "Fix learning authorization is no longer current",
+            reasonCode: "fix_authorization_expired",
+        }, 409);
+    }
+
+    if (pathSelectionChanged) {
+        try {
+            await putTaskState(context.env, taskId, state, 3600, uid);
+        } catch (error) {
+            console.warn("learning path selection persistence failed", error);
+            return storageUnavailable();
+        }
+    }
+
+    const externalDeps = Array.isArray(state.grade?.vector?.external_deps)
+        ? state.grade.vector.external_deps
+        : [];
+    let needs: KnowledgeNeed[] = [];
+    let contractCoveredCount = 0;
+    let plannerAuthorization: PlannerLearningAuthorization | undefined;
+    if (stage === "planner") {
+        const plannerAssessment = await assessPlannerLearningAuthorization(state);
+        if (!plannerAssessment) {
+            return json({
+                error: "Planner learning authorization is no longer current",
+                reasonCode: "planner_authorization_expired",
+            }, 409);
+        }
+        needs = plannerAssessment.needs;
+        contractCoveredCount = plannerAssessment.coveredCount;
+        plannerAuthorization = plannerAssessment.authorization;
+    } else {
+        const assessment = assessKnowledgeNeeds(state.fixKnowledgeNeeds, {
+            coreType: state.coreType,
+            mcVersion: state.version,
+        });
+        const eligibleNeeds = filterFixKnowledgeNeeds(assessment.accepted, {
+            repairAttempts: state.repairAttempts,
+        }).accepted;
+        const contractCoverage = partitionKnowledgeNeedsByApiContracts({
+            coreType: state.coreType,
+            version: state.version,
+            externalDeps,
+            generatedFiles: Array.isArray(state.generatedFiles)
+                ? state.generatedFiles
+                    .filter((file: any) => file && typeof file.path === "string")
+                    .map((file: any) => ({
+                        path: file.path,
+                        content: typeof file.content === "string" ? file.content : undefined,
+                    }))
+                : [],
+        }, eligibleNeeds);
+        needs = deduplicateKnowledgeNeeds(contractCoverage.uncovered);
+        contractCoveredCount = contractCoverage.covered.length;
+    }
     const lookupKeys = learningLookupKeys(needs);
 
     if (!needs.length) {
         return json(learningSnapshot(null, [], 0, {
             status: "ready",
             stage,
-            reasonCode: contractCoverage.covered.length
+            reasonCode: contractCoveredCount
                 ? "static_contract_covered"
                 : "no_learning_needed",
-            message: contractCoverage.covered.length
-                ? `已有静态 API 契约覆盖 ${contractCoverage.covered.length} 个技术缺口，无需联网查证`
+            message: contractCoveredCount
+                ? `已有静态 API 契约覆盖 ${contractCoveredCount} 个技术缺口，无需联网查证`
                 : undefined,
         }));
     }
@@ -128,15 +186,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
         }
 
+        const taskStateFence = taskOperationLeaseFromState(state)?.token || "";
+        if (!taskStateFence) return storageUnavailable();
         const now = Date.now();
+        const baseLookupHash = await learningLookupHash(pendingNeeds);
+        const authorizationLookupHash = fixAuthorization
+            ? `${baseLookupHash}.${fixAuthorization.runId}.${fixAuthorization.previousRunId}.${fixAuthorization.diagnosticsFingerprint}.${fixAuthorization.repairAttempts}`
+            : plannerAuthorization
+                ? `${baseLookupHash}.${plannerAuthorization.needsFingerprint}.${plannerAuthorization.chosenPathId || "global"}`
+                : baseLookupHash;
+        const jobLookupHash = await bindLearningJobLookupHashToTaskFence(
+            authorizationLookupHash,
+            taskStateFence,
+        );
         const job = await createOrGetLearningJob(context.env, {
             ownerUid: uid,
             generationTaskId: taskId,
             stage,
-            lookupHash: await learningLookupHash(pendingNeeds),
+            lookupHash: jobLookupHash,
             needs: pendingNeeds,
             work: {
-                deadlineAt: createLearningDeadlineAt(now, body.remainingMs),
+                lastProgressAt: now,
+                inactivityDeadlineAt: createLearningDeadlineAt(now, LEARNING_JOB_BUDGET_MS),
+                taskStateFence,
+                ...(plannerAuthorization ? { plannerAuthorization } : {}),
+                ...(fixAuthorization ? { fixAuthorization } : {}),
                 ...(active.length ? {
                     cachedKnowledgeIds: active.map((item) => item.knowledgeId),
                 } : {}),

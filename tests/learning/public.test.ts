@@ -109,17 +109,34 @@ describe("public learning snapshot", () => {
 
     it("publishes the job stage and bounded timing anchors", () => {
         const job = makeJob("discovering");
-        job.work.deadlineAt = job.createdAt + 240_000;
+        job.work.lastProgressAt = job.createdAt + 60_000;
+        job.work.inactivityDeadlineAt = job.createdAt + 360_000;
         job.work.lastActiveStatus = "discovering";
+        job.work.searchedSources = [
+            {
+                needId: "need-a",
+                url: "https://example.com/a",
+                reason: "Check source A.",
+                status: "fetched",
+            },
+            {
+                needId: "need-b",
+                url: "https://example.com/b",
+                reason: "Check source B.",
+                status: "rejected",
+                rejectionCode: "too_thin",
+            },
+        ];
 
         const snapshot = learningSnapshot(job);
 
         expect(snapshot.learningProgress).toMatchObject({
             stage: "planner",
             startedAt: job.createdAt,
-            deadlineAt: job.createdAt + 240_000,
+            deadlineAt: job.createdAt + 360_000,
             remainingMs: 0,
             lastActiveStatus: "discovering",
+            searchedSourceCount: 2,
         });
         expect(learningSnapshot(null, [], 0, {
             status: "deferred",
@@ -133,13 +150,13 @@ describe("public learning snapshot", () => {
         });
     });
 
-    it("distinguishes the five-minute job deadline from an upstream timeout", () => {
+    it("distinguishes inactivity expiry from an upstream timeout", () => {
         const job = makeJob("deferred");
         job.error = "job_deadline";
 
         expect(learningSnapshot(job).learningProgress).toMatchObject({
             reasonCode: "job_deadline",
-            message: "本轮联网查证已进入 5 分钟收尾期限，已按现有知识继续",
+            message: "连续 5 分钟没有可确认的联网查证进展，已按现有知识继续",
         });
     });
 });

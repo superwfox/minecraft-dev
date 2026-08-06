@@ -2,9 +2,21 @@ import {
     LEARNING_SOURCE_LIMIT_MS,
     LEARNING_SOURCE_TIMEOUT_MS,
 } from "./deadline";
-import type { KnowledgeNeed, LearningReasonCode, LearningSourceRecord } from "./types";
+import type {
+    KnowledgeNeed,
+    LearningCandidate,
+    LearningReasonCode,
+    LearningSearchedSource,
+    LearningSourceRecord,
+    LearningSourceRejectionCode,
+} from "./types";
 
 const MAX_REDIRECTS = 3;
+const MAX_CANDIDATE_NEEDS = 3;
+const MAX_CANDIDATE_SOURCES_PER_NEED = 3;
+const MAX_CANDIDATE_URL_LENGTH = 2_000;
+const MIN_CANDIDATE_REASON_LENGTH = 8;
+const MAX_CANDIDATE_REASON_LENGTH = 240;
 const MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = LEARNING_SOURCE_TIMEOUT_MS;
 const DEFAULT_BUDGET_MS = LEARNING_SOURCE_LIMIT_MS;
@@ -16,32 +28,39 @@ const ALLOWED_CONTENT_TYPES = [
     "application/xml",
     "text/xml",
 ];
+const SENSITIVE_QUERY_KEYS = new Set([
+    "access_token",
+    "apikey",
+    "api_key",
+    "auth",
+    "authorization",
+    "key",
+    "password",
+    "signature",
+    "sig",
+    "token",
+]);
 
-const TRUSTED_ARTIFACT_HOSTS = [
+const TRUSTED_ARTIFACT_HOSTS = new Set([
     "repo.papermc.io",
     "repo.maven.apache.org",
     "maven.enginehub.org",
     "repo.extendedclip.com",
-];
-const OFFICIAL_HOSTS = [
+]);
+const OFFICIAL_DOCUMENTATION_HOSTS = new Set([
     "papermc.io",
     "docs.papermc.io",
     "jd.papermc.io",
-    "spigotmc.org",
     "hub.spigotmc.org",
-    ...TRUSTED_ARTIFACT_HOSTS,
-];
-const OFFICIAL_GITHUB_OWNERS = new Set([
-    "enginehub",
-    "milkbowl",
-    "papermc",
-    "placeholderapi",
-    "spigotmc",
 ]);
-
-function hostMatches(host: string, domains: string[]): boolean {
-    return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
-}
+const OFFICIAL_GITHUB_REPOSITORIES = new Set([
+    "enginehub/worldedit",
+    "enginehub/worldguard",
+    "milkbowl/vaultapi",
+    "papermc/paper",
+    "placeholderapi/placeholderapi",
+    "spigotmc/spigot-api",
+]);
 
 function isIpLiteral(hostname: string): boolean {
     const normalized = hostname.replace(/^\[|\]$/g, "");
@@ -51,9 +70,10 @@ function isIpLiteral(hostname: string): boolean {
         && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
 }
 
-function githubOwner(url: URL): string {
+function githubRepository(url: URL): string {
     if (url.hostname !== "github.com" && url.hostname !== "raw.githubusercontent.com") return "";
-    return url.pathname.split("/").filter(Boolean)[0]?.toLowerCase() ?? "";
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}`.toLowerCase() : "";
 }
 
 function decodedPath(url: URL): string {
@@ -150,6 +170,18 @@ function javadocMatchesNeed(url: URL, need: KnowledgeNeed): boolean {
     return decodedPath(url).toLowerCase().endsWith(`/${expectedPath}.html`);
 }
 
+export function publicLearningCandidateUrl(raw: string): string {
+    let url: URL;
+    try { url = new URL(raw.trim()); } catch { return ""; }
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    for (const key of [...url.searchParams.keys()]) {
+        if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
+    }
+    return url.href.slice(0, 2_000);
+}
+
 export function validatePublicSourceUrl(raw: string): URL {
     let url: URL;
     try { url = new URL(raw); } catch { throw new Error("invalid_url"); }
@@ -164,6 +196,9 @@ export function validatePublicSourceUrl(raw: string): URL {
     }
     if (isIpLiteral(hostname)) throw new Error("ip_literal_forbidden");
     url.hash = "";
+    for (const key of [...url.searchParams.keys()]) {
+        if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
+    }
     return url;
 }
 
@@ -172,11 +207,13 @@ function sourceClassification(url: URL, need: KnowledgeNeed): { sourceType: stri
     const path = decodedPath(url).toLowerCase();
     const isPom = path.endsWith(".pom");
     const isMavenMetadata = path.endsWith("maven-metadata.xml");
-    const isPinnedGithub = (host === "github.com" && (/\/blob\/[0-9a-f]{40}\//.test(path) || /\/releases\/tag\//.test(path)))
+    const isPinnedGithubCommit = (host === "github.com" && /\/blob\/[0-9a-f]{40}\//.test(path))
         || (host === "raw.githubusercontent.com" && /\/[0-9a-f]{40}\//.test(path));
-    const isTrustedArtifactHost = hostMatches(host, TRUSTED_ARTIFACT_HOSTS);
-    const isOfficial = hostMatches(host, OFFICIAL_HOSTS);
-    const isOfficialRepository = isPinnedGithub && OFFICIAL_GITHUB_OWNERS.has(githubOwner(url));
+    const isGithubRelease = host === "github.com" && /\/releases\/tag\//.test(path);
+    const isTrustedArtifactHost = TRUSTED_ARTIFACT_HOSTS.has(host);
+    const isOfficial = isTrustedArtifactHost || OFFICIAL_DOCUMENTATION_HOSTS.has(host);
+    const isOfficialGithubRelease = isGithubRelease
+        && OFFICIAL_GITHUB_REPOSITORIES.has(githubRepository(url));
     if (isMavenMetadata) {
         return {
             sourceType: "artifact",
@@ -191,8 +228,15 @@ function sourceClassification(url: URL, need: KnowledgeNeed): { sourceType: stri
                 : isTrustedArtifactHost ? "official" : "secondary",
         };
     }
-    if (isPinnedGithub) {
-        return { sourceType: "repository", authority: isOfficialRepository ? "ground_truth" : "secondary" };
+    if (isPinnedGithubCommit) {
+        // SHA 外形不能证明提交属于上游受信任 ref；fork network 中的对象不得自动升级权威性。
+        return { sourceType: "repository", authority: "secondary" };
+    }
+    if (isGithubRelease) {
+        return {
+            sourceType: "release",
+            authority: isOfficialGithubRelease ? "official" : "secondary",
+        };
     }
     if (path.includes("javadoc") || host.startsWith("jd.")) {
         const versionBound = pathMatchesVersion(path, need.scope.mcVersion);
@@ -390,28 +434,109 @@ export function learningNoSourcesReason(
 function recordSourceFailure(
     telemetry: LearningSourceFetchTelemetry,
     error: unknown,
-): void {
+): LearningSourceRejectionCode {
     telemetry.sourceRejected++;
     const name = error && typeof error === "object" ? String((error as { name?: unknown }).name || "") : "";
     const code = error && typeof error === "object" ? String((error as { message?: unknown }).message || "") : "";
-    if (name === "AbortError") telemetry.sourceTimeouts++;
-    else if (/^source_http_4\d\d$/.test(code)) telemetry.sourceHttp4xx++;
-    else if (/^source_http_5\d\d$/.test(code)) telemetry.sourceHttp5xx++;
-    else if (code === "source_too_large") telemetry.sourceTooLarge++;
-    else if (code === "unsupported_content_type") telemetry.sourceUnsupportedContentType++;
-    else if (code === "source_too_thin") telemetry.sourceTooThin++;
-    else telemetry.sourceInvalid++;
+    if (name === "AbortError") {
+        telemetry.sourceTimeouts++;
+        return "timeout";
+    }
+    if (/^source_http_4\d\d$/.test(code)) {
+        telemetry.sourceHttp4xx++;
+        return "http_4xx";
+    }
+    if (/^source_http_5\d\d$/.test(code)) {
+        telemetry.sourceHttp5xx++;
+        return "http_5xx";
+    }
+    if (code === "source_too_large") {
+        telemetry.sourceTooLarge++;
+        return "too_large";
+    }
+    if (code === "unsupported_content_type") {
+        telemetry.sourceUnsupportedContentType++;
+        return "unsupported_type";
+    }
+    if (code === "source_too_thin") {
+        telemetry.sourceTooThin++;
+        return "too_thin";
+    }
+    telemetry.sourceInvalid++;
+    return "invalid_url";
+}
+
+function candidateSources(candidate: LearningCandidate): Array<{ url: string; reason: string }> {
+    if (Array.isArray(candidate.sources)) return candidate.sources;
+    return Array.isArray(candidate.urls)
+        ? candidate.urls.map((url) => ({
+            url,
+            reason: "旧版发现结果未记录该 URL 的搜索理由",
+        }))
+        : [];
+}
+
+function assertLearningCandidateBounds(
+    needs: KnowledgeNeed[],
+    candidates: LearningCandidate[],
+): void {
+    if (!Array.isArray(candidates)
+        || candidates.length > Math.min(MAX_CANDIDATE_NEEDS, new Set(needs.map((need) => need.id)).size)) {
+        throw new Error("learning_candidate_bounds");
+    }
+    const allowedNeedIds = new Set(needs.map((need) => need.id));
+    const seenNeedIds = new Set<string>();
+    for (const rawCandidate of candidates as unknown[]) {
+        if (!rawCandidate || typeof rawCandidate !== "object" || Array.isArray(rawCandidate)) {
+            throw new Error("learning_candidate_bounds");
+        }
+        const candidate = rawCandidate as LearningCandidate;
+        const needId = typeof candidate.needId === "string" ? candidate.needId.trim() : "";
+        const hasSources = Array.isArray(candidate.sources);
+        const hasLegacyUrls = Array.isArray(candidate.urls);
+        if (!allowedNeedIds.has(needId)
+            || seenNeedIds.has(needId)
+            || hasSources === hasLegacyUrls) {
+            throw new Error("learning_candidate_bounds");
+        }
+        seenNeedIds.add(needId);
+        const sources = candidateSources(candidate);
+        if (!sources.length || sources.length > MAX_CANDIDATE_SOURCES_PER_NEED) {
+            throw new Error("learning_candidate_bounds");
+        }
+        for (const rawSource of sources as unknown[]) {
+            if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) {
+                throw new Error("learning_candidate_bounds");
+            }
+            const source = rawSource as { url?: unknown; reason?: unknown };
+            const url = typeof source.url === "string" ? source.url.trim() : "";
+            const reason = typeof source.reason === "string"
+                ? source.reason.trim().replace(/\s+/g, " ")
+                : "";
+            if (!url
+                || url.length > MAX_CANDIDATE_URL_LENGTH
+                || reason.length < MIN_CANDIDATE_REASON_LENGTH
+                || reason.length > MAX_CANDIDATE_REASON_LENGTH) {
+                throw new Error("learning_candidate_bounds");
+            }
+        }
+    }
 }
 
 export async function fetchLearningSources(input: {
     jobId: string;
     needs: KnowledgeNeed[];
-    candidates: { needId: string; urls: string[] }[];
+    candidates: LearningCandidate[];
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
     budgetMs?: number;
     maxSources?: number;
-}): Promise<{ sources: LearningSourceRecord[]; telemetry: LearningSourceFetchTelemetry }> {
+}): Promise<{
+    sources: LearningSourceRecord[];
+    outcomes: LearningSearchedSource[];
+    telemetry: LearningSourceFetchTelemetry;
+}> {
+    assertLearningCandidateBounds(input.needs, input.candidates);
     const startedAt = Date.now();
     const configuredBudget = Number(input.budgetMs);
     const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
@@ -420,13 +545,33 @@ export async function fetchLearningSources(input: {
     const deadline = startedAt + budgetMs;
     const remainingMs = () => Math.max(0, deadline - Date.now());
     const needs = new Map(input.needs.map((need) => [need.id, need]));
-    const urlsByNeed = new Map([...needs.keys()].map((needId) => [needId, [] as string[]]));
+    const entriesByNeed = new Map([...needs.keys()].map((needId) => [needId, [] as Array<{
+        url: string;
+        reason: string;
+        outcomeIndex: number;
+    }>]));
+    const outcomes: LearningSearchedSource[] = [];
     for (const candidate of input.candidates) {
-        urlsByNeed.get(candidate.needId)?.push(...candidate.urls);
+        const entries = entriesByNeed.get(candidate.needId);
+        if (!entries) continue;
+        for (const source of candidateSources(candidate)) {
+            if (typeof source.url !== "string" || !source.url.trim()) continue;
+            const outcomeIndex = outcomes.length;
+            const reason = typeof source.reason === "string"
+                ? source.reason.trim().replace(/\s+/g, " ").slice(0, 240)
+                : "";
+            outcomes.push({
+                needId: candidate.needId,
+                url: publicLearningCandidateUrl(source.url),
+                reason: reason || "该候选未提供可用的搜索理由",
+                status: "discovered",
+            });
+            entries.push({ url: source.url.trim(), reason, outcomeIndex });
+        }
     }
     const queues = [...needs.values()].map((need) => ({
         need,
-        urls: urlsByNeed.get(need.id) ?? [],
+        entries: entriesByNeed.get(need.id) ?? [],
         index: 0,
         sourceCount: 0,
     }));
@@ -449,9 +594,17 @@ export async function fetchLearningSources(input: {
     const seenCandidates = new Set<string>();
     const acceptedSources = new Set<string>();
     const maxSources = Math.max(1, Math.min(6, input.maxSources ?? 6));
-    const finish = () => {
+    const markRemainingSkipped = (rejectionCode: LearningSourceRejectionCode) => {
+        for (const outcome of outcomes) {
+            if (outcome.status !== "discovered") continue;
+            outcome.status = "skipped";
+            outcome.rejectionCode = rejectionCode;
+        }
+    };
+    const finish = (skippedReason?: LearningSourceRejectionCode) => {
+        if (skippedReason) markRemainingSkipped(skippedReason);
         telemetry.sourceElapsedMs = Math.max(0, Date.now() - startedAt);
-        return { sources, telemetry };
+        return { sources, outcomes, telemetry };
     };
     const budgetExhausted = () => {
         telemetry.sourceBudgetExhausted = 1;
@@ -461,22 +614,28 @@ export async function fetchLearningSources(input: {
     const tryNext = async (queue: typeof queues[number]): Promise<
         "success" | "attempted" | "exhausted" | "budget_exhausted"
     > => {
-        while (queue.index < queue.urls.length) {
+        while (queue.index < queue.entries.length) {
             if (remainingMs() <= 0) return budgetExhausted();
-            const rawUrl = queue.urls[queue.index++];
+            const entry = queue.entries[queue.index++];
+            const audit = outcomes[entry.outcomeIndex];
             telemetry.sourceAttempts++;
             let canonicalUrl: string;
             try {
-                canonicalUrl = validatePublicSourceUrl(rawUrl).href;
+                canonicalUrl = validatePublicSourceUrl(entry.url).href;
+                audit.url = canonicalUrl;
             } catch {
                 telemetry.sourceRejected++;
                 telemetry.sourceInvalid++;
+                audit.status = "rejected";
+                audit.rejectionCode = "invalid_url";
                 continue;
             }
             const candidateKey = `${queue.need.id}\n${canonicalUrl}`;
             if (seenCandidates.has(candidateKey)) {
                 telemetry.sourceRejected++;
                 telemetry.sourceDeduplicated++;
+                audit.status = "rejected";
+                audit.rejectionCode = "duplicate";
                 continue;
             }
             seenCandidates.add(candidateKey);
@@ -498,15 +657,24 @@ export async function fetchLearningSources(input: {
                 if (acceptedSources.has(sourceKey)) {
                     telemetry.sourceRejected++;
                     telemetry.sourceDeduplicated++;
+                    audit.status = "rejected";
+                    audit.rejectionCode = "duplicate";
                     return "attempted";
                 }
                 acceptedSources.add(sourceKey);
                 queue.sourceCount++;
                 sources.push(source);
                 telemetry.sourceAccepted++;
+                audit.status = "fetched";
+                audit.canonicalUrl = source.canonicalUrl;
+                audit.sourceId = source.sourceId;
+                audit.title = source.title;
+                audit.sourceType = source.sourceType;
+                audit.authority = source.authority;
                 return "success";
             } catch (error) {
-                recordSourceFailure(telemetry, error);
+                audit.status = "rejected";
+                audit.rejectionCode = recordSourceFailure(telemetry, error);
                 return remainingMs() <= 0 ? budgetExhausted() : "attempted";
             }
         }
@@ -517,12 +685,12 @@ export async function fetchLearningSources(input: {
         let hasUnsourcedCandidates = false;
         let attempted = false;
         for (const queue of queues) {
-            if (queue.sourceCount || queue.index >= queue.urls.length) continue;
+            if (queue.sourceCount || queue.index >= queue.entries.length) continue;
             hasUnsourcedCandidates = true;
             const outcome = await tryNext(queue);
-            if (outcome === "budget_exhausted") return finish();
+            if (outcome === "budget_exhausted") return finish("budget_exhausted");
             if (outcome !== "exhausted") attempted = true;
-            if (sources.length >= maxSources) return finish();
+            if (sources.length >= maxSources) return finish("source_limit");
         }
         if (!hasUnsourcedCandidates || !attempted) break;
     }
@@ -530,11 +698,11 @@ export async function fetchLearningSources(input: {
     while (sources.length < maxSources) {
         let attempted = false;
         for (const queue of queues) {
-            if (queue.index >= queue.urls.length) continue;
+            if (queue.index >= queue.entries.length) continue;
             const outcome = await tryNext(queue);
-            if (outcome === "budget_exhausted") return finish();
+            if (outcome === "budget_exhausted") return finish("budget_exhausted");
             if (outcome !== "exhausted") attempted = true;
-            if (sources.length >= maxSources) return finish();
+            if (sources.length >= maxSources) return finish("source_limit");
         }
         if (!attempted) break;
     }

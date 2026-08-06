@@ -5,7 +5,7 @@ import {
     mergeKnowledgeUsed,
 } from "../../functions/_lib/learning/context";
 import { knowledgeLookupKey } from "../../functions/_lib/learning/assessment";
-import { makeKnowledgeItem, makeNeed } from "./testData";
+import { makeKnowledgeItem, makeNeed, makeRecipe } from "./testData";
 
 describe("runtime knowledge context", () => {
     it("removes role tags, control characters, and code fences from stored facts", () => {
@@ -40,6 +40,70 @@ describe("runtime knowledge context", () => {
         expect(bounded.context).toBe(highOnly.context);
         expect(bounded.used.map((item) => item.knowledgeId)).toEqual(["know-high"]);
         expect(buildKnowledgeContext([high], 10).context).toBe("");
+    });
+
+    it("keeps a Java recipe whole or omits the entire knowledge item", () => {
+        const recipe = makeRecipe({
+            code: [
+                "public static String resolve(Player player, String input) {",
+                "    return PlaceholderAPI.setPlaceholders(player, input);",
+                "}",
+            ].join("\n"),
+            imports: [
+                "import me.clip.placeholderapi.PlaceholderAPI;",
+                "import org.bukkit.entity.Player;",
+            ],
+        });
+        const item = makeKnowledgeItem({
+            payload: {
+                claim: { symbol: "PlaceholderAPI#setPlaceholders" },
+                recipe,
+            },
+        });
+        const complete = buildKnowledgeContext([item], 20_000);
+
+        expect(complete.used.map((value) => value.knowledgeId)).toEqual([item.knowledgeId]);
+        expect(complete.context).toContain(recipe.code);
+        expect(complete.context).toContain(recipe.imports.join("\n"));
+        expect(buildKnowledgeContext([item], complete.context.length - 1)).toEqual({
+            context: "",
+            used: [],
+        });
+    });
+
+    it("does not inject a malformed recipe as truncated payload JSON", () => {
+        const recipe = makeRecipe() as unknown as Record<string, unknown>;
+        delete recipe.prerequisites;
+        const item = makeKnowledgeItem({
+            payload: {
+                claim: { symbol: "safe-public-symbol" },
+                recipe,
+            },
+        });
+
+        const result = buildKnowledgeContext([item], 10_000);
+
+        expect(result.context).toContain("safe-public-symbol");
+        expect(result.context).not.toContain("public static void sendMessage");
+    });
+
+    it("does not inject historical recipes with empty imports or notes", () => {
+        for (const field of ["imports", "notes"] as const) {
+            const recipe = makeRecipe() as unknown as Record<string, unknown>;
+            recipe[field] = [];
+            const item = makeKnowledgeItem({
+                payload: {
+                    claim: { symbol: `safe-${field}-symbol` },
+                    recipe,
+                },
+            });
+
+            const result = buildKnowledgeContext([item], 10_000);
+
+            expect(result.context).toContain(`safe-${field}-symbol`);
+            expect(result.context).not.toContain("public static void sendMessage");
+            expect(result.context).not.toContain("import org.bukkit.entity.Player;");
+        }
     });
 
     it("keeps only the latest revision for each lookup key", () => {

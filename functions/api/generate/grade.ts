@@ -2,7 +2,7 @@ import { graderPrompt, skillClarifyContext } from "../../_lib/prompts";
 import { enforceLevelFloor, type ScoreVector, type Level } from "../../_lib/complexity";
 import { accumulateCost, type UsageBreakdown } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
-import { assessKnowledgeNeeds } from "../../_lib/learning/assessment";
+import { assessKnowledgeNeeds, filterPlannerKnowledgeNeeds } from "../../_lib/learning/assessment";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
@@ -104,23 +104,43 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 parsed = JSON.parse(stripFences(callRes.content));
             } catch {
                 // 分级解析失败：兜底当直接级走原路径，避免卡死（仍受现有 plannerPrompt 极简约束）
-                state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
+                state.grade = { vector: null, level: "直接", level_reason: "分级解析失败，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [], learningRequired: false, learningNeedCount: 0 };
                 state.knowledgeNeeds = [];
                 state.logs.push("× 分级解析失败，按直接级继续");
                 await putTaskState(context.env, taskId, state, 3600, uid);
-                await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
+                await writer.write(sseEvent(encoder, {
+                    type: "result",
+                    direct: true,
+                    level: "直接",
+                    learningRequired: false,
+                    learningNeedCount: 0,
+                }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
             }
 
+            const seenPathIds = new Set<string>();
+            const paths = (Array.isArray(parsed.paths) ? parsed.paths : []).filter((path: any) => {
+                if (seenPathIds.size >= 3) return false;
+                const id = typeof path?.id === "string" ? path.id.trim() : "";
+                if (!/^[A-Za-z0-9_-]{1,80}$/.test(id) || seenPathIds.has(id)) return false;
+                path.id = id;
+                seenPathIds.add(id);
+                return true;
+            });
             const assessment = assessKnowledgeNeeds(parsed.knowledgeNeeds, {
                 coreType: state.coreType,
                 mcVersion: state.version,
+                allowedPathIds: [...seenPathIds],
             });
-            const knowledgeNeeds = assessment.accepted;
             const vector = (parsed.vector ?? {}) as ScoreVector;
+            const plannerAssessment = filterPlannerKnowledgeNeeds(assessment.accepted, {
+                userPrompt: state.userPrompt,
+                externalDeps: Array.isArray(vector.external_deps) ? vector.external_deps : [],
+            });
+            const knowledgeNeeds = plannerAssessment.accepted;
+            const learningRequired = knowledgeNeeds.length > 0;
             const level: Level = enforceLevelFloor(parsed.level, vector); // 代码侧强制下限
-            const paths = Array.isArray(parsed.paths) ? parsed.paths : [];
             // 模型判直接但被硬规则顶上来、却没给 paths 时：跳过门，直接进 plan（plan 仍按 vector 注入轴要求）
             const gateRequired = level !== "直接" && paths.length > 0;
 
@@ -132,25 +152,38 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 gateRequired,
                 chosenPathId: null,
                 knowledgeNeeds,
+                learningRequired,
+                learningNeedCount: knowledgeNeeds.length,
             };
             state.knowledgeNeeds = knowledgeNeeds;
             state.logs.push(`复杂度分级：${level}${parsed.level_reason ? "（" + parsed.level_reason + "）" : ""}`);
-            if (assessment.rejected.length) {
-                state.logs.push(`▸ 已忽略 ${assessment.rejected.length} 个不符合学习边界的知识候选`);
+            const rejectedNeedCount = assessment.rejected.length + plannerAssessment.rejected.length;
+            if (rejectedNeedCount) {
+                state.logs.push(`▸ 已忽略 ${rejectedNeedCount} 个不符合学习边界的知识候选`);
             }
             await putTaskState(context.env, taskId, state, 3600, uid);
 
+            const learningResult = {
+                learningRequired,
+                learningNeedCount: knowledgeNeeds.length,
+            };
             await writer.write(sseEvent(encoder, gateRequired
-                ? { type: "result", direct: false, level, paths }
-                : { type: "result", direct: true, level }));
+                ? { type: "result", direct: false, level, paths, ...learningResult }
+                : { type: "result", direct: true, level, ...learningResult }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
             // 出错兜底：重置 grade 为非门控并落库（避免上一轮 gateRequired 残留导致 plan 误判 400），按直接级继续
-            state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [] };
+            state.grade = { vector: null, level: "直接", level_reason: "分级异常，按直接级处理", paths: [], gateRequired: false, chosenPathId: null, knowledgeNeeds: [], learningRequired: false, learningNeedCount: 0 };
             state.knowledgeNeeds = [];
             try { await putTaskState(context.env, taskId, state, 3600, uid); } catch { /* ignore */ }
             await writer.write(sseEvent(encoder, { type: "log", msg: `× 分级错误: ${e.message}` }));
-            await writer.write(sseEvent(encoder, { type: "result", direct: true, level: "直接" }));
+            await writer.write(sseEvent(encoder, {
+                type: "result",
+                direct: true,
+                level: "直接",
+                learningRequired: false,
+                learningNeedCount: 0,
+            }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);

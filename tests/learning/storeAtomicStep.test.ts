@@ -66,6 +66,7 @@ interface EvidenceRow {
 
 interface AtomicState {
     job: JobRow;
+    taskFence: string;
     sources: Map<string, SourceRow>;
     knowledge: Map<string, KnowledgeRow>;
     evidence: Map<string, EvidenceRow>;
@@ -147,6 +148,7 @@ function evidenceKey(row: Pick<EvidenceRow, "knowledge_id" | "source_id" | "rela
 function cloneState(state: AtomicState): AtomicState {
     return {
         job: { ...state.job },
+        taskFence: state.taskFence,
         sources: new Map([...state.sources].map(([key, value]) => [key, { ...value }])),
         knowledge: new Map([...state.knowledge].map(([key, value]) => [key, { ...value }])),
         evidence: new Map([...state.evidence].map(([key, value]) => [key, { ...value }])),
@@ -218,7 +220,12 @@ function createAtomicLearningD1(
                 let changes = 0;
                 let rows: JobRow[] = [];
 
-                if (sql.startsWith("DELETE FROM learning_sources")) {
+                if (sql.startsWith("UPDATE learning_jobs SET lease_until = CASE")) {
+                    if (leaseMatches(draft, args[0], args[1], args[2], args[3], args[4])) {
+                        if (draft.taskFence !== args[5]) draft.job.lease_until = 0;
+                        changes = 1;
+                    }
+                } else if (sql.startsWith("DELETE FROM learning_sources")) {
                     if (leaseMatches(draft, args[0], args[1], args[2], args[3], args[4])) {
                         for (const [sourceId, row] of draft.sources) {
                             if (row.job_id === args[0]) draft.sources.delete(sourceId);
@@ -387,6 +394,7 @@ function createAtomicLearningD1(
 function baseState(overrides: Partial<AtomicState> = {}): AtomicState {
     return {
         job: makeJob(),
+        taskFence: "state:current",
         sources: new Map(),
         knowledge: new Map(),
         evidence: new Map(),
@@ -446,6 +454,41 @@ describe("atomic learning step persistence", () => {
             expect(statement.sql).toContain("lease_token");
             expect(statement.sql).toContain("lease_until >");
         }
+    });
+
+    it("publishes no learning side effects when the task-state fence changed", async () => {
+        const oldSource = sourceRow(makeSource({ sourceId: "src-old" }));
+        const d1 = createAtomicLearningD1(baseState({
+            sources: new Map([[oldSource.source_id, oldSource]]),
+        }));
+
+        const completed = await completeLearningJobStep({ DB: d1.database }, {
+            jobId: "learn-test",
+            ownerUid: "user-1",
+            expectedRevision: 4,
+            leaseToken: "lease-current",
+            status: "ready",
+            work: { completedNeeds: 1 },
+            resultIds: ["know-current"],
+            taskStateFence: "state:stale",
+            sources: [makeSource({ sourceId: "src-current" })],
+            knowledge: knowledgeInput(),
+            now: NOW,
+        });
+
+        const state = d1.snapshot();
+        expect(completed).toBeNull();
+        expect([...state.sources.keys()]).toEqual(["src-old"]);
+        expect(state.knowledge.size).toBe(0);
+        expect(state.evidence.size).toBe(0);
+        expect(state.job).toMatchObject({
+            status: "verifying",
+            revision: 4,
+            work_json: "{}",
+            result_ids_json: "[]",
+            lease_token: "lease-current",
+            lease_until: 0,
+        });
     });
 
     it("atomically replaces the source set while completing the fetching step", async () => {

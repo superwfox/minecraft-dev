@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
     canReviewKnowledgeTransition,
+    getLearningEvidenceItems,
     knowledgeIdForLearningResult,
     knowledgeStatusAt,
     reviewedKnowledgeExpiresAt,
 } from "../../functions/_lib/learning/store";
-import { makeKnowledgeItem } from "./testData";
+import { makeKnowledgeItem, makeRecipe } from "./testData";
 
 describe("knowledge review policy", () => {
     it("allows approving only the latest pending fact revision", () => {
@@ -74,5 +75,33 @@ describe("knowledge review policy", () => {
         expect(knowledgeStatusAt({ status: "active", expiresAt: now - 1 }, now)).toBe("expired");
         expect(knowledgeStatusAt({ status: "active", expiresAt: now + 1 }, now)).toBe("active");
         expect(knowledgeStatusAt({ status: "needs_review", expiresAt: now - 1 }, now)).toBe("needs_review");
+    });
+
+    it("omits malformed historical recipes from the public evidence projection", async () => {
+        const row = {
+            knowledge_id: "know-test",
+            summary: "verified fact",
+            kind: "fact",
+            confidence: 0.96,
+            status: "active",
+            scope_json: "{}",
+            payload_json: JSON.stringify({
+                recipe: makeRecipe({ notes: [] }),
+            }),
+            expires_at: 0,
+            source_id: null,
+        };
+        const db = {
+            prepare: () => ({
+                bind: () => ({
+                    all: async () => ({ results: [row] }),
+                }),
+            }),
+        } as unknown as D1Database;
+
+        const items = await getLearningEvidenceItems({ DB: db }, ["know-test"]);
+
+        expect(items).toHaveLength(1);
+        expect(items[0].recipe).toBeUndefined();
     });
 });

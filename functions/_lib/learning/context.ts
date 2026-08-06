@@ -1,4 +1,9 @@
-import type { KnowledgeItemRecord, KnowledgeNeed, KnowledgeUsed } from "./types";
+import type {
+    ImplementationRecipeV1,
+    KnowledgeItemRecord,
+    KnowledgeNeed,
+    KnowledgeUsed,
+} from "./types";
 import { learningLookupKeys } from "./assessment";
 import { findActiveKnowledge, recordKnowledgeUsage, type LearningStoreEnv } from "./store";
 
@@ -12,15 +17,108 @@ function safeText(value: string, max: number): string {
         .slice(0, max);
 }
 
+function safeCode(value: string, max: number): string {
+    return value
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, " ")
+        .replace(/<\/?(?:system|assistant|user|tool|instructions?)[^>]*>/gi, " ")
+        .replace(/```/g, "'''")
+        .trim()
+        .slice(0, max);
+}
+
+const RECIPE_INTEGRATION_KINDS = new Set<ImplementationRecipeV1["integrationKind"]>([
+    "nms",
+    "craftbukkit",
+    "version_reflection",
+    "external_plugin",
+]);
+
+function recipeText(value: unknown, max: number): string {
+    return typeof value === "string" && value.length <= max ? value.trim() : "";
+}
+
+function recipeList(value: unknown, maxItems: number, maxLength: number): string[] | null {
+    if (!Array.isArray(value) || value.length > maxItems) return null;
+    const items = value.map((item) => recipeText(item, maxLength));
+    return items.every(Boolean) ? items : null;
+}
+
+function recipeFromPayload(payload: Record<string, unknown>): ImplementationRecipeV1 | null {
+    const recipe = payload.recipe;
+    if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return null;
+    const value = recipe as Record<string, unknown>;
+    const integrationKind = typeof value.integrationKind === "string"
+        && RECIPE_INTEGRATION_KINDS.has(value.integrationKind as ImplementationRecipeV1["integrationKind"])
+        ? value.integrationKind as ImplementationRecipeV1["integrationKind"]
+        : undefined;
+    const title = recipeText(value.title, 160);
+    const code = recipeText(value.code, 10_000);
+    const imports = recipeList(value.imports, 24, 240);
+    const versionScope = recipeText(value.versionScope, 300);
+    const prerequisites = recipeList(value.prerequisites, 8, 400);
+    const notes = recipeList(value.notes, 8, 500);
+    const sourceIds = recipeList(value.sourceIds, 6, 100);
+    if (value.schemaVersion !== "implementation_recipe.v1"
+        || value.language !== "java"
+        || !integrationKind
+        || !title
+        || code.length < 40
+        || !imports?.length
+        || !versionScope
+        || !prerequisites?.length
+        || !notes?.length
+        || !sourceIds?.length) return null;
+    return {
+        schemaVersion: "implementation_recipe.v1",
+        language: "java",
+        integrationKind,
+        title,
+        code,
+        imports,
+        versionScope,
+        prerequisites,
+        notes,
+        sourceIds,
+    };
+}
+
 function itemBlock(item: KnowledgeItemRecord): string {
-    const payload = JSON.stringify(item.payload);
-    return [
+    const recipe = recipeFromPayload(item.payload);
+    const rawReason = item.payload.learningReason;
+    const reason = rawReason && typeof rawReason === "object" && !Array.isArray(rawReason)
+        ? rawReason as Record<string, unknown>
+        : null;
+    const lines = [
         `【知识 ${item.knowledgeId}】`,
         `适用范围：${safeText(JSON.stringify(item.scope), 800)}`,
         `结论：${safeText(item.summary, 1_000)}`,
-        `结构化事实：${safeText(payload, 1_500)}`,
-        `置信度：${item.confidence.toFixed(2)}；版本：r${item.revision}`,
-    ].join("\n");
+    ];
+    if (reason) {
+        const code = safeText(String(reason.code ?? ""), 80);
+        const message = safeText(String(reason.message ?? ""), 500);
+        if (code || message) lines.push(`学习原因：${[code, message].filter(Boolean).join("；")}`);
+    }
+    if (recipe) {
+        lines.push(
+            `实现通例：${safeText(recipe.title, 200)}`,
+            `集成类型：${safeText(recipe.integrationKind, 80)}`,
+            `适用版本：${safeText(recipe.versionScope, 400)}`,
+            `前置条件：${recipe.prerequisites.map((item) => safeText(item, 400)).join("；")}`,
+            `Imports：\n${recipe.imports.map((item) => safeCode(item, 240)).join("\n")}`,
+            `Java 方法：\n${safeCode(recipe.code, 10_000)}`,
+        );
+        if (recipe.notes.length) {
+            lines.push(`使用说明：${recipe.notes.map((item) => safeText(item, 500)).join("；")}`);
+        }
+    } else {
+        const factPayload = { ...item.payload };
+        delete factPayload.recipe;
+        if (Object.keys(factPayload).length) {
+            lines.push(`结构化事实：${safeText(JSON.stringify(factPayload), 1_500)}`);
+        }
+    }
+    lines.push(`置信度：${item.confidence.toFixed(2)}；版本：r${item.revision}`);
+    return lines.join("\n");
 }
 
 export function buildKnowledgeContext(

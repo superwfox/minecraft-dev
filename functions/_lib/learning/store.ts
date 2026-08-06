@@ -1,8 +1,10 @@
 import type {
+    ImplementationRecipeV1,
     KnowledgeItemRecord,
     KnowledgeNeed,
     KnowledgeStatus,
     LearningEvidenceItem,
+    LearningEvidenceReason,
     LearningJobRecord,
     LearningJobStatus,
     LearningJobWork,
@@ -289,6 +291,7 @@ export async function completeLearningJobStep(
         work: LearningJobWork;
         resultIds?: string[];
         error?: string;
+        taskStateFence?: string;
         sources?: LearningSourceRecord[];
         knowledge?: KnowledgeItemCreateInput & { knowledgeId: string };
         now?: number;
@@ -298,6 +301,38 @@ export async function completeLearningJobStep(
     const now = input.now ?? Date.now();
     const statements: D1PreparedStatement[] = [];
     const sources = input.sources ?? [];
+    const knowledge = input.knowledge;
+
+    if ((input.sources || knowledge) && input.taskStateFence) {
+        statements.push(db.prepare(`
+            UPDATE learning_jobs
+            SET lease_until = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM generation_tasks AS task
+                    JOIN learning_jobs AS authorized_job
+                      ON authorized_job.generation_task_id = task.task_id
+                    WHERE authorized_job.job_id = ?1
+                      AND authorized_job.owner_uid = ?2
+                      AND task.owner_uid = ?2
+                      AND task.planner_lease_token = ?6
+                ) THEN lease_until
+                ELSE 0
+            END
+            WHERE job_id = ?1
+              AND owner_uid = ?2
+              AND revision = ?3
+              AND lease_token = ?4
+              AND lease_until > ?5
+        `).bind(
+            input.jobId,
+            input.ownerUid,
+            input.expectedRevision,
+            input.leaseToken,
+            now,
+            input.taskStateFence,
+        ));
+    }
 
     if (input.sources) {
         statements.push(db.prepare(`
@@ -359,7 +394,6 @@ export async function completeLearningJobStep(
         ));
     }
 
-    const knowledge = input.knowledge;
     if (knowledge) {
         const knowledgeNow = knowledge.now ?? now;
         const existing = await db.prepare(`SELECT * FROM knowledge_items WHERE knowledge_id = ?1`)
@@ -982,6 +1016,93 @@ export async function getKnowledgeItemsByIds(
     }));
 }
 
+const PUBLIC_LEARNING_REASON_CODES = new Set<LearningEvidenceReason["code"]>([
+    "nms_version_sensitive",
+    "reflection_contract",
+    "external_plugin_contract",
+    "persistent_diagnostic_gap",
+]);
+const PUBLIC_INTEGRATION_KINDS = new Set<ImplementationRecipeV1["integrationKind"]>([
+    "nms",
+    "craftbukkit",
+    "version_reflection",
+    "external_plugin",
+]);
+
+function publicPayloadText(value: unknown, max: number): string {
+    return typeof value === "string"
+        ? value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, " ").trim().slice(0, max)
+        : "";
+}
+
+function publicPayloadList(value: unknown, maxItems: number, maxLength: number): string[] | null {
+    if (!Array.isArray(value) || value.length > maxItems) return null;
+    const items = value.map((item) => publicPayloadText(item, maxLength));
+    return items.every(Boolean) ? items : null;
+}
+
+function publicRecipeText(value: unknown, max: number): string {
+    if (typeof value !== "string" || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value)) return "";
+    const normalized = value.trim();
+    return normalized.length <= max ? normalized : "";
+}
+
+function publicRecipeList(value: unknown, maxItems: number, maxLength: number): string[] | null {
+    if (!Array.isArray(value) || value.length === 0 || value.length > maxItems) return null;
+    const items = value.map((item) => publicRecipeText(item, maxLength));
+    return items.every(Boolean) ? items : null;
+}
+
+function publicLearningReason(payload: Record<string, unknown>): LearningEvidenceReason | undefined {
+    const value = payload.learningReason;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const code = typeof raw.code === "string" && PUBLIC_LEARNING_REASON_CODES.has(raw.code as LearningEvidenceReason["code"])
+        ? raw.code as LearningEvidenceReason["code"]
+        : undefined;
+    const message = publicPayloadText(raw.message, 500);
+    return code && message ? { code, message } : undefined;
+}
+
+function publicImplementationRecipe(payload: Record<string, unknown>): ImplementationRecipeV1 | undefined {
+    const value = payload.recipe;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const raw = value as Record<string, unknown>;
+    const integrationKind = typeof raw.integrationKind === "string"
+        && PUBLIC_INTEGRATION_KINDS.has(raw.integrationKind as ImplementationRecipeV1["integrationKind"])
+        ? raw.integrationKind as ImplementationRecipeV1["integrationKind"]
+        : undefined;
+    const title = publicRecipeText(raw.title, 160);
+    const code = publicRecipeText(raw.code, 10_000);
+    const imports = publicRecipeList(raw.imports, 24, 240);
+    const versionScope = publicRecipeText(raw.versionScope, 300);
+    const prerequisites = publicRecipeList(raw.prerequisites, 8, 400);
+    const notes = publicRecipeList(raw.notes, 8, 500);
+    const sourceIds = publicRecipeList(raw.sourceIds, 6, 100);
+    if (raw.schemaVersion !== "implementation_recipe.v1"
+        || raw.language !== "java"
+        || !integrationKind
+        || !title
+        || !code
+        || !imports
+        || !versionScope
+        || !prerequisites
+        || !notes
+        || !sourceIds) return undefined;
+    return {
+        schemaVersion: "implementation_recipe.v1",
+        language: "java",
+        integrationKind,
+        title,
+        code,
+        imports,
+        versionScope,
+        prerequisites,
+        notes,
+        sourceIds,
+    };
+}
+
 export async function getLearningEvidenceItems(
     env: LearningStoreEnv,
     knowledgeIds: string[],
@@ -991,7 +1112,8 @@ export async function getLearningEvidenceItems(
     const placeholders = unique.map((_, index) => `?${index + 1}`).join(", ");
     const rows = await dbOf(env).prepare(`
         SELECT
-            k.knowledge_id, k.summary, k.kind, k.confidence, k.status, k.scope_json, k.expires_at,
+            k.knowledge_id, k.summary, k.kind, k.confidence, k.status, k.scope_json,
+            k.payload_json, k.expires_at,
             s.source_id, s.title, s.canonical_url, s.source_type, s.authority,
             s.published_at, s.fetched_at,
             e.excerpt AS evidence_excerpt, e.relation
@@ -1005,6 +1127,9 @@ export async function getLearningEvidenceItems(
     for (const row of rows.results) {
         let item = items.get(row.knowledge_id);
         if (!item) {
+            const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+            const reason = publicLearningReason(payload);
+            const recipe = publicImplementationRecipe(payload);
             item = {
                 knowledgeId: row.knowledge_id,
                 summary: row.summary,
@@ -1015,6 +1140,8 @@ export async function getLearningEvidenceItems(
                     expiresAt: Number(row.expires_at) || 0,
                 }),
                 scope: row.scope_json,
+                ...(reason ? { reason } : {}),
+                ...(recipe ? { recipe } : {}),
                 sources: [],
             };
             items.set(row.knowledge_id, item);

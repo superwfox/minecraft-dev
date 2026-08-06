@@ -3,9 +3,14 @@ import { getSkillBundles } from "../../_lib/skills";
 import { litAxes } from "../../_lib/complexity";
 import { accumulateCost } from "../../_lib/quota";
 import { resolveLLM } from "../../_lib/llm";
-import { buildApiContractContext, partitionKnowledgeNeedsByApiContracts } from "../../_lib/apiContracts";
+import { buildApiContractContext } from "../../_lib/apiContracts";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
-import type { KnowledgeNeed } from "../../_lib/learning/types";
+import {
+    assessPlannerLearningAuthorization,
+    assessPlannerResultAuthorization,
+    samePlannerResultAuthorization,
+    type PlannerResultAuthorization,
+} from "../../_lib/learning/plannerAuthorization";
 import {
     acquireTaskPlannerLease,
     assertBoundTaskStoreSchema,
@@ -150,11 +155,17 @@ export function shouldReusePersistedPlannerResult(
     state: any,
     replan: unknown,
     plannerRequestId = "",
+    expectedAuthorization?: PlannerResultAuthorization,
 ): boolean {
     const sameExplicitReplan = replan === true
         && !!plannerRequestId
         && state?.plannerRequestId === plannerRequestId;
-    return (replan !== true || sameExplicitReplan)
+    const authorizationMatches = !expectedAuthorization || samePlannerResultAuthorization(
+        state?.plannerResultAuthorization,
+        expectedAuthorization,
+    );
+    return authorizationMatches
+        && (replan !== true || sameExplicitReplan)
         && state?.status === "planning"
         && isValidBlueprint(state.mainBlueprint)
         && Array.isArray(state.plan)
@@ -382,8 +393,49 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
         const state = JSON.parse(latestAfterLeaseRaw);
 
-        // 所有结果复用都在租约内读取最新状态，避免正在 replan 时返回旧计划。
-        if (shouldReusePersistedPlannerResult(state, body.replan, plannerRequestId)) {
+        // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
+        const chosenPathId = typeof body.chosenPathId === "string" ? body.chosenPathId.trim() : "";
+        const gradePaths = Array.isArray(state.grade?.paths) ? state.grade.paths : [];
+        const effectivePathId = chosenPathId || state.grade?.chosenPathId || "";
+        const validPath = !!effectivePathId && gradePaths.some((path: any) => path?.id === effectivePathId);
+        if (chosenPathId && !validPath) {
+            return new Response(JSON.stringify({ error: "无效的实现路径", code: "INVALID_PATH" }), {
+                status: 400, headers: { "Content-Type": "application/json" },
+            });
+        }
+        if (state.grade?.gateRequired && !effectivePathId) {
+            return new Response(JSON.stringify({ error: "请先在确认门选择实现路径", code: "PATH_NOT_CONFIRMED" }), {
+                status: 400, headers: { "Content-Type": "application/json" },
+            });
+        }
+        if (effectivePathId && !validPath) {
+            return new Response(JSON.stringify({ error: "已选实现路径不再有效", code: "INVALID_PATH" }), {
+                status: 409, headers: { "Content-Type": "application/json" },
+            });
+        }
+        if (chosenPathId && state.grade) state.grade.chosenPathId = chosenPathId;
+
+        const [plannerAssessment, plannerResultAuthorization] = await Promise.all([
+            assessPlannerLearningAuthorization(state),
+            assessPlannerResultAuthorization(state),
+        ]);
+        if (!plannerAssessment || !plannerResultAuthorization) {
+            return new Response(JSON.stringify({
+                error: "Planner 路径授权已失效，请重新确认实现路径",
+                code: "PLANNER_AUTHORIZATION_EXPIRED",
+            }), {
+                status: 409,
+                headers: { "Content-Type": "application/json" },
+            });
+        }
+
+        // 所有结果复用都在租约内读取最新状态，并绑定生成该结果时的路径与 need 集合。
+        if (shouldReusePersistedPlannerResult(
+            state,
+            body.replan,
+            plannerRequestId,
+            plannerResultAuthorization,
+        )) {
             return plannerResultResponse(taskId, state);
         }
 
@@ -397,17 +449,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return new Response(JSON.stringify({ error: "澄清阶段尚未完成" }), {
                 status: 400, headers: { "Content-Type": "application/json" },
             });
-        }
-
-        // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
-        const chosenPathId = body.chosenPathId as string | undefined;
-        if (state.grade?.gateRequired) {
-            if (chosenPathId) state.grade.chosenPathId = chosenPathId;
-            if (!state.grade.chosenPathId) {
-                return new Response(JSON.stringify({ error: "请先在确认门选择实现路径", code: "PATH_NOT_CONFIRMED" }), {
-                    status: 400, headers: { "Content-Type": "application/json" },
-                });
-            }
         }
 
         // 据分级结果构建 plannerPrompt 的 gradeContext（点亮轴 + 所选路径）
@@ -445,13 +486,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             generatedFiles: state.generatedFiles ?? [],
         };
         const apiContractCtx = buildApiContractContext(apiContractInput);
-        const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
-            ? state.grade.knowledgeNeeds
-            : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
-        const needs = partitionKnowledgeNeedsByApiContracts(apiContractInput, rawNeeds).uncovered;
         const knowledge = await loadKnowledgeContext({
             env: context.env,
-            needs,
+            needs: plannerAssessment.needs,
             maxCharacters: 4_800,
             title: "Planner 已验证公共技术知识",
         });
@@ -613,6 +650,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.fileStatuses = fileStatuses;
         state.currentBucket = 0;
         state.plannerRequestId = plannerRequestId;
+        state.plannerResultAuthorization = plannerResultAuthorization;
         state.logs.push(`Planner 完成，${sortedFiles.length} 个文件分布在 ${totalBuckets} 个深度桶`);
 
         const committed = await withPlannerDeadline(() => putTaskWithPlannerLease(
@@ -633,7 +671,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (latestRaw) {
                 try {
                     const latest = JSON.parse(latestRaw);
-                    if (shouldReusePersistedPlannerResult(latest, body.replan, plannerRequestId)) {
+                    if (shouldReusePersistedPlannerResult(
+                        latest,
+                        body.replan,
+                        plannerRequestId,
+                        plannerResultAuthorization,
+                    )) {
                         return plannerResultResponse(taskId, latest);
                     }
                 } catch { /* wait for the current lease holder */ }

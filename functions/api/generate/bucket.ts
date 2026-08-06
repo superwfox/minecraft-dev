@@ -3,13 +3,13 @@ import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompt
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
-import type { KnowledgeNeed } from "../../_lib/learning/types";
-import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import {
-    buildApiContractContext,
-    findKnownApiIssues,
-    partitionKnowledgeNeedsByApiContracts,
-} from "../../_lib/apiContracts";
+    assessPlannerLearningAuthorization,
+    assessPlannerResultAuthorization,
+    samePlannerResultAuthorization,
+} from "../../_lib/learning/plannerAuthorization";
+import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
+import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -356,7 +356,6 @@ async function generateAndCheckFile(
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
     const uid: string = (context.data as any)?.uid || "";
-    const llm = await resolveLLM(context);
     // 默认串行（1 文件/请求，最稳）；仅当前端「超级并发」开关开启时才桶内并发（env 可覆盖并发数）。
     // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/返工，更快但更易撞
     // 单请求 CPU/时长/子请求上限被强杀 →「零进度 → 重新规划 → 失败」，故默认关闭。
@@ -377,6 +376,31 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
+    const [plannerAssessment, plannerResultAuthorization] = await Promise.all([
+        assessPlannerLearningAuthorization(state),
+        assessPlannerResultAuthorization(state),
+    ]);
+    if (!plannerAssessment || !plannerResultAuthorization || !samePlannerResultAuthorization(
+        state.plannerResultAuthorization,
+        plannerResultAuthorization,
+    )) {
+        return new Response(JSON.stringify({
+            error: "Planner 路径授权已失效，请重新规划",
+            code: "PLANNER_AUTHORIZATION_EXPIRED",
+        }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const buckets = (state.buckets ?? []) as PlanFileItem[][];
+    if (!Array.isArray(buckets) || bucketIndex < 0 || bucketIndex >= buckets.length) {
+        return new Response(JSON.stringify({ error: "无效的 bucketIndex", bucketIndex }), {
+            status: 400, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const llm = await resolveLLM(context);
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -395,13 +419,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
     };
 
-    const buckets = (state.buckets ?? []) as PlanFileItem[][];
-    if (!Array.isArray(buckets) || bucketIndex < 0 || bucketIndex >= buckets.length) {
-        return new Response(JSON.stringify({ error: "无效的 bucketIndex", bucketIndex }), {
-            status: 400, headers: { "Content-Type": "application/json" },
-        });
-    }
-
     const bucket = buckets[bucketIndex];
     const ctx = {
         projectName: state.projectName,
@@ -411,16 +428,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         javaVersion: state.javaVersion,
     };
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
-    const knowledgeContractInput = {
-        coreType: state.coreType,
-        version: state.version,
-        externalDeps: state.grade?.vector?.external_deps ?? [],
-        generatedFiles: state.generatedFiles ?? [],
-    };
-    const rawNeeds = (Array.isArray(state.grade?.knowledgeNeeds)
-        ? state.grade.knowledgeNeeds
-        : Array.isArray(state.knowledgeNeeds) ? state.knowledgeNeeds : []) as KnowledgeNeed[];
-    const needs = partitionKnowledgeNeedsByApiContracts(knowledgeContractInput, rawNeeds).uncovered;
+    const needs = plannerAssessment.needs;
     const knowledge = await loadKnowledgeContext({
         env: context.env,
         needs,

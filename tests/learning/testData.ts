@@ -1,4 +1,5 @@
 import type {
+    ImplementationRecipeV1,
     KnowledgeItemRecord,
     KnowledgeNeed,
     LearningSourceRecord,
@@ -56,10 +57,31 @@ export function makeSource(overrides: Partial<LearningSourceRecord> = {}): Learn
     };
 }
 
+export function makeRecipe(overrides: Partial<ImplementationRecipeV1> = {}): ImplementationRecipeV1 {
+    return {
+        schemaVersion: "implementation_recipe.v1",
+        language: "java",
+        integrationKind: "external_plugin",
+        title: "Send a verified player message",
+        code: [
+            "public static void sendMessage(Player player, String message) {",
+            "    player.sendMessage(message);",
+            "}",
+        ].join("\n"),
+        imports: ["import org.bukkit.entity.Player;"],
+        versionScope: "Paper 1.21.4",
+        prerequisites: ["The player and message arguments are non-null."],
+        notes: ["Call this method from the server thread."],
+        sourceIds: ["src-official"],
+        ...overrides,
+    };
+}
+
 export function makeVerification(overrides: Partial<VerificationResult> = {}): VerificationResult {
+    const verdict = overrides.verdict ?? "supported";
     return {
         needId: "need-api",
-        verdict: "supported",
+        verdict,
         normalizedClaim: {
             symbol: "org.bukkit.entity.Player#sendMessage(java.lang.String)",
         },
@@ -72,6 +94,7 @@ export function makeVerification(overrides: Partial<VerificationResult> = {}): V
         confidence: 0.96,
         runtimeSummary: "Paper 1.21.4 exposes Player#sendMessage(String).",
         expiresInDays: 90,
+        ...(verdict === "supported" ? { recipe: makeRecipe() } : {}),
         ...overrides,
     };
 }

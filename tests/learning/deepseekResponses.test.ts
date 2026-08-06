@@ -32,19 +32,73 @@ describe("DeepSeek Responses adapter", () => {
         expect(parseResponsesResult({ status: "cancelled" }).status).toBe("failed");
     });
 
-    it("accepts only known need IDs and deduplicates candidate URLs", () => {
+    it("accepts URL reasons, canonicalizes duplicates, and keeps legacy urls compatible", () => {
         const candidates = parseLearningCandidates(`\n\`\`\`json
             {"candidates":[
-                {"needId":"need-api","urls":["https://example.com/a","https://example.com/a"," https://example.com/b "]},
-                {"needId":"unknown","urls":["https://example.com/c"]},
-                {"needId":"need-api","urls":["https://example.com/d"]}
+                {"needId":"need-api","sources":[
+                    {"url":"https://EXAMPLE.com:443/a#first","reason":"Check the official versioned API signature."},
+                    {"url":"https://example.com/a#second","reason":"This duplicate must be ignored safely."},
+                    {"url":"https://example.com/b","reason":"short"},
+                    {"url":"https://example.com/c","reason":"Check the release-specific implementation contract."}
+                ]}
             ]}
         \`\`\``, [makeNeed()]);
 
         expect(candidates).toEqual([{
             needId: "need-api",
-            urls: ["https://example.com/a", "https://example.com/b"],
+            sources: [
+                {
+                    url: "https://EXAMPLE.com:443/a#first",
+                    reason: "Check the official versioned API signature.",
+                },
+                {
+                    url: "https://example.com/c",
+                    reason: "Check the release-specific implementation contract.",
+                },
+            ],
         }]);
+
+        expect(parseLearningCandidates(JSON.stringify({
+            candidates: [{
+                needId: "need-api",
+                urls: ["https://example.com/legacy"],
+            }],
+        }), [makeNeed()])).toEqual([{
+            needId: "need-api",
+            sources: [{
+                url: "https://example.com/legacy",
+                reason: "旧版发现结果未记录该 URL 的搜索理由",
+            }],
+        }]);
+    });
+
+    it("rejects overlong URL reasons instead of truncating and accepting them", () => {
+        expect(parseLearningCandidates(JSON.stringify({
+            candidates: [{
+                needId: "need-api",
+                sources: [{
+                    url: "https://example.com/overlong",
+                    reason: "x".repeat(241),
+                }],
+            }],
+        }), [makeNeed()])).toEqual([]);
+    });
+
+    it("rejects candidate and source arrays beyond the declared schema limits", () => {
+        const sources = ["a", "b", "c", "d"].map((suffix) => ({
+            url: `https://example.com/${suffix}`,
+            reason: `Check official source ${suffix} for the exact API contract.`,
+        }));
+
+        expect(() => parseLearningCandidates(JSON.stringify({
+            candidates: [{ needId: "need-api", sources }],
+        }), [makeNeed()])).toThrow("discovery_source_bounds");
+        expect(() => parseLearningCandidates(JSON.stringify({
+            candidates: [
+                { needId: "need-api", sources: sources.slice(0, 1) },
+                { needId: "need-api", sources: sources.slice(1, 2) },
+            ],
+        }), [makeNeed()])).toThrow("discovery_candidate_bounds");
     });
 
     it("normalizes usage without allowing cached tokens to exceed input", () => {
@@ -91,8 +145,19 @@ describe("DeepSeek Responses adapter", () => {
                     candidates: {
                         maxItems: 1,
                         items: {
+                            required: ["needId", "sources"],
                             properties: {
                                 needId: { enum: ["need-api"] },
+                                sources: {
+                                    minItems: 1,
+                                    maxItems: 3,
+                                    items: {
+                                        required: ["url", "reason"],
+                                        properties: {
+                                            reason: { minLength: 8, maxLength: 240 },
+                                        },
+                                    },
+                                },
                             },
                         },
                     },

@@ -18,6 +18,15 @@ export interface DiagnosticProgress {
 }
 
 const DEPENDENCY_ERROR = /(?:Could not collect dependencies|Failed to read artifact descriptor|Could not transfer artifact|DependencyResolutionException|Non-resolvable parent POM|PluginResolutionException)/i;
+const MAVEN_INFRASTRUCTURE_ERROR = /(?:Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|org\.apache\.maven\.plugins|maven-default-http-blocker|Connection (?:timed out|refused|reset)|Read timed out|UnknownHostException|Unknown host|Name or service not known|Temporary failure in name resolution|Network is unreachable|SSLHandshakeException|PKIX path building failed|status code:\s*(?:429|5\d\d)|HTTP\s+(?:429|5\d\d))/i;
+
+export function isBuildInfrastructureDiagnostic(diagnostic: BuildDiagnostic): boolean {
+    if (diagnostic.category !== "dependency") return false;
+    return MAVEN_INFRASTRUCTURE_ERROR.test([
+        diagnostic.message,
+        ...diagnostic.details,
+    ].join(" "));
+}
 
 export function cleanBuildLogLine(line: string): string {
     return line
@@ -91,7 +100,7 @@ export function parseBuildDiagnostics(fullLog: string): BuildDiagnostic[] {
         });
     }
 
-    if (diagnostics.size === 0 && DEPENDENCY_ERROR.test(fullLog)) {
+    if (DEPENDENCY_ERROR.test(fullLog)) {
         const dependencyLines = lines
             .map(cleanBuildLogLine)
             .filter((line) => DEPENDENCY_ERROR.test(line))

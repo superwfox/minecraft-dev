@@ -104,6 +104,7 @@ export function learningSnapshot(
             totalNeeds: job?.needs.length ?? 0,
             completedNeeds,
             sourceCount,
+            searchedSourceCount: job?.work.searchedSources?.length ?? 0,
             message: fallback?.message
                 || (reasonCode ? learningReasonMessage(reasonCode) : job ? STATUS_MESSAGES[job.status] : ""),
             reasonCode,

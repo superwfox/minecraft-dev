@@ -13,17 +13,16 @@ import {
     learningOutboundRemainingMs,
     learningStageBudget,
     learningVerificationFailureReason,
+    refreshLearningInactivity,
 } from "../../functions/_lib/learning/deadline";
+import type { LearningJobWork } from "../../functions/_lib/learning/types";
 
-function timingJob(createdAt: number, deadlineAt?: number) {
-    return {
-        createdAt,
-        work: deadlineAt === undefined ? {} : { deadlineAt },
-    };
+function timingJob(createdAt: number, work: LearningJobWork = {}) {
+    return { createdAt, work };
 }
 
-describe("learning job deadline", () => {
-    it("clamps the client remaining budget to one through 300 seconds", () => {
+describe("learning inactivity deadline", () => {
+    it("clamps one inactivity window to one through 300 seconds", () => {
         expect(clampLearningRemainingMs(undefined)).toBe(LEARNING_JOB_BUDGET_MS);
         expect(clampLearningRemainingMs(Number.NaN)).toBe(LEARNING_JOB_BUDGET_MS);
         expect(clampLearningRemainingMs(500_000)).toBe(LEARNING_JOB_BUDGET_MS);
@@ -32,21 +31,42 @@ describe("learning job deadline", () => {
         expect(createLearningDeadlineAt(1_700_000_000_000, 45_000)).toBe(1_700_000_045_000);
     });
 
-    it("uses the stored deadline without allowing retries to extend the hard limit", () => {
+    it("keeps legacy deadlines but lets persisted progress start a fresh window", () => {
         const createdAt = 1_700_000_000_000;
 
         expect(learningJobTiming(timingJob(createdAt))).toEqual({
             startedAt: createdAt,
+            lastProgressAt: createdAt,
             deadlineAt: createdAt + LEARNING_JOB_BUDGET_MS,
         });
-        expect(learningJobTiming(timingJob(createdAt, createdAt + 240_000))).toEqual({
+        expect(learningJobTiming(timingJob(createdAt, {
+            deadlineAt: createdAt + 240_000,
+        }))).toEqual({
             startedAt: createdAt,
+            lastProgressAt: createdAt,
             deadlineAt: createdAt + 240_000,
         });
-        expect(learningJobTiming(timingJob(createdAt, createdAt + 900_000)).deadlineAt)
-            .toBe(createdAt + LEARNING_JOB_BUDGET_MS);
-        expect(learningJobTiming(timingJob(createdAt, createdAt - 1)).deadlineAt)
-            .toBe(createdAt + LEARNING_JOB_BUDGET_MS);
+        expect(learningJobTiming(timingJob(createdAt, {
+            deadlineAt: createdAt + 900_000,
+        })).deadlineAt).toBe(createdAt + 900_000);
+        expect(learningJobTiming(timingJob(createdAt, {
+            deadlineAt: createdAt - 1,
+        })).deadlineAt).toBe(createdAt + LEARNING_JOB_BUDGET_MS);
+
+        const progressedAt = createdAt + 260_000;
+        const refreshed = refreshLearningInactivity({ deadlineAt: createdAt + 280_000 }, progressedAt);
+        expect(refreshed).toEqual({
+            deadlineAt: createdAt + 280_000,
+            lastProgressAt: progressedAt,
+            inactivityDeadlineAt: progressedAt + LEARNING_JOB_BUDGET_MS,
+        });
+        expect(learningJobTiming(timingJob(createdAt, refreshed))).toEqual({
+            startedAt: createdAt,
+            lastProgressAt: progressedAt,
+            deadlineAt: progressedAt + LEARNING_JOB_BUDGET_MS,
+        });
+        expect(learningJobRemainingMs(timingJob(createdAt, refreshed), progressedAt + 20_000))
+            .toBe(LEARNING_JOB_BUDGET_MS - 20_000);
     });
 
     it("reserves final status and persistence time before starting outbound work", () => {
@@ -68,7 +88,7 @@ describe("learning job deadline", () => {
         });
     });
 
-    it("bounds leases by the stage, outbound reserve, and hard deadline", () => {
+    it("bounds leases by the stage, outbound reserve, and inactivity deadline", () => {
         const createdAt = 1_700_000_000_000;
         const job = timingJob(createdAt);
 
@@ -81,7 +101,7 @@ describe("learning job deadline", () => {
             .toBe(LEARNING_PERSIST_RESERVE_MS);
     });
 
-    it("preserves a full verifier timeout unless the job deadline clipped its budget", () => {
+    it("preserves a verifier timeout unless the inactivity deadline clipped its budget", () => {
         expect(learningVerificationFailureReason("verification_timeout", false))
             .toBe("verification_timeout");
         expect(learningVerificationFailureReason("verification_timeout", true))

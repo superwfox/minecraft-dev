@@ -53,7 +53,7 @@
           </div>
           <div v-if="!learningTerminal" class="learning-time">
             <strong>{{ remainingTimeLabel }}</strong>
-            <span>最长约 5 分钟</span>
+            <span>连续 5 分钟无有效进展后停止</span>
           </div>
           <div v-else class="learning-outcome">{{ learningOutcomeLabel }}</div>
         </div>
@@ -77,8 +77,12 @@
             <span>技术缺口</span>
           </div>
           <div class="learning-metric">
+            <strong>{{ genTask.learningProgress.searchedSourceCount }}</strong>
+            <span>搜索 URL</span>
+          </div>
+          <div class="learning-metric">
             <strong>{{ genTask.learningProgress.sourceCount }}</strong>
-            <span>证据来源</span>
+            <span>有效证据</span>
           </div>
           <div class="learning-metric">
             <strong>{{ activeKnowledgeCount }}</strong>
@@ -95,6 +99,7 @@
         </div>
       </section>
       <LearningEvidence :task-id="genTask.taskId" :knowledge-count="evidenceKnowledgeCount"
+                        :searched-source-count="genTask.learningProgress.searchedSourceCount"
                         :learning-job-id="genTask.learningProgress.jobId"
                         :learning-stage="genTask.learningProgress.stage"
                         :learning-status="genTask.learningProgress.status"
@@ -292,7 +297,10 @@ function learningStoppedStep(): number {
         : -1;
     if (lastActiveStep >= 0) return lastActiveStep;
     const reason = progress.reasonCode || "";
-    if (reason.startsWith("verification_") || reason === "unresolved_knowledge_needs") return 3;
+    if (reason.startsWith("verification_")
+        || reason === "unresolved_knowledge_needs"
+        || reason === "planner_authorization_expired"
+        || reason === "fix_authorization_expired") return 3;
     if (reason.startsWith("source_") || reason === "no_fetchable_sources") return 2;
     if (reason.startsWith("discovery_") || reason === "no_candidate_sources") return 1;
     if (progress.completedNeeds > 0 || progress.sourceCount > 0) return 3;
@@ -723,7 +731,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .learning-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  grid-template-columns: repeat(5, minmax(72px, 1fr));
   padding-top: 10px;
   border-top: 1px solid rgba(244, 241, 236, 0.1);
 }
@@ -1001,7 +1009,8 @@ watch(() => genTask.streamingContent, async () => {
   .learning-track { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 8px; }
   .learning-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
   .learning-metric { padding: 0 10px; }
-  .learning-metric:nth-child(3) {
+  .learning-metric:nth-child(3),
+  .learning-metric:nth-child(5) {
     padding-left: 0;
     border-left: 0;
   }
