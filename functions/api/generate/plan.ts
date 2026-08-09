@@ -324,6 +324,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             plan: [],
             buckets: [],
             fileStatuses: {},
+            generationCheckpoints: {},
             currentBucket: 0,
             generatedFiles: [],
             currentFileIndex: 0,
@@ -648,6 +649,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.plan = sortedFiles;
         state.buckets = buckets;
         state.fileStatuses = fileStatuses;
+        state.generationCheckpoints = {};
         state.currentBucket = 0;
         state.plannerRequestId = plannerRequestId;
         state.plannerResultAuthorization = plannerResultAuthorization;

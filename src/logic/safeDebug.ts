@@ -30,13 +30,18 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const BUCKET_DEBUG_MESSAGES = new Set([
-    "callAI:req", "callAI:retry", "callAI:http", "callAI:http-err", "callAI:done", "callAI:throw",
-    "stream:req", "stream:retry", "stream:http", "stream:http-err", "stream:done", "stream:throw",
+    "callAI:req", "callAI:retry", "callAI:http", "callAI:http-err", "callAI:body-start",
+    "callAI:body-done", "callAI:done", "callAI:throw",
+    "stream:req", "stream:retry", "stream:http", "stream:http-err", "stream:body-start",
+    "stream:body-done", "stream:done", "stream:throw",
     "file:dispatch", "file:gen-begin", "file:review-begin", "file:review-known-api",
     "file:review-parse-fail", "file:review-done", "file:rework-begin", "file:summary-begin",
     "file:summary-fallback", "file:return", "heartbeat", "process:start", "batch:begin",
     "task:begin", "task:ok", "task:throw", "result:replan", "result:ok",
-    "process:catch", "process:finally",
+    "stage:start", "stage:persisted", "charge:throw", "process:catch", "process:finally",
+]);
+const GENERATION_DEBUG_STAGES = new Set([
+    "generate", "review", "rework", "dynamic_generate", "done",
 ]);
 const BUILD_FIX_DEBUG_MESSAGES = new Set([
     "fix:diagnostics", "fix:no-target", "fix:contract-rejected", "fix:unchanged", "fix:result",
@@ -121,6 +126,21 @@ export type SafeDebugExport = {
             rawEvents: number;
             acceptedEvents: number;
             rejectedEvents: number;
+            droppedEvents: number;
+            events: Array<{
+                scope: "bucket" | "build-fix";
+                msg: string;
+                request?: string;
+                bucket?: number;
+                t?: number;
+                stage?: string;
+                status?: number;
+                ms?: number;
+                attempt?: number;
+                waitMs?: number;
+                round?: number;
+                done?: boolean;
+            }>;
             summaries: Array<{
                 scope: "bucket" | "build-fix";
                 msg: string;
@@ -235,7 +255,9 @@ function normalizeLearningEvent(value: unknown): NormalizedLearningEvent | null 
 
 function summarizeGenerationDebug(values: unknown[]): SafeDebugExport["generation"]["debug"] {
     const counts = new Map<string, { scope: "bucket" | "build-fix"; msg: string; count: number }>();
+    const events: SafeDebugExport["generation"]["debug"]["events"] = [];
     let acceptedEvents = 0;
+    let timelineEvents = 0;
     for (const value of values) {
         if (!value || typeof value !== "object") continue;
         const raw = value as Record<string, unknown>;
@@ -252,11 +274,36 @@ function summarizeGenerationDebug(values: unknown[]): SafeDebugExport["generatio
         const existing = counts.get(key);
         if (existing) existing.count++;
         else counts.set(key, { scope, msg, count: 1 });
+        if (msg !== "heartbeat") {
+            timelineEvents++;
+            const event: SafeDebugExport["generation"]["debug"]["events"][number] = { scope, msg };
+            const request = safeOpaqueId(raw.request);
+            const bucket = optionalCount(raw.bucket);
+            const t = optionalCount(raw.t);
+            const status = optionalCount(raw.status, 999);
+            const ms = optionalCount(raw.ms);
+            const attempt = optionalCount(raw.attempt, 100);
+            const waitMs = optionalCount(raw.waitMs);
+            const round = optionalCount(raw.round, 100);
+            if (request) event.request = request;
+            if (bucket !== undefined) event.bucket = bucket;
+            if (t !== undefined) event.t = t;
+            if (typeof raw.stage === "string" && GENERATION_DEBUG_STAGES.has(raw.stage)) event.stage = raw.stage;
+            if (status !== undefined) event.status = status;
+            if (ms !== undefined) event.ms = ms;
+            if (attempt !== undefined) event.attempt = attempt;
+            if (waitMs !== undefined) event.waitMs = waitMs;
+            if (round !== undefined) event.round = round;
+            if (typeof raw.done === "boolean") event.done = raw.done;
+            events.push(event);
+        }
     }
     return {
         rawEvents: values.length,
         acceptedEvents,
         rejectedEvents: Math.max(0, values.length - acceptedEvents),
+        droppedEvents: Math.max(0, timelineEvents - SAFE_DEBUG_EVENT_LIMIT),
+        events: events.slice(-SAFE_DEBUG_EVENT_LIMIT),
         summaries: [...counts.values()].sort((left, right) =>
             left.scope.localeCompare(right.scope) || left.msg.localeCompare(right.msg),
         ),
@@ -365,7 +412,13 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
     const overEventLimit = Math.max(0, normalizedLearningEvents.length - SAFE_DEBUG_EVENT_LIMIT);
     const invalidEvents = Math.max(0, rawLearningEvents.length - normalizedLearningEvents.length);
     const events = normalizedLearningEvents.slice(-SAFE_DEBUG_EVENT_LIMIT).map(publicLearningEvent);
-    let droppedEvents = safeCount(source.learningDebugDroppedEvents) + overEventLimit + invalidEvents;
+    const generationDebug = summarizeGenerationDebug(
+        Array.isArray(source.debugLog) ? source.debugLog : [],
+    );
+    let droppedEvents = safeCount(source.learningDebugDroppedEvents)
+        + overEventLimit
+        + invalidEvents
+        + generationDebug.droppedEvents;
     let truncated = droppedEvents > 0;
 
     const timestamp = Number.isFinite(now) && now >= 0 && now <= 8_640_000_000_000_000
@@ -375,7 +428,6 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
         ? source.learningProgress
         : {} as SafeDebugSource["learningProgress"];
     const phase = GENERATION_PHASES.has(source.phase) ? source.phase : "idle";
-    const debugValues = Array.isArray(source.debugLog) ? source.debugLog : [];
     const diagnostics = Array.isArray(source.buildDiagnostics) ? source.buildDiagnostics : [];
     const files = Array.isArray(source.files) ? source.files : [];
 
@@ -396,7 +448,7 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
             plannerAttempt: safeCount(source.plannerAttempt),
             plannerReplan: !!source.plannerReplan,
             files: summarizeFiles(files),
-            debug: summarizeGenerationDebug(debugValues),
+            debug: generationDebug,
         },
         learning: {
             current: {
@@ -419,7 +471,21 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
     let payload = makePayload();
     while (events.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
         const ordinaryIndex = events.findIndex((event) => !isPriorityLearningEvent(event));
-        events.splice(ordinaryIndex >= 0 ? ordinaryIndex : 0, 1);
+        if (ordinaryIndex < 0) break;
+        events.splice(ordinaryIndex, 1);
+        droppedEvents++;
+        truncated = true;
+        payload = makePayload();
+    }
+    while (generationDebug.events.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
+        generationDebug.events.shift();
+        generationDebug.droppedEvents++;
+        droppedEvents++;
+        truncated = true;
+        payload = makePayload();
+    }
+    while (events.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
+        events.shift();
         droppedEvents++;
         truncated = true;
         payload = makePayload();

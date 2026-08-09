@@ -1,7 +1,8 @@
-import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
+import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
     assessPlannerLearningAuthorization,
@@ -201,9 +202,9 @@ async function generateSingleFile(
             review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
         } else {
             const check = dispatched.checker(filePath, content);
-            const reviewRes = await callAI(llm, check.system, check.user, true, true);
+            const reviewRes = await callAI(llm, check.system, check.user, true, reworkCount > 0);
             await charge(reviewRes);
-            try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+            try { review = JSON.parse(stripFences(reviewRes.content)); } catch { passed = true; break; }
         }
 
         if (review.is_ok) {
@@ -220,24 +221,14 @@ async function generateSingleFile(
 
         await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
         const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries, apiContractCtx, knowledgeContext);
-        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
+        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, false);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
 
-    // Extract summary
+    // Extract summary locally to avoid another model request.
     await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: filePath }));
-    let apiSummary: any = null;
-    try {
-        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
-        state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
-        const ext = summaryExtractPrompt(filePath, content);
-        const sumRes = await callAI(llm, ext.system, ext.user, true);
-        await charge(sumRes);
-        apiSummary = JSON.parse(sumRes.content);
-    } catch {
-        apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
-    }
+    const apiSummary = extractFileSummary(filePath, content, fileRole);
 
     return { content, apiSummary, reworkCount, failed: !passed };
 }
@@ -376,9 +367,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
                 } else {
                     const check = dispatched.checker(target.path, content);
-                    const reviewRes = await callAI(llm, check.system, check.user, true, true);
+                    const reviewRes = await callAI(llm, check.system, check.user, true, reworkCount > 0);
                     await charge(reviewRes);
-                    try { review = JSON.parse(reviewRes.content); } catch { passed = true; break; }
+                    try { review = JSON.parse(stripFences(reviewRes.content)); } catch { passed = true; break; }
                 }
 
                 if (review.is_ok) {
@@ -435,7 +426,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
                 await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries, apiContractCtx, knowledge.context);
-                const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, true);
+                const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, false);
                 await charge(rwRes);
                 content = stripFences(rwRes.content);
             }
@@ -449,19 +440,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(warnMsg);
             }
 
-            // Summary extraction for the original file
+            // Local summary extraction avoids one LLM call per file.
             await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: target.path }));
-            let apiSummary: any = null;
-            try {
-                await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 提取 ${target.path} 的 API 摘要...` }));
-                state.logs.push(`▸ 提取 ${target.path} 的 API 摘要...`);
-                const ext = summaryExtractPrompt(target.path, content);
-                const sumRes = await callAI(llm, ext.system, ext.user, true);
-                await charge(sumRes);
-                apiSummary = JSON.parse(sumRes.content);
-            } catch {
-                apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
-            }
+            const apiSummary = extractFileSummary(target.path, content, target.role);
 
             state.generatedFiles.push({ path: target.path, content, apiSummary });
             state.currentFileIndex++;

@@ -588,8 +588,8 @@ export function resetGenTask() {
     clearPersistedGenTask();
 }
 
-// 超级并发开关：默认 false（桶内串行，每个 CF 请求只做 1 文件，最稳）。
-// 开启后桶内并发生成、更快，但更易撞 Cloudflare Worker 单请求 CPU/时长/子请求上限导致「零进度 → 重新规划 → 失败」——慎用。
+// 超级并发开关：默认 false（每个请求推进一个文件阶段并立即保存）。
+// 开启后可并行推进多个文件阶段；单个阶段失败不会清空该文件此前进度。
 // 用户偏好，持久化到 localStorage。
 function loadSuperConcurrency(): boolean {
     try { return localStorage.getItem("tahai-super-concurrency") === "1"; } catch { return false; }

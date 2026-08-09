@@ -1,7 +1,8 @@
-import { reworkPrompt, summaryExtractPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
+import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
     assessPlannerLearningAuthorization,
@@ -48,21 +49,12 @@ function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-/** A simple async semaphore for bounded concurrency */
-function makeSemaphore(cap: number) {
-    let active = 0;
-    const waiters: (() => void)[] = [];
-    const acquire = async () => {
-        if (active < cap) { active++; return; }
-        await new Promise<void>(res => waiters.push(res));
-        active++;
-    };
-    const release = () => {
-        active--;
-        const next = waiters.shift();
-        if (next) next();
-    };
-    return { acquire, release };
+async function writeSSE(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+    data: any,
+): Promise<void> {
+    try { await writer.write(sseEvent(encoder, data)); } catch { /* generation continues after client disconnect */ }
 }
 
 interface BackoffOptions {
@@ -151,7 +143,9 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
             dbg("callAI:http-err", { status: resp.status, body: txt.slice(0, 400) });
             throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
         }
+        dbg("callAI:body-start", { model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
+        dbg("callAI:body-done", { model, ms: Date.now() - t0 });
         const content = data.choices?.[0]?.message?.content ?? "";
         dbg("callAI:done", { model, ms: Date.now() - t0, contentLen: content.length });
         return { content, model, usage: data.usage };
@@ -206,7 +200,9 @@ async function callAIStream(
             dbg("stream:http-err", { path: pathTag, status: resp.status, body: txt.slice(0, 400) });
             throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
         }
+        dbg("stream:body-start", { path: pathTag, model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
+        dbg("stream:body-done", { path: pathTag, model, ms: Date.now() - t0 });
         const content = data.choices?.[0]?.message?.content ?? "";
         dbg("stream:done", { path: pathTag, ms: Date.now() - t0, len: content.length });
         return { content, model, usage: data.usage };
@@ -218,40 +214,133 @@ async function callAIStream(
     }
 }
 
-interface FileGenOutput {
+type FileGenerationStage = "generate" | "review" | "rework" | "dynamic_generate";
+
+interface DynamicFileCheckpoint {
+    className: string;
     path: string;
-    content: string;
-    apiSummary: any;
-    reworkCount: number;
-    failed: boolean;
-    replan?: boolean;
-    reason?: string;
-    newFiles: { path: string; role: string; content: string; apiSummary: any }[];
+    role: string;
 }
 
-/** 生成单个文件（含 reChecker + rework + 动态缺失类补全） */
-async function generateAndCheckFile(
+interface FileGenerationCheckpoint {
+    version: 1;
+    path: string;
+    stage: FileGenerationStage;
+    content: string;
+    reworkCount: number;
+    dynamicGenDone: boolean;
+    dynamicFiles: DynamicFileCheckpoint[];
+    dynamicIndex: number;
+    lastReason: string;
+}
+
+interface GeneratedFileOutput {
+    path: string;
+    role: string;
+    content: string;
+    apiSummary: any;
+}
+
+interface FileStageOutcome {
+    path: string;
+    checkpoint: FileGenerationCheckpoint | null;
+    completed?: GeneratedFileOutput & { reworkCount: number };
+    newFiles: GeneratedFileOutput[];
+    progressed: boolean;
+    nextStage: FileGenerationStage | "done";
+}
+
+const FILE_GENERATION_STAGES = new Set<FileGenerationStage>([
+    "generate", "review", "rework", "dynamic_generate",
+]);
+
+function initialCheckpoint(path: string): FileGenerationCheckpoint {
+    return {
+        version: 1,
+        path,
+        stage: "generate",
+        content: "",
+        reworkCount: 0,
+        dynamicGenDone: false,
+        dynamicFiles: [],
+        dynamicIndex: 0,
+        lastReason: "",
+    };
+}
+
+function checkpointFor(state: any, path: string): FileGenerationCheckpoint {
+    const raw = state.generationCheckpoints?.[path];
+    if (!raw || raw.version !== 1 || raw.path !== path || !FILE_GENERATION_STAGES.has(raw.stage)) {
+        return initialCheckpoint(path);
+    }
+    const checkpoint: FileGenerationCheckpoint = {
+        version: 1,
+        path,
+        stage: raw.stage,
+        content: typeof raw.content === "string" ? raw.content : "",
+        reworkCount: Math.max(0, Math.min(MAX_REWORK, Number(raw.reworkCount) || 0)),
+        dynamicGenDone: !!raw.dynamicGenDone,
+        dynamicFiles: Array.isArray(raw.dynamicFiles)
+            ? raw.dynamicFiles.filter((item: any) => item
+                && typeof item.className === "string"
+                && typeof item.path === "string"
+                && typeof item.role === "string")
+                .map((item: any) => ({ className: item.className, path: item.path, role: item.role }))
+                .slice(0, MAX_DYNAMIC_GEN)
+            : [],
+        dynamicIndex: Math.max(0, Number(raw.dynamicIndex) || 0),
+        lastReason: typeof raw.lastReason === "string" ? raw.lastReason.slice(0, 2_000) : "",
+    };
+    if (checkpoint.stage !== "generate" && !checkpoint.content.trim()) return initialCheckpoint(path);
+    if (checkpoint.stage === "dynamic_generate" && checkpoint.dynamicIndex >= checkpoint.dynamicFiles.length) {
+        checkpoint.stage = "review";
+    }
+    return checkpoint;
+}
+
+async function logGeneration(
+    state: any,
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+    msg: string,
+    path?: string,
+): Promise<void> {
+    state.logs ??= [];
+    state.logs.push(msg);
+    await writeSSE(writer, encoder, { type: "log", path, msg });
+}
+
+function nonEmptyModelContent(result: AICallResult, stage: string): string {
+    const content = stripFences(result.content).trim();
+    if (!content) throw new Error(`${stage}模型返回空内容`);
+    return content;
+}
+
+function safeMissingClasses(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value
+        .filter((item): item is string => typeof item === "string")
+        .map(item => item.trim())
+        .filter(item => /^[A-Za-z_$][\w$]*$/.test(item)))]
+        .slice(0, MAX_DYNAMIC_GEN);
+}
+
+/** Advance one persisted file stage. Each invocation performs at most one LLM call per target. */
+async function processFileStage(
     llm: LLMProvider,
     target: PlanFileItem,
+    checkpoint: FileGenerationCheckpoint,
     ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
     summaries: FileSummary[],
     blueprint: MainBlueprint | null,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     state: any,
     knowledgeContext: string,
-    onKnowledgeApplied: () => void,
+    onKnowledgeApplied: (filePath: string) => void,
     charge: ChargeFn,
     dbg: Dbg = noopDbg,
-): Promise<FileGenOutput> {
+): Promise<FileStageOutcome> {
     const filePath = target.path;
-    const newFiles: FileGenOutput["newFiles"] = [];
-
-    await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "generating" }));
-    await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 正在生成 ${filePath}` }));
-    state.logs.push(`▸ 正在生成 ${filePath}`);
-
-    dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
-    const slice = computeSlice(target, blueprint);
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
     const apiContractInput = {
         coreType: ctx.coreType,
@@ -265,145 +354,234 @@ async function generateAndCheckFile(
         ],
     };
     const apiContractCtx = buildApiContractContext(apiContractInput);
-    const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx, knowledgeContext);
-    dbg("file:gen-begin", { path: filePath });
-    const initialRes = await callAIStream(llm, dispatched.gen.system, dispatched.gen.user, writer, encoder, filePath, false, dbg);
-    onKnowledgeApplied();
-    await charge(initialRes);
-    let content = stripFences(initialRes.content);
-
-    let reworkCount = 0;
-    let dynamicGenDone = false;
-    let passed = false;
-    let lastReason = "";
-
-    while (reworkCount < MAX_REWORK) {
-        await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reviewing" }));
-        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 审查 ${filePath}...` }));
-        state.logs.push(`▸ 审查 ${filePath}...`);
-
-        dbg("file:review-begin", { path: filePath, round: reworkCount });
-        let review: any;
-        const knownApiIssues = findKnownApiIssues(apiContractInput, content);
-        if (knownApiIssues.length) {
-            review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
-            dbg("file:review-known-api", { path: filePath, issues: knownApiIssues });
-        } else {
-            const check = dispatched.checker(filePath, content);
-            const reviewRes = await callAI(llm, check.system, check.user, true, true, dbg);
-            await charge(reviewRes);
-            try { review = JSON.parse(reviewRes.content); } catch { dbg("file:review-parse-fail", { path: filePath }); passed = true; break; }
-        }
-        dbg("file:review-done", { path: filePath, is_ok: !!review.is_ok, missing: (review.missing_classes ?? []).length });
-
-        if (review.is_ok) {
-            await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `● ${filePath} 审查通过` }));
-            state.logs.push(`● ${filePath} 审查通过`);
-            passed = true;
-            break;
-        }
-
-        // Dynamic file generation for missing classes (try once)
-        const missingClasses: string[] = review.missing_classes ?? [];
-        if (missingClasses.length > 0 && !dynamicGenDone) {
-            dynamicGenDone = true;
-            const alreadyGenerated = new Set(summaries.map(s => s.className).filter(Boolean));
-            const toGenerate = missingClasses
-                .filter(c => !alreadyGenerated.has(c))
-                .slice(0, MAX_DYNAMIC_GEN);
-
-            if (toGenerate.length > 0) {
-                await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}` }));
-                state.logs.push(`▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}`);
-
-                for (const className of toGenerate) {
-                    const newPath = `src/main/java/${ctx.packageName.replace(/\./g, "/")}/${className}.java`;
-                    const newRole = `${className} — 被 ${filePath.split("/").pop()} 引用`;
-                    const inferredFile: PlanFileItem = {
-                        path: newPath, role: newRole, order: 0,
-                        generatorType: inferGeneratorType(className, newPath),
-                    };
-                    const subDispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx, knowledgeContext);
-                    await writer.write(sseEvent(encoder, { type: "phase", path: newPath, phase: "generating" }));
-                    const subRes = await callAIStream(llm, subDispatched.gen.system, subDispatched.gen.user, writer, encoder, newPath, false, dbg);
-                    await charge(subRes);
-                    const subContent = stripFences(subRes.content);
-
-                    // Extract summary for the dynamically generated file
-                    let subSummary: any = null;
-                    try {
-                        const ext = summaryExtractPrompt(newPath, subContent);
-                        const sumRes = await callAI(llm, ext.system, ext.user, true, false, dbg);
-                        await charge(sumRes);
-                        subSummary = JSON.parse(sumRes.content);
-                    } catch {
-                        subSummary = { description: subContent.split("\n").slice(0, 3).join(" ").slice(0, 120) };
-                    }
-                    summaries.push({ path: newPath, ...subSummary });
-                    newFiles.push({ path: newPath, role: newRole, content: subContent, apiSummary: subSummary });
-                    await writer.write(sseEvent(encoder, { type: "new_file", path: newPath, role: newRole, content: subContent }));
-                    await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `● ${className} 动态生成完成` }));
-                }
-                continue; // re-check with updated summaries
-            }
-        }
-
-        // Normal rework
-        reworkCount++;
-        lastReason = review.reason ?? "";
-        const reworkMsg = `↻ ${filePath} 需修正 (${reworkCount}/${MAX_REWORK}): ${lastReason}`;
-        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: reworkMsg }));
-        state.logs.push(reworkMsg);
-        await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
-        dbg("file:rework-begin", { path: filePath, round: reworkCount });
-        const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries, apiContractCtx, knowledgeContext);
-        // 审查仍使用 pro；返工代码生成使用 flash，避免单文件请求因长推理或 pro 限流失去进度。
+    const dispatched = dispatchGen(
+        target,
+        ctx,
+        summaries,
+        computeSlice(target, blueprint),
+        skillCtx,
+        apiContractCtx,
+        knowledgeContext,
+    );
+    const outcome = (nextStage: FileGenerationStage): FileStageOutcome => ({
+        path: filePath,
+        checkpoint,
+        newFiles: [],
+        progressed: true,
+        nextStage,
+    });
+    const complete = async (): Promise<FileStageOutcome> => {
+        const apiSummary = extractFileSummary(filePath, checkpoint.content, target.role);
+        dbg("file:return", {
+            path: filePath,
+            failed: checkpoint.reworkCount >= MAX_REWORK,
+            reworkCount: checkpoint.reworkCount,
+        });
+        const doneMsg = `● ${filePath} 已完成${checkpoint.reworkCount > 0 ? ` (修正${checkpoint.reworkCount}次)` : ""}`;
+        await logGeneration(state, writer, encoder, doneMsg, filePath);
+        return {
+            path: filePath,
+            checkpoint: null,
+            completed: {
+                path: filePath,
+                role: target.role,
+                content: checkpoint.content,
+                apiSummary,
+                reworkCount: checkpoint.reworkCount,
+            },
+            newFiles: [],
+            progressed: true,
+            nextStage: "done",
+        };
+    };
+    const runRework = async (): Promise<FileStageOutcome> => {
+        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reworking" });
+        dbg("file:rework-begin", { path: filePath, round: checkpoint.reworkCount });
+        const rw = reworkPrompt(
+            filePath,
+            target.role,
+            checkpoint.content,
+            checkpoint.lastReason,
+            ctx,
+            summaries,
+            apiContractCtx,
+            knowledgeContext,
+        );
         const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, false, dbg);
         await charge(rwRes);
-        content = stripFences(rwRes.content);
+        checkpoint.content = nonEmptyModelContent(rwRes, "返工");
+        if (checkpoint.reworkCount >= MAX_REWORK) {
+            const warnMsg = `! ${filePath} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
+            await logGeneration(state, writer, encoder, warnMsg, filePath);
+            return complete();
+        }
+        checkpoint.stage = "review";
+        return outcome("review");
+    };
+
+    dbg("stage:start", { path: filePath, stage: checkpoint.stage, round: checkpoint.reworkCount });
+    if (checkpoint.stage === "generate") {
+        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "generating" });
+        await logGeneration(state, writer, encoder, `▸ 正在生成 ${filePath}`, filePath);
+        dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
+        dbg("file:gen-begin", { path: filePath });
+        const initialRes = await callAIStream(
+            llm,
+            dispatched.gen.system,
+            dispatched.gen.user,
+            writer,
+            encoder,
+            filePath,
+            false,
+            dbg,
+        );
+        await charge(initialRes);
+        checkpoint.content = nonEmptyModelContent(initialRes, "生成");
+        checkpoint.stage = "review";
+        try { onKnowledgeApplied(filePath); } catch { /* usage telemetry is best effort */ }
+        return outcome("review");
     }
 
-    if (!passed && reworkCount >= MAX_REWORK) {
-        // reChecker 是 LLM 审查、会误判（例如把合法的 public static 门面字段当成单例违规）。
-        // 耗尽 rework 后【不再触发 replan】——否则重新规划又会产出同样的文件、撞同样的审查规则，
-        // 陷入「循环生成→重新规划→再失败」直到整个任务白白失败。
-        // 改为接受当前最后一版，记 warn 继续；真正的对错交给后续编译 + 编译错误修复（ground truth）兜底。
-        const warnMsg = `! ${filePath} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
-        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: warnMsg }));
-        state.logs.push(warnMsg);
+    if (checkpoint.stage === "dynamic_generate") {
+        const dynamic = checkpoint.dynamicFiles[checkpoint.dynamicIndex];
+        if (!dynamic) {
+            checkpoint.stage = "review";
+            return outcome("review");
+        }
+        const inferredFile: PlanFileItem = {
+            path: dynamic.path,
+            role: dynamic.role,
+            order: 0,
+            generatorType: inferGeneratorType(dynamic.className, dynamic.path),
+        };
+        const subDispatched = dispatchGen(
+            inferredFile,
+            ctx,
+            summaries,
+            computeSlice(inferredFile, blueprint),
+            skillCtx,
+            apiContractCtx,
+            knowledgeContext,
+        );
+        await writeSSE(writer, encoder, { type: "phase", path: dynamic.path, phase: "generating" });
+        await logGeneration(
+            state,
+            writer,
+            encoder,
+            `▸ 动态生成 ${dynamic.className} (${checkpoint.dynamicIndex + 1}/${checkpoint.dynamicFiles.length})`,
+            filePath,
+        );
+        const subRes = await callAIStream(
+            llm,
+            subDispatched.gen.system,
+            subDispatched.gen.user,
+            writer,
+            encoder,
+            dynamic.path,
+            false,
+            dbg,
+        );
+        await charge(subRes);
+        const content = nonEmptyModelContent(subRes, "动态生成");
+        try { onKnowledgeApplied(dynamic.path); } catch { /* usage telemetry is best effort */ }
+        checkpoint.dynamicIndex++;
+        checkpoint.stage = checkpoint.dynamicIndex < checkpoint.dynamicFiles.length
+            ? "dynamic_generate"
+            : "review";
+        await logGeneration(state, writer, encoder, `● ${dynamic.className} 动态生成完成`, filePath);
+        return {
+            ...outcome(checkpoint.stage),
+            newFiles: [{
+                path: dynamic.path,
+                role: dynamic.role,
+                content,
+                apiSummary: extractFileSummary(dynamic.path, content, dynamic.role),
+            }],
+        };
     }
 
-    // Summary extraction
-    await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "summarizing" }));
-    dbg("file:summary-begin", { path: filePath });
-    let apiSummary: any = null;
-    try {
-        await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: `▸ 提取 ${filePath} 的 API 摘要...` }));
-        state.logs.push(`▸ 提取 ${filePath} 的 API 摘要...`);
-        const ext = summaryExtractPrompt(filePath, content);
-        const sumRes = await callAI(llm, ext.system, ext.user, true, false, dbg);
-        await charge(sumRes);
-        apiSummary = JSON.parse(sumRes.content);
-    } catch (e: any) {
-        dbg("file:summary-fallback", { path: filePath, msg: String(e?.message || e).slice(0, 200) });
-        apiSummary = { description: content.split("\n").slice(0, 3).join(" ").slice(0, 120) };
+    if (checkpoint.stage === "rework") return runRework();
+
+    await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reviewing" });
+    await logGeneration(state, writer, encoder, `▸ 审查 ${filePath}...`, filePath);
+    dbg("file:review-begin", { path: filePath, round: checkpoint.reworkCount });
+    let review: any;
+    let reviewUsedModel = false;
+    const knownApiIssues = findKnownApiIssues(apiContractInput, checkpoint.content);
+    if (knownApiIssues.length) {
+        review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
+        dbg("file:review-known-api", { path: filePath, issues: knownApiIssues.length });
+    } else {
+        reviewUsedModel = true;
+        const check = dispatched.checker(filePath, checkpoint.content);
+        // 首轮用快速模型；只有返工后的复审才启用深度模型，兼顾常规速度与问题文件质量。
+        const reviewRes = await callAI(llm, check.system, check.user, true, checkpoint.reworkCount > 0, dbg);
+        await charge(reviewRes);
+        try {
+            review = JSON.parse(stripFences(reviewRes.content));
+        } catch {
+            dbg("file:review-parse-fail", { path: filePath });
+            return complete();
+        }
     }
-    dbg("file:return", { path: filePath, failed: !passed, reworkCount });
+    const missingClasses = safeMissingClasses(review?.missing_classes);
+    dbg("file:review-done", { path: filePath, is_ok: !!review?.is_ok, missing: missingClasses.length });
+    if (review?.is_ok) {
+        await logGeneration(state, writer, encoder, `● ${filePath} 审查通过`, filePath);
+        return complete();
+    }
 
-    const doneMsg = `● ${filePath} 已完成${reworkCount > 0 ? ` (修正${reworkCount}次)` : ""}`;
-    state.logs.push(doneMsg);
-    await writer.write(sseEvent(encoder, { type: "log", path: filePath, msg: doneMsg }));
-    await writer.write(sseEvent(encoder, { type: "file_done", path: filePath, content }));
+    if (missingClasses.length > 0 && !checkpoint.dynamicGenDone) {
+        checkpoint.dynamicGenDone = true;
+        const alreadyGenerated = new Set([
+            ...summaries.map(summary => summary.className).filter((name): name is string => !!name),
+            ...(state.generatedFiles ?? [])
+                .map((file: any) => String(file.path || "").split("/").pop()?.replace(/\.java$/i, ""))
+                .filter((name: unknown): name is string => typeof name === "string" && !!name),
+            ...(state.plan ?? [])
+                .map((file: any) => String(file.path || "").split("/").pop()?.replace(/\.java$/i, ""))
+                .filter((name: unknown): name is string => typeof name === "string" && !!name),
+        ]);
+        const dynamicFiles = missingClasses
+            .filter(className => !alreadyGenerated.has(className))
+            .map(className => ({
+                className,
+                path: `src/main/java/${ctx.packageName.replace(/\./g, "/")}/${className}.java`,
+                role: `${className} — 被 ${filePath.split("/").pop()} 引用`,
+            }));
+        if (dynamicFiles.length > 0) {
+            checkpoint.dynamicFiles = dynamicFiles;
+            checkpoint.dynamicIndex = 0;
+            checkpoint.stage = "dynamic_generate";
+            await logGeneration(
+                state,
+                writer,
+                encoder,
+                `▸ 发现 ${dynamicFiles.length} 个缺失类，动态生成: ${dynamicFiles.map(file => file.className).join(", ")}`,
+                filePath,
+            );
+            return outcome("dynamic_generate");
+        }
+    }
 
-    return { path: filePath, content, apiSummary, reworkCount, failed: !passed, newFiles };
+    checkpoint.reworkCount++;
+    checkpoint.lastReason = String(review?.reason || "审查未通过").slice(0, 2_000);
+    checkpoint.stage = "rework";
+    await logGeneration(
+        state,
+        writer,
+        encoder,
+        `↻ ${filePath} 需修正 (${checkpoint.reworkCount}/${MAX_REWORK}): ${checkpoint.lastReason}`,
+        filePath,
+    );
+    // 已经完成模型复审时立即保存返工意图，下一请求再返工，保证单目标单请求最多一次模型调用。
+    return reviewUsedModel ? outcome("rework") : runRework();
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
     const uid: string = (context.data as any)?.uid || "";
-    // 默认串行（1 文件/请求，最稳）；仅当前端「超级并发」开关开启时才桶内并发（env 可覆盖并发数）。
-    // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/多轮返工，更快但更易撞
-    // 单请求 CPU/时长/子请求上限被强杀 →「零进度 → 重新规划 → 失败」，故默认关闭。
+    // 默认每请求推进一个文件的一个阶段；超级并发只会并行多个独立阶段，不再把整份文件工作流塞进单请求。
     let concurrency = 1;
     if (superConcurrency) {
         concurrency = Math.max(2, parseInt(context.env.GEN_CONCURRENCY || "") || SUPER_CONCURRENCY);
@@ -454,8 +632,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     };
     const flushCharge = async () => {
         if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        const entries = pendingUsage.splice(0);
+        let cost: Awaited<ReturnType<typeof accumulateCosts>>;
+        try {
+            cost = await accumulateCosts(context.env, uid, taskId, entries);
+        } catch (error) {
+            pendingUsage.unshift(...entries);
+            throw error;
+        }
         chargeFlushed = true;
-        const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) {
@@ -496,14 +681,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // 详细调试:每一步发一个 debug SSE 事件(前端累积、可下载)。t 为相对本请求起点的毫秒。
     const T0 = Date.now();
+    const debugRequest = crypto.randomUUID();
     const dbg: Dbg = (msg, extra) => {
-        writer.write(sseEvent(encoder, { type: "debug", t: Date.now() - T0, bucket: bucketIndex, msg, ...(extra || {}) })).catch(() => { });
+        writer.write(sseEvent(encoder, {
+            type: "debug",
+            request: debugRequest,
+            t: Date.now() - T0,
+            bucket: bucketIndex,
+            msg,
+            ...(extra || {}),
+        })).catch(() => { });
     };
 
     const process = (async () => {
-        // 心跳:reChecker 审查 / 摘要等非流式 LLM 调用期间(推理模型 thinking 阶段不吐 token,
-        // 首 token 可达 100s+),SSE 会长时间无字节 → Cloudflare 切断连接 → 前端收不到 result
-        // 事件 → 误判「无返回」→ 退回重新规划循环。每 12s 写个 heartbeat 维持流活着(前端忽略此事件)。
+        // 心跳:深度复审等非流式 LLM 调用期间可能长时间无响应字节；每 12s 写一次保持 SSE 活跃。
         // n=心跳序号:前端据此判断 CF Worker 的 setInterval 是否真的在跳(若无 heartbeat,则定时器未触发)。
         let hbCount = 0;
         const heartbeat = setInterval(() => {
@@ -512,165 +703,190 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             dbg("heartbeat", { n: hbCount });
         }, 12000);
         try {
-            // 每次请求只上报本批实际处理的目标，避免前端把同桶已完成文件重置为 generating。
+            // 每次请求只推进每个目标的一个持久化阶段；中断后从该阶段继续。
             const pending = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
             const targets = pending.slice(0, Math.max(1, concurrency));
+            state.generatedFiles ??= [];
+            const plannedPaths = new Set((state.plan ?? []).map((file: any) => file.path));
+            const completedBucketFiles = () => {
+                const donePaths = new Set(bucket
+                    .filter(file => state.fileStatuses?.[file.path] === "done")
+                    .map(file => file.path));
+                return state.generatedFiles
+                    .filter((file: any) => donePaths.has(file.path))
+                    .map((file: any) => ({
+                        path: file.path,
+                        content: file.content,
+                        reworkCount: Math.max(0, Number(file.reworkCount) || 0),
+                    }));
+            };
+            const dynamicFilesForClient = () => state.generatedFiles
+                .filter((file: any) => !plannedPaths.has(file.path))
+                .map((file: any) => ({
+                    path: file.path,
+                    role: typeof file.role === "string" && file.role ? file.role : "动态补全文件",
+                    content: file.content,
+                }));
             const baseSummaries = extractSummaries(state.generatedFiles);
             dbg("process:start", { bucketIndex, concurrency, superOn: !!superConcurrency, skills: state.skills?.length || 0, bucketsTotal: buckets.length });
-            await writer.write(sseEvent(encoder, {
+            await writeSSE(writer, encoder, {
                 type: "bucket_start", bucketIndex, paths: targets.map(f => f.path), concurrency,
-            }));
-            state.logs.push(`▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）`);
-            await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）` }));
-
-            // 本次只处理一批（concurrency 个）文件：避免在一个 CF Worker 请求里跑完整桶，
-            // 导致执行时长 / CPU / subrequest 超限被 CF 强杀（SSE 流静默中断 → 前端「无返回」）。
-            // state.fileStatuses 已持久化，前端会循环调用同一桶，直到收到 bucketDone:true。
-            // 共享上下文：本次桶内不互相依赖，但快照已生成的全局摘要供 dispatchGen 注入
+            });
 
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {
                 state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
                 await putTaskState(context.env, taskId, state, 3600, uid);
-                await writer.write(sseEvent(encoder, {
+                const completed = completedBucketFiles();
+                const newFiles = dynamicFilesForClient();
+                for (const newFile of newFiles) await writeSSE(writer, encoder, { type: "new_file", ...newFile });
+                await writeSSE(writer, encoder, {
                     type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
-                    completed: [], newFiles: [], errors: [],
+                    progressed: false,
+                    completed, newFiles, errors: [],
                     bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
-                }));
-                await writer.write(encoder.encode("data: [DONE]\n\n"));
-                await writer.close();
+                });
+                try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 return;
             }
 
-            // 各文件结果按完成顺序入数组
-            const results: FileGenOutput[] = [];
             const errors: { path: string; reason: string }[] = [];
-            const sem = makeSemaphore(concurrency);
-            let replanTriggered: FileGenOutput | null = null;
+            state.fileStatuses ??= {};
+            state.generationCheckpoints ??= {};
+            for (const target of targets) state.fileStatuses[target.path] = "generating";
 
-            // 每个并发任务自己捕获异常，失败也照常写入 errors 数组，避免一个失败拖垮整个桶
             dbg("batch:begin", { pending: pending.length, targets: targets.map(t => t.path) });
-            await Promise.all(targets.map(async (target) => {
-                await sem.acquire();
+            const settled = await Promise.all(targets.map(async (target): Promise<FileStageOutcome | null> => {
+                const checkpoint = checkpointFor(state, target.path);
+                dbg("task:begin", { path: target.path, stage: checkpoint.stage });
                 try {
-                    if (replanTriggered) return; // 早停
-                    state.fileStatuses ??= {};
-                    state.fileStatuses[target.path] = "generating";
-                    const localSummaries = baseSummaries.slice();
-                    dbg("task:begin", { path: target.path });
-                    try {
-                        const r = await generateAndCheckFile(
-                            llm,
-                            target,
-                            ctx,
-                            localSummaries,
-                            blueprint,
-                            writer,
-                            encoder,
-                            state,
-                            knowledge.context,
-                            () => markKnowledgeApplied(target.path),
-                            charge,
-                            dbg,
-                        );
-                        dbg("task:ok", { path: target.path, failed: r.failed, reworkCount: r.reworkCount });
-                        if (r.replan) {
-                            replanTriggered = r;
-                            state.fileStatuses[target.path] = "error";
-                        } else {
-                            state.fileStatuses[target.path] = "done";
-                            // 本批结果先合并到内存，批次出口统一落一次 D1，减少整份任务重复写入。
-                            // 默认模式每批仅一个文件，恢复粒度不变。
-                            state.generatedFiles.push({ path: r.path, content: r.content, apiSummary: r.apiSummary });
-                            for (const nf of r.newFiles) {
-                                if (!state.generatedFiles.find((g: any) => g.path === nf.path)) {
-                                    state.generatedFiles.push(nf);
-                                    state.fileStatuses[nf.path] = "done";
-                                }
-                            }
-                            state.currentFileIndex = state.generatedFiles.length;
-                        }
-                        results.push(r);
-                    } catch (taskErr: any) {
-                        const reason = taskErr?.message ? String(taskErr.message) : String(taskErr);
-                        dbg("task:throw", { path: target.path, err: taskErr?.name, msg: reason.slice(0, 400), stack: String(taskErr?.stack || "").slice(0, 600) });
-                        state.fileStatuses[target.path] = "error";
-                        errors.push({ path: target.path, reason });
-                        const failMsg = `× ${target.path} 生成异常：${reason}`;
-                        state.logs.push(failMsg);
-                        try {
-                            await writer.write(sseEvent(encoder, { type: "log", path: target.path, msg: failMsg }));
-                            await writer.write(sseEvent(encoder, { type: "file_error", path: target.path, reason }));
-                        } catch { /* writer 可能已关闭，忽略 */ }
-                    }
-                } finally {
-                    sem.release();
+                    const result = await processFileStage(
+                        llm,
+                        target,
+                        checkpoint,
+                        ctx,
+                        baseSummaries.slice(),
+                        blueprint,
+                        writer,
+                        encoder,
+                        state,
+                        knowledge.context,
+                        markKnowledgeApplied,
+                        charge,
+                        dbg,
+                    );
+                    dbg("task:ok", { path: target.path, stage: result.nextStage, done: !!result.completed });
+                    return result;
+                } catch (taskErr: any) {
+                    const reason = taskErr?.message ? String(taskErr.message) : String(taskErr);
+                    dbg("task:throw", {
+                        path: target.path,
+                        stage: checkpoint.stage,
+                        err: taskErr?.name,
+                        msg: reason.slice(0, 400),
+                        stack: String(taskErr?.stack || "").slice(0, 600),
+                    });
+                    errors.push({ path: target.path, reason });
+                    await logGeneration(state, writer, encoder, `× ${target.path} 当前阶段中断：${reason}`, target.path);
+                    return null;
                 }
             }));
-
-            // 任意文件出现异常 → 触发重新规划
-            if (!replanTriggered && errors.length > 0) {
-                replanTriggered = {
-                    path: errors[0].path,
-                    content: "", apiSummary: null,
-                    reworkCount: 0, failed: true, replan: true,
-                    reason: `桶 #${bucketIndex} 中 ${errors.length} 个文件生成异常：${errors.map(e => e.path).join(", ")}`,
-                    newFiles: [],
+            const results = settled.filter((result): result is FileStageOutcome => !!result);
+            const upsertGeneratedFile = (file: GeneratedFileOutput & { reworkCount?: number }) => {
+                const entry = {
+                    path: file.path,
+                    role: file.role,
+                    content: file.content,
+                    apiSummary: file.apiSummary,
+                    ...(file.reworkCount === undefined ? {} : { reworkCount: file.reworkCount }),
                 };
+                const index = state.generatedFiles.findIndex((generated: any) => generated.path === file.path);
+                if (index >= 0) state.generatedFiles[index] = { ...state.generatedFiles[index], ...entry };
+                else state.generatedFiles.push(entry);
+            };
+            for (const result of results) {
+                if (result.checkpoint) state.generationCheckpoints[result.path] = result.checkpoint;
+                else delete state.generationCheckpoints[result.path];
+                for (const newFile of result.newFiles) {
+                    upsertGeneratedFile(newFile);
+                    state.fileStatuses[newFile.path] = "done";
+                }
+                if (result.completed) {
+                    upsertGeneratedFile(result.completed);
+                    state.fileStatuses[result.path] = "done";
+                }
             }
 
-            if (replanTriggered) {
-                dbg("result:replan", { path: replanTriggered.path, reason: replanTriggered.reason, errors: errors.length });
-                state.status = "error";
-                state.error = replanTriggered.reason ?? "审查未通过";
-                await flushCharge();
-                await putTaskState(context.env, taskId, state, 3600, uid);
-                await writer.write(sseEvent(encoder, {
-                    type: "result", bucketIndex, replan: true,
-                    path: replanTriggered.path, reason: replanTriggered.reason,
-                }));
-                await writer.write(encoder.encode("data: [DONE]\n\n"));
-                await writer.close();
-                return;
-            }
-
-            // 本批之外是否还有未完成文件：有则桶未完成（前端会再调同一桶），无则推进到下一桶。
-            // usage 与任务状态均在此批量结算，各自最多一次 D1 写入。
-            const bucketDone = pending.length <= targets.length;
-            if (bucketDone) state.currentBucket = bucketIndex + 1;
+            const bucketDone = bucket.every(file => state.fileStatuses[file.path] === "done");
+            if (bucketDone) state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
             state.currentFileIndex = state.generatedFiles.length;
-            await flushCharge();
+            // 先保存阶段，再做计费等附属写入；计费故障不能让已完成的模型阶段丢失并被重复执行。
             await putTaskState(context.env, taskId, state, 3600, uid);
+            try {
+                await flushCharge();
+                if (state.quotaExhausted) await putTaskState(context.env, taskId, state, 3600, uid);
+            } catch (chargeError: any) {
+                dbg("charge:throw", { msg: String(chargeError?.message || chargeError).slice(0, 300) });
+            }
 
-            dbg("result:ok", { bucketDone, completed: results.length, generatedTotal: state.generatedFiles.length });
-            await writer.write(sseEvent(encoder, {
+            const completed = completedBucketFiles();
+            const newFiles = dynamicFilesForClient();
+            for (const result of results) {
+                dbg("stage:persisted", { path: result.path, stage: result.nextStage, done: !!result.completed });
+                if (result.completed) {
+                    await writeSSE(writer, encoder, {
+                        type: "file_done",
+                        path: result.completed.path,
+                        content: result.completed.content,
+                    });
+                }
+            }
+            for (const newFile of newFiles) await writeSSE(writer, encoder, { type: "new_file", ...newFile });
+
+            dbg("result:ok", {
+                bucketDone,
+                progressed: results.length,
+                completed: completed.length,
+                errors: errors.length,
+                generatedTotal: state.generatedFiles.length,
+            });
+            await writeSSE(writer, encoder, {
                 type: "result",
                 bucketIndex,
                 bucketDone,
                 done: bucketDone && state.currentBucket >= buckets.length,
-                completed: results.map(r => ({ path: r.path, content: r.content, reworkCount: r.reworkCount })),
-                newFiles: results.flatMap(r => r.newFiles.map(nf => ({ path: nf.path, role: nf.role, content: nf.content }))),
+                progressed: results.length > 0,
+                retryable: errors.length > 0,
+                retryAfterMs: errors.length > 0 ? 1_500 : 0,
+                active: results.map(result => ({ path: result.path, stage: result.nextStage })),
+                completed,
+                newFiles,
+                errors,
                 bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
-            }));
-            await writer.write(encoder.encode("data: [DONE]\n\n"));
+            });
+            try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } catch (e: any) {
             const errMsg = e?.message ? String(e.message) : String(e);
             dbg("process:catch", { err: e?.name, msg: errMsg.slice(0, 400), stack: String(e?.stack || "").slice(0, 800) });
-            try {
-                await writer.write(sseEvent(encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` }));
-                // 关键：始终发出 result 事件，避免前端拿到 null
-                await writer.write(sseEvent(encoder, {
-                    type: "result", bucketIndex, replan: true,
-                    reason: `桶 #${bucketIndex} 执行失败: ${errMsg}`,
-                }));
-                await writer.write(encoder.encode("data: [DONE]\n\n"));
-            } catch { /* writer 可能已关闭 */ }
+            await writeSSE(writer, encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` });
+            await writeSSE(writer, encoder, {
+                type: "result",
+                bucketIndex,
+                bucketDone: false,
+                progressed: false,
+                retryable: true,
+                retryAfterMs: 1_500,
+                completed: [],
+                newFiles: [],
+                errors: [{ reason: errMsg }],
+            });
+            try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } finally {
             dbg("process:finally", { hb: hbCount });
             clearInterval(heartbeat);
             try { await flushCharge(); } catch { /* 计费失败不覆盖主流程结果 */ }
-            await writer.close();
+            try { await writer.close(); } catch { /* already closed/disconnected */ }
         }
     })();
 

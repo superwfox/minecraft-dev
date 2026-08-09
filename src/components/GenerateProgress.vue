@@ -1,6 +1,6 @@
 <template>
   <div class="gen-wrap" ref="wrapRef">
-    <!-- 超级并发开关：默认串行最稳；开启桶内并发更快但更易生成失败，慎用 -->
+    <!-- 超级并发开关：默认逐阶段串行；开启后并行推进多个文件阶段 -->
     <div class="gen-super-bar" v-if="genTask.phase !== 'idle'">
       <button class="gen-super-toggle" :class="{ on: superConcurrency }"
               @click="setSuperConcurrency(!superConcurrency)">
@@ -8,8 +8,8 @@
       </button>
       <span class="gen-super-note" :class="{ warn: superConcurrency }">
         {{ superConcurrency
-          ? "⚠ 桶内并发更快，但更易撞 Cloudflare 限制导致生成失败，慎用"
-          : "默认串行最稳。开启后更快，但可能失败" }}
+          ? "并行推进多个文件阶段；中断时从已保存阶段继续"
+          : "默认逐阶段串行，完成一个阶段就保存一次进度" }}
       </span>
       <button v-if="genTask.taskId" class="gen-super-toggle dbg" @click="downloadDebug"
               title="下载已脱敏的生成与联网学习诊断（JSON）">

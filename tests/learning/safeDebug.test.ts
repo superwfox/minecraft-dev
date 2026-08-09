@@ -164,7 +164,12 @@ describe("safe Debug export", () => {
             rawEvents: 3,
             acceptedEvents: 2,
             rejectedEvents: 1,
+            droppedEvents: 0,
         });
+        expect(payload.generation.debug.events).toEqual([
+            { scope: "bucket", msg: "task:throw", bucket: 0 },
+            { scope: "build-fix", msg: "fix:diagnostics" },
+        ]);
         expect(payload.generation.debug.summaries).toEqual([
             { scope: "bucket", msg: "task:throw", count: 1 },
             { scope: "build-fix", msg: "fix:diagnostics", count: 1 },

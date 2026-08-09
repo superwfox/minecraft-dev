@@ -997,11 +997,20 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                     }
                     case "new_file":
                         // 动态生成的缺失类：插入或更新
-                        if (!findFile(evt.path)) {
-                            genTask.files.push({
-                                path: evt.path, role: evt.role,
-                                content: evt.content, status: "done",
-                            });
+                        {
+                            const existing = findFile(evt.path);
+                            if (existing) {
+                                existing.role = evt.role || existing.role;
+                                existing.content = evt.content;
+                                existing.status = "done";
+                                existing.streamingPhase = "";
+                                existing.streamingContent = "";
+                            } else {
+                                genTask.files.push({
+                                    path: evt.path, role: evt.role,
+                                    content: evt.content, status: "done",
+                                });
+                            }
                             syncCurrentIndex();
                         }
                         break;
@@ -1062,10 +1071,10 @@ async function streamFileGeneration(taskId: string): Promise<any> {
     return readSSE(resp);
 }
 
-/** SSE streaming bucket generation — 一次跑一批文件。
+/** SSE streaming bucket generation — 一次推进一批文件的单个持久化阶段。
  *  空闲超时(非总时长!):后端每 12s 发 heartbeat,只要还在流就一直续命;连续 BUCKET_IDLE_MS
  *  收不到任何字节(CF 强杀 / 上游彻底断死)才 abort → 前端重试同一桶。
- *  旧的「300s 总时长」会误杀健康但耗时较长的批次(如慢模型审查/返工)→ 零进度 → replan 死循环。 */
+ *  服务端在每个阶段后落盘，重试不会重做整份文件。 */
 const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
     const ctrl = new AbortController();
@@ -1347,9 +1356,10 @@ export async function resumeGenerate() {
 
         for (const bucketIndex of sortedBucketIds) {
             let bucketDone = false, guard = 0, noProgress = 0;
+            const guardLimit = Math.max(80, (bucketMap.get(bucketIndex) ?? 1) * 16 + 20);
             const doneCount = () => genTask.files.filter(f => f.status === "done").length;
             while (!bucketDone) {
-                if (guard++ > 80) throw new Error("续跑批次过多，请重试");
+                if (guard++ > guardLimit) throw new Error("续跑阶段过多，请重试");
                 const doneBefore = doneCount();
                 let bucketResult: any = null;
                 for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
@@ -1359,9 +1369,9 @@ export async function resumeGenerate() {
                 if (!bucketResult) {
                     if (doneCount() > doneBefore) { noProgress = 0; continue; }
                     if (++noProgress >= 5) throw new Error("续跑连续零进度，请重试");
+                    await new Promise(resolve => setTimeout(resolve, 1_500));
                     continue;
                 }
-                noProgress = 0;
                 if (bucketResult.replan) throw new Error("续跑仍未通过审查，请重试");
                 for (const c of bucketResult.completed || []) {
                     const f = genTask.files.find(x => x.path === c.path);
@@ -1369,6 +1379,18 @@ export async function resumeGenerate() {
                 }
                 syncCurrentIndex();
                 bucketDone = !!bucketResult.bucketDone;
+                const progressed = bucketResult.progressed === true
+                    || doneCount() > doneBefore
+                    || bucketDone;
+                if (!progressed) {
+                    if (++noProgress >= 5) {
+                        throw new Error("生成服务连续未推进，阶段进度已保存，请稍后重试");
+                    }
+                    const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
+                    await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+                    continue;
+                }
+                noProgress = 0;
                 if (bucketResult.done) break;
             }
         }
@@ -1627,19 +1649,18 @@ export async function startGenerate(
             let allBucketsDone = false;
             outer: for (const bucketIndex of sortedBucketIds) {
                 if (needReplan) break;
-                // 桶分批推进：每次请求只生成一批（concurrency 个）文件，循环调用同一桶直到 bucketDone，
-                // 避免一个 CF Worker 请求跑完整桶时长/CPU 超限被杀（流中断 → 无返回）。
-                // fileStatuses 持久化保证不重复生成已完成文件。
+                // 桶按持久化阶段推进：每次请求每个目标最多一次模型调用，阶段完成后立即落盘。
+                // 流中断时重试同一桶，服务端从 checkpoint 继续。
                 let bucketDone = false;
                 let guard = 0;
                 let noProgress = 0;
+                const guardLimit = Math.max(80, (bucketMap.get(bucketIndex) ?? 1) * 16 + 20);
                 const doneCount = () => genTask.files.filter(f => f.status === "done").length;
                 while (!bucketDone) {
-                    if (guard++ > 80) { // 安全阀，防意外死循环
-                        genTask.logs.push(`× 桶 #${bucketIndex} 批次过多，终止生成`);
-                        needReplan = true; break;
+                    if (guard++ > guardLimit) { // 安全阀，防意外死循环
+                        throw new Error(`桶 #${bucketIndex} 阶段推进次数异常，已保留当前进度`);
                     }
-                    // 单批重试一次：批小，重试更不易再撞限制
+                    // 单阶段重试一次；服务端会从已持久化检查点继续。
                     const doneBefore = doneCount();
                     let bucketResult: any = null;
                     for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
@@ -1652,30 +1673,40 @@ export async function startGenerate(
                         }
                     }
                     if (!bucketResult) {
-                        // 流被切断（多因推理审查静默太久被 CF 切）≠ 生成失败：进度已在后端增量落库,
-                        // 直接重试【同一桶】（已 done 文件会被 pending 跳过、继续往下做），不做破坏性重新规划。
-                        // 只要本批收到过 file_done（有进度）就清零计数；连续多批零进度才退回 replan 兜底。
+                        // 流被切断不等于生成失败；直接重试同一阶段，禁止用重新规划覆盖已有进度。
                         if (doneCount() > doneBefore) {
                             noProgress = 0;
-                            genTask.logs.push(`· 桶 #${bucketIndex} 本批流中断但已落地部分文件，重试同一桶继续...`);
+                            genTask.logs.push(`· 桶 #${bucketIndex} 连接中断但已落地文件，继续恢复...`);
                             continue;
                         }
                         if (++noProgress >= 5) {
-                            genTask.logs.push(`× 桶 #${bucketIndex} 连续 ${noProgress} 批零进度，退回重新规划`);
-                            needReplan = true; break;
+                            throw new Error(`桶 #${bucketIndex} 连续连接中断，阶段进度已保存，请稍后重试`);
                         }
-                        genTask.logs.push(`· 桶 #${bucketIndex} 本批无返回且无进度（${noProgress}/5），重试同一桶...`);
+                        genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段无返回（${noProgress}/5），继续恢复...`);
+                        await new Promise(resolve => setTimeout(resolve, 1_500));
                         continue;
                     }
-                    noProgress = 0;
                     if (bucketResult.replan) { needReplan = true; break; }
-                    // 把本批完成的内容回填到 files
+                    // 服务端每次返回该桶已落盘的完成文件，可修复“落盘后断流”造成的前端状态缺口。
                     for (const c of bucketResult.completed || []) {
                         const f = genTask.files.find(x => x.path === c.path);
                         if (f) { f.content = c.content; f.status = "done"; }
                     }
                     syncCurrentIndex();
                     bucketDone = !!bucketResult.bucketDone;
+                    const progressed = bucketResult.progressed === true
+                        || doneCount() > doneBefore
+                        || bucketDone;
+                    if (!progressed) {
+                        if (++noProgress >= 5) {
+                            throw new Error(`桶 #${bucketIndex} 连续未推进，阶段进度已保存，请稍后重试`);
+                        }
+                        const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
+                        genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段暂未推进（${noProgress}/5），稍后重试...`);
+                        await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+                        continue;
+                    }
+                    noProgress = 0;
                     if (bucketResult.done) { allBucketsDone = true; break outer; }
                 }
                 if (needReplan) break;
