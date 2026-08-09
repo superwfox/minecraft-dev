@@ -30,8 +30,8 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const BUCKET_DEBUG_MESSAGES = new Set([
-    "callAI:req", "callAI:http", "callAI:http-err", "callAI:done", "callAI:throw",
-    "stream:req", "stream:http", "stream:http-err", "stream:done", "stream:throw",
+    "callAI:req", "callAI:retry", "callAI:http", "callAI:http-err", "callAI:done", "callAI:throw",
+    "stream:req", "stream:retry", "stream:http", "stream:http-err", "stream:done", "stream:throw",
     "file:dispatch", "file:gen-begin", "file:review-begin", "file:review-known-api",
     "file:review-parse-fail", "file:review-done", "file:rework-begin", "file:summary-begin",
     "file:summary-fallback", "file:return", "heartbeat", "process:start", "batch:begin",

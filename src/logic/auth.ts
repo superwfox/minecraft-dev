@@ -40,7 +40,10 @@ export function currentLogo(): string {
 export async function fetchMe(): Promise<void> {
     try {
         const resp = await fetch("/api/auth/me");
-        const data = await resp.json();
+        const data = await resp.json() as {
+            user?: { login: string } | null;
+            quota?: QuotaInfo | null;
+        };
         authState.user = data.user ?? null;
         authState.quota = data.quota ?? null;
     } catch {
@@ -69,7 +72,11 @@ async function postSponsorRequest(payload: Record<string, unknown>): Promise<Spo
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
     });
-    return resp.json().catch(() => ({ ok: false, reason: "网络错误" }));
+    try {
+        return await resp.json() as SponsorReq;
+    } catch {
+        return { ok: false, reason: "网络错误" };
+    }
 }
 
 /** 选档位 → 拿到专属备注码（转账时填写），登记待审 */

@@ -38,17 +38,36 @@ afterEach(() => {
 describe("learning storage failure responses", () => {
     it("keeps start retryable instead of inventing a terminal progress snapshot", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        const need = makeNeed({
+            integrationKind: "external_plugin",
+            triggerReason: "external_plugin_contract",
+            claim: {
+                subject: "FancyHooksAPI#resolve",
+                question: "What is the exact FancyHooksAPI#resolve contract for Paper 1.21.4?",
+            },
+            scope: {
+                dependency: "FancyHooks",
+                packageName: "dev.fancy.hooks",
+                symbol: "dev.fancy.hooks.FancyHooksAPI#resolve",
+            },
+            searchQueries: ["FancyHooksAPI resolve Paper 1.21.4 official documentation"],
+        });
         const raw = JSON.stringify({
             uid: "user-1",
             coreType: "paper",
             version: "1.21.4",
-            grade: { knowledgeNeeds: [makeNeed()] },
+            userPrompt: "Integrate FancyHooks into the plugin.",
+            grade: {
+                paths: [],
+                vector: { external_deps: ["FancyHooks"] },
+                knowledgeNeeds: [need],
+            },
         });
         const response = await startLearning(context(new Request("https://example.test/api/learning/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ taskId: "task-1", stage: "planner", remainingMs: 300_000 }),
-        }), raw);
+        }), raw));
 
         await expectBareStorageUnavailable(response);
     });
@@ -60,7 +79,7 @@ describe("learning storage failure responses", () => {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ taskId: "task-1", jobId: "learn-test", revision: 4 }),
-        }), raw);
+        }), raw));
 
         await expectBareStorageUnavailable(response);
     });

@@ -421,8 +421,10 @@ describe("learning endpoint authorization", () => {
 
             expect(response.status).toBe(200);
             expect(await response.json()).toMatchObject({
-                status: "deferred",
-                reasonCode: "fix_authorization_expired",
+                learningProgress: {
+                    status: "deferred",
+                    reasonCode: "fix_authorization_expired",
+                },
             });
             expect(discoverLearningSourcesMock).not.toHaveBeenCalled();
             expect(fetchLearningSourcesMock).not.toHaveBeenCalled();

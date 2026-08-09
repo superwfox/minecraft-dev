@@ -66,6 +66,9 @@ type StoreSchema = {
             generatorType?: GeneratorType | null;
             role?: string;
         };
+        indexes: {
+            byTask: string;
+        };
     };
 };
 

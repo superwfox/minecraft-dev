@@ -520,7 +520,6 @@ export function decideKnowledgeStatus(
     );
     const canActivate = hasGroundTruthApi
         || (hasApiDocumentation
-            && need.risk !== "high"
             && authoritativeFamilies.size >= 2
             && verification.confidence >= 0.9);
     if (!canActivate) return { status: "needs_review", expiresAt: 0 };

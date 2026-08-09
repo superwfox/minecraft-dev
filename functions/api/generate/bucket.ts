@@ -15,6 +15,7 @@ const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
 const SUPER_CONCURRENCY = 2; // 「超级并发」开关开启时的桶内并发数（默认串行=1）
 const LLM_TIMEOUT_MS = 300000; // 单次 LLM 调用总时长上限（生成/审查均走非流式，免费版 CPU 有限）
+const MAX_RETRY_AFTER_MS = 30000;
 
 // 详细调试:把每一步(含 LLM 的 HTTP 状态/首字节耗时/错误堆栈/心跳是否真在跳)通过 SSE debug 事件发出,
 // 前端累积并可下载。用于定位「桶零进度、无返回」到底死在哪一步。
@@ -64,18 +65,57 @@ function makeSemaphore(cap: number) {
     return { acquire, release };
 }
 
-/** Sleep helper for backoff */
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+interface BackoffOptions {
+    maxRetries?: number;
+    onRetry?: (event: { attempt: number; status: number; waitMs: number }) => void;
+}
 
-/** Single fetch wrapper with 429 backoff */
-async function fetchWithBackoff(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
+function abortError(): Error {
+    const error = new Error("The operation was aborted");
+    error.name = "AbortError";
+    return error;
+}
+
+function retryDelayMs(retryAfter: string | null, attempt: number): number {
+    const fallback = 1000 * Math.pow(2, attempt);
+    if (!retryAfter) return Math.min(MAX_RETRY_AFTER_MS, fallback);
+
+    const seconds = Number(retryAfter);
+    const parsed = Number.isFinite(seconds)
+        ? seconds * 1000
+        : Date.parse(retryAfter) - Date.now();
+    if (!Number.isFinite(parsed) || parsed < 0) return Math.min(MAX_RETRY_AFTER_MS, fallback);
+    return Math.min(MAX_RETRY_AFTER_MS, parsed);
+}
+
+async function sleepWithSignal(ms: number, signal?: AbortSignal | null): Promise<void> {
+    if (signal?.aborted) throw abortError();
+    await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const onAbort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(abortError());
+        };
+        timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+/** Fetch wrapper with bounded, abort-aware 429 backoff. */
+async function fetchWithBackoff(url: string, init: RequestInit, options: BackoffOptions = {}): Promise<Response> {
+    const maxRetries = options.maxRetries ?? 3;
     let attempt = 0;
     while (true) {
         const resp = await fetch(url, init);
         if (resp.status !== 429 || attempt >= maxRetries) return resp;
-        const retryAfter = resp.headers.get("Retry-After");
-        const wait = retryAfter ? parseInt(retryAfter) * 1000 : 1000 * Math.pow(2, attempt);
-        await sleep(wait);
+        const waitMs = retryDelayMs(resp.headers.get("Retry-After"), attempt);
+        options.onRetry?.({ attempt: attempt + 1, status: resp.status, waitMs });
+        try { await resp.body?.cancel(); } catch { /* response body cleanup is best effort */ }
+        await sleepWithSignal(waitMs, init.signal);
         attempt++;
     }
 }
@@ -102,6 +142,8 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
             body: JSON.stringify(body),
             signal: ctrl.signal,
+        }, {
+            onRetry: ({ attempt, status, waitMs }) => dbg("callAI:retry", { model, attempt, status, waitMs }),
         });
         dbg("callAI:http", { model, status: resp.status, ms: Date.now() - t0 });
         if (!resp.ok) {
@@ -155,6 +197,8 @@ async function callAIStream(
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
             body: JSON.stringify(body),
             signal: ctrl.signal,
+        }, {
+            onRetry: ({ attempt, status, waitMs }) => dbg("stream:retry", { path: pathTag, model, attempt, status, waitMs }),
         });
         dbg("stream:http", { path: pathTag, status: resp.status, ms: Date.now() - t0 });
         if (!resp.ok) {
@@ -313,7 +357,8 @@ async function generateAndCheckFile(
         await writer.write(sseEvent(encoder, { type: "phase", path: filePath, phase: "reworking" }));
         dbg("file:rework-begin", { path: filePath, round: reworkCount });
         const rw = reworkPrompt(filePath, target.role, content, lastReason, ctx, summaries, apiContractCtx, knowledgeContext);
-        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, true, dbg);
+        // 审查仍使用 pro；返工代码生成使用 flash，避免单文件请求因长推理或 pro 限流失去进度。
+        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, false, dbg);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
@@ -357,7 +402,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
     const uid: string = (context.data as any)?.uid || "";
     // 默认串行（1 文件/请求，最稳）；仅当前端「超级并发」开关开启时才桶内并发（env 可覆盖并发数）。
-    // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/返工，更快但更易撞
+    // 桶内并发会让单个 CF Worker 请求同时跑多个文件生成 + pro 审查/多轮返工，更快但更易撞
     // 单请求 CPU/时长/子请求上限被强杀 →「零进度 → 重新规划 → 失败」，故默认关闭。
     let concurrency = 1;
     if (superConcurrency) {
@@ -467,9 +512,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             dbg("heartbeat", { n: hbCount });
         }, 12000);
         try {
+            // 每次请求只上报本批实际处理的目标，避免前端把同桶已完成文件重置为 generating。
+            const pending = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
+            const targets = pending.slice(0, Math.max(1, concurrency));
+            const baseSummaries = extractSummaries(state.generatedFiles);
             dbg("process:start", { bucketIndex, concurrency, superOn: !!superConcurrency, skills: state.skills?.length || 0, bucketsTotal: buckets.length });
             await writer.write(sseEvent(encoder, {
-                type: "bucket_start", bucketIndex, paths: bucket.map(f => f.path), concurrency,
+                type: "bucket_start", bucketIndex, paths: targets.map(f => f.path), concurrency,
             }));
             state.logs.push(`▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）`);
             await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 启动桶 #${bucketIndex}（${bucket.length} 文件，并发=${concurrency}）` }));
@@ -477,10 +526,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 本次只处理一批（concurrency 个）文件：避免在一个 CF Worker 请求里跑完整桶，
             // 导致执行时长 / CPU / subrequest 超限被 CF 强杀（SSE 流静默中断 → 前端「无返回」）。
             // state.fileStatuses 已持久化，前端会循环调用同一桶，直到收到 bucketDone:true。
-            const pending = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
-            const targets = pending.slice(0, Math.max(1, concurrency));
             // 共享上下文：本次桶内不互相依赖，但快照已生成的全局摘要供 dispatchGen 注入
-            const baseSummaries = extractSummaries(state.generatedFiles);
 
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {

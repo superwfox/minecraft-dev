@@ -148,11 +148,11 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
         if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
         if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
         if (resp.status === 429) {
-            const payload = await resp.json().catch(() => ({}));
+            const payload = await resp.json().catch(() => ({})) as { error?: string };
             throw noRetry(payload?.error || "请求过于频繁");
         }
         if (resp.status === 409) {
-            const payload = await resp.json().catch(() => ({}));
+            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
             if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
                 throw new Error(payload?.error || "Planner 状态冲突");
             }
@@ -165,7 +165,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
             continue;
         }
         if (resp.status === 400) {
-            const payload = await resp.json().catch(() => ({}));
+            const payload = await resp.json().catch(() => ({})) as { error?: string };
             throw noRetry(payload?.error || "Planner 请求无效");
         }
         if (!resp.ok) {
@@ -892,6 +892,10 @@ function findFile(path: string) {
     return genTask.files.find(f => f.path === path);
 }
 
+function syncCurrentIndex() {
+    genTask.currentIndex = genTask.files.filter(f => f.status === "done").length;
+}
+
 /** Read an SSE stream, dispatch events to genTask, return the result event */
 async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => void }): Promise<any> {
     const reader = resp.body!.getReader();
@@ -979,6 +983,7 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                             f.status = "done";
                             f.streamingPhase = "";
                             f.streamingContent = "";
+                            syncCurrentIndex();
                         }
                         break;
                     }
@@ -997,12 +1002,13 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                                 path: evt.path, role: evt.role,
                                 content: evt.content, status: "done",
                             });
+                            syncCurrentIndex();
                         }
                         break;
                     case "bucket_start":
                         for (const p of evt.paths || []) {
                             const f = findFile(p);
-                            if (f) f.status = "generating";
+                            if (f && f.status !== "done") f.status = "generating";
                         }
                         break;
                     case "result":
@@ -1059,7 +1065,7 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 /** SSE streaming bucket generation — 一次跑一批文件。
  *  空闲超时(非总时长!):后端每 12s 发 heartbeat,只要还在流就一直续命;连续 BUCKET_IDLE_MS
  *  收不到任何字节(CF 强杀 / 上游彻底断死)才 abort → 前端重试同一桶。
- *  旧的「300s 总时长」会误杀健康但耗时较长的批次(如慢模型/pro 返工)→ 零进度 → replan 死循环。 */
+ *  旧的「300s 总时长」会误杀健康但耗时较长的批次(如慢模型审查/返工)→ 零进度 → replan 死循环。 */
 const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
 async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
     const ctrl = new AbortController();
@@ -1361,6 +1367,7 @@ export async function resumeGenerate() {
                     const f = genTask.files.find(x => x.path === c.path);
                     if (f) { f.content = c.content; f.status = "done"; }
                 }
+                syncCurrentIndex();
                 bucketDone = !!bucketResult.bucketDone;
                 if (bucketResult.done) break;
             }
@@ -1600,6 +1607,7 @@ export async function startGenerate(
                 pairPath: f.pairPath,
                 bucket: f.bucket,
             }));
+            syncCurrentIndex();
             genTask.plannerRequestId = "";
             genTask.plannerReplan = false;
             genTask.plannerAttempt = 0;
@@ -1666,6 +1674,7 @@ export async function startGenerate(
                         const f = genTask.files.find(x => x.path === c.path);
                         if (f) { f.content = c.content; f.status = "done"; }
                     }
+                    syncCurrentIndex();
                     bucketDone = !!bucketResult.bucketDone;
                     if (bucketResult.done) { allBucketsDone = true; break outer; }
                 }

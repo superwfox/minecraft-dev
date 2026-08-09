@@ -677,7 +677,7 @@ export function restoreGenTask(): boolean {
         genTask.packageName = s.packageName || "";
         genTask.javaVersion = s.javaVersion || "";
         genTask.files = s.files || [];
-        genTask.currentIndex = s.currentIndex || 0;
+        genTask.currentIndex = genTask.files.filter(file => file?.status === "done").length;
         genTask.logs = s.logs || [];
         genTask.clarifyHistory = s.clarifyHistory || [];
         genTask.grade = s.grade || null;

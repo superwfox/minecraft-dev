@@ -108,9 +108,9 @@ export function fetchSkills(force = false): Promise<void> {
     inflight = fetch(url, { cache: "no-store" })
         .then(async (r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const data = await r.json();
-            skillsState.readme = data?.readme || "";
-            skillsState.all = Array.isArray(data?.skills) ? data.skills : [];
+            const data = await r.json() as { readme?: unknown; skills?: unknown };
+            skillsState.readme = typeof data.readme === "string" ? data.readme : "";
+            skillsState.all = Array.isArray(data.skills) ? data.skills as SkillBrief[] : [];
             skillsState.loaded = true;
         })
         .catch((e) => { skillsState.error = e?.message || "加载失败"; })

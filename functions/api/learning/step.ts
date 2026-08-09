@@ -134,8 +134,11 @@ function applyDiscoveryTelemetry(
     telemetry.discoveryLastHttpStatus = last?.httpStatus ?? 0;
     telemetry.discoveryLastProviderStatus = last?.providerStatus ?? "unknown";
     telemetry.candidateNeedCount = result.candidates.length;
-    telemetry.candidateUrlCount = result.candidates.reduce((sum, candidate) =>
-        sum + candidateSources(candidate).length, 0);
+    let candidateUrlCount = 0;
+    for (const candidate of result.candidates as LearningCandidate[]) {
+        candidateUrlCount += candidateSources(candidate).length;
+    }
+    telemetry.candidateUrlCount = candidateUrlCount;
 }
 
 function candidateSources(candidate: LearningCandidate): Array<{ url: string; reason: string }> {
@@ -441,7 +444,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (quotaExhausted) {
             return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "quota_exhausted");
         }
-        if (!discovery.ok) {
+        if (discovery.ok === false) {
             const reasonCode = discovery.reasonCode === "discovery_timeout"
                 && discoveryBudget.clippedByJobDeadline
                 ? "job_deadline"
@@ -518,6 +521,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (leased.status === "verifying") {
         const telemetry = normalizeLearningTelemetry(leased.work.telemetry);
         const index = Math.max(0, Number(leased.work.completedNeeds) || 0);
+        let authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
         const advanceVerification = async (
             resultIds: string[],
             work: LearningJobRecord["work"],
@@ -581,7 +586,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const verificationAttempt = Math.min(MAX_VERIFICATION_ATTEMPTS, previousAttempts + 1);
         verificationAttemptsByNeed[need.id] = verificationAttempt;
 
-        let authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
         if (authorizationResponse) return authorizationResponse;
 
         const verified = await verifyKnowledgeNeed({
@@ -625,7 +630,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
         if (authorizationResponse) return authorizationResponse;
 
-        if (!verified.ok) {
+        if (verified.ok === false) {
             applyVerificationFailureTelemetry(telemetry, verified);
             const reasonCode = learningVerificationFailureReason(
                 verified.reasonCode,

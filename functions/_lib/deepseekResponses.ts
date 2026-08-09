@@ -16,6 +16,7 @@ const QUICK_FAILURE_MS = 5_000;
 const MIN_RETRY_BUDGET_MS = 6_000;
 const MIN_MODEL_RESULT_RETRY_BUDGET_MS = 15_000;
 const MAX_ATTEMPTS = 2;
+const MAX_RAW_SOURCES_PER_NEED = 12;
 
 function discoveryTextFormat(needs: KnowledgeNeed[]) {
     const needIds = [...new Set(needs.map((need) => need.id))];
@@ -193,7 +194,7 @@ export function parseLearningCandidates(content: string, needs: KnowledgeNeed[])
                     reason: "旧版发现结果未记录该 URL 的搜索理由",
                 }))
                 : [];
-        if (rawSources.length > 3) throw new Error("discovery_source_bounds");
+        if (rawSources.length > MAX_RAW_SOURCES_PER_NEED) throw new Error("discovery_source_bounds");
         const seenUrls = new Set<string>();
         const sources: NonNullable<LearningCandidate["sources"]> = [];
         for (const raw of rawSources) {
@@ -203,6 +204,7 @@ export function parseLearningCandidates(content: string, needs: KnowledgeNeed[])
                 : "";
             const urlKey = candidateUrlKey(url);
             if (!url || url.length > 2_000 || reason.length < 8 || reason.length > 240 || seenUrls.has(urlKey)) continue;
+            if (sources.length >= 3) throw new Error("discovery_source_bounds");
             seenUrls.add(urlKey);
             sources.push({ url, reason });
         }
@@ -402,9 +404,9 @@ export async function discoverLearningSources(input: {
             || reasonCode === "no_candidate_sources"
             || reasonCode === "discovery_provider_incomplete"
             || reasonCode === "discovery_provider_failed";
-        const requiredRetryBudgetMs = modelResultCanRetry
-            ? MIN_MODEL_RESULT_RETRY_BUDGET_MS
-            : MIN_RETRY_BUDGET_MS;
+        const requiredRetryBudgetMs = attemptElapsedMs <= QUICK_FAILURE_MS
+            ? MIN_RETRY_BUDGET_MS
+            : modelResultCanRetry ? MIN_MODEL_RESULT_RETRY_BUDGET_MS : MIN_RETRY_BUDGET_MS;
         const canRetry = attempt + 1 < MAX_ATTEMPTS
             && retryable
             && (attemptElapsedMs <= QUICK_FAILURE_MS || modelResultCanRetry)

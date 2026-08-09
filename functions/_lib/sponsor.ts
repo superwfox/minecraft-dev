@@ -88,7 +88,7 @@ export async function listPending(kv: KVNamespace): Promise<Pending[]> {
             if (!raw) continue;
             try { out.push(JSON.parse(raw) as Pending); } catch { /* skip */ }
         }
-        cursor = res.list_complete ? undefined : res.cursor;
+        cursor = "cursor" in res ? res.cursor : undefined;
     } while (cursor);
     out.sort((a, b) => b.ts - a.ts);
     return out;
