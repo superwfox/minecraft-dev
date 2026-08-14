@@ -9,7 +9,12 @@ export type KnowledgeSpecificity = "exact" | "scoped" | "ambiguous";
 export type KnowledgeAnswerType = "signature" | "coordinate" | "behavior" | "migration" | "rule";
 export type KnowledgeRisk = "low" | "medium" | "high";
 export type SourcePolicy = "api_signature" | "dependency" | "behavior" | "release";
-export type LearningIntegrationKind = "nms" | "craftbukkit" | "version_reflection" | "external_plugin";
+export type LearningIntegrationKind =
+    | "public_api"
+    | "nms"
+    | "craftbukkit"
+    | "version_reflection"
+    | "external_plugin";
 export type LearningNeedTriggerReason =
     | "nms_version_sensitive"
     | "reflection_contract"
