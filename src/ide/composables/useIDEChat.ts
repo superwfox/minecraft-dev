@@ -1,6 +1,7 @@
 import {reactive, ref} from "vue";
 import {useIDEStore} from "./useIDEStore";
 import {fetchWithByokFallback} from "../../logic/byok";
+import {responseError} from "../../api/apiError";
 
 export type IDEFileAction = { path: string; action: "create" | "edit"; content: string };
 export type IDEMessage = {
@@ -159,7 +160,7 @@ async function send(userText: string) {
         });
         if (resp.status === 402) throw new Error("本月额度已用尽，请登录后兑换或等下月");
         if (resp.status === 401) throw new Error("登录已过期，请重新登录");
-        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.ok) throw await responseError(resp, "AI 调用失败");
         if (!resp.body) throw new Error("无响应流");
 
         const reader = resp.body.getReader();
@@ -274,7 +275,7 @@ ${truncate(opts.snippet, 3000)}
     });
     if (resp.status === 402) throw new Error("本月额度已用尽");
     if (resp.status === 401) throw new Error("登录已过期");
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) throw await responseError(resp, "AI 调用失败");
     if (!resp.body) throw new Error("无响应流");
 
     const reader = resp.body.getReader();

@@ -40,11 +40,12 @@ import {
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const PLANNER_MODEL = "deepseek-v4-pro";
-const PLANNER_PREPARATION_TIMEOUT_MS = 30_000;
-const PLANNER_UPSTREAM_TIMEOUT_MS = 300_000;
-// 整段 deadline 必须短于租约，避免旧请求过期后仍继续付费或提交。
-const PLANNER_OPERATION_TIMEOUT_MS = 350_000;
-const PLANNER_LEASE_MS = 360_000;
+export const PLANNER_PREPARATION_TIMEOUT_MS = 20_000;
+export const PLANNER_UPSTREAM_TIMEOUT_MS = 100_000;
+// Cloudflare 代理默认约 125s 无响应会返回 524；整体 deadline 需预留足够时间返回结构化 504。
+export const PLANNER_OPERATION_TIMEOUT_MS = 110_000;
+// 整段 deadline 必须短于租约；即使后台释放失败，重试也只需等待短暂的剩余租期。
+export const PLANNER_LEASE_MS = 120_000;
 
 interface Env {
     DB?: D1Database;
@@ -253,7 +254,11 @@ function plannerTimeoutResponse(): Response {
         code: "PLANNER_TIMEOUT",
     }), {
         status: 504,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "Retry-After": "1",
+        },
     });
 }
 
@@ -839,12 +844,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     } finally {
         preparationDeadline.dispose();
         operationDeadline.dispose();
-        await releaseTaskPlannerLease(
+        const release = releaseTaskPlannerLease(
             context.env,
             taskId,
             uid,
             leaseToken,
             leaseMode,
         ).catch((error) => console.warn("planner lease release failed", error));
+        // 租约清理不应阻塞超时响应，否则可能在返回结构化 504 前再次撞上 Cloudflare 524。
+        context.waitUntil(release);
     }
 };

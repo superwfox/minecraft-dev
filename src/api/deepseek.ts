@@ -1,4 +1,5 @@
 import { fetchWithByokFallback } from "../logic/byok";
+import { responseError } from "./apiError";
 
 export type ChatMsg = {
     role: string;
@@ -35,7 +36,7 @@ async function askDeepSeek(prompt: string, preset: string): Promise<string> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-flash", messages }),
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await responseError(response, "模型服务请求失败");
     const data = await response.json() as any;
     return data.content ?? data.choices?.[0]?.message?.content ?? "";
 }
@@ -59,7 +60,7 @@ async function streamAsk(prompt: string, preset: string, onDelta: (chunk: string
         body: JSON.stringify({ model: "deepseek-v4-flash", messages, stream: true }),
         signal,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await responseError(response, "模型服务请求失败");
     if (!response.body) throw new Error("No stream body");
 
     const reader = response.body.getReader();
@@ -115,7 +116,7 @@ export async function precheckPrompt(prompt: string): Promise<{ complete: boolea
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "deepseek-v4-pro", messages }),
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await responseError(response, "模型服务请求失败");
     const data = await response.json() as any;
     const raw = (data.content ?? data.choices?.[0]?.message?.content ?? "").trim();
     const cleaned = raw.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "").trim();
@@ -145,7 +146,7 @@ export function consistChat(
             signal: controller.signal,
         });
 
-        if (!response.ok) throw new Error(await response.text());
+        if (!response.ok) throw await responseError(response, "模型服务请求失败");
         if (!response.body) throw new Error("No stream body");
 
         const reader = response.body.getReader();
