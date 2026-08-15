@@ -25,6 +25,7 @@ import { showSponsorModal, login, fetchMe } from "./auth";
 import { fetchWithByokFallback } from "./byok";
 import { selected } from "./skills";
 import { parseResponse } from "../ide/composables/useIDEChat";
+import { readApiError, responseError } from "../api/apiError";
 
 const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -52,25 +53,6 @@ function noRetry(msg: string): Error {
     const e = new Error(msg);
     (e as any).noRetry = true;
     return e;
-}
-
-async function readApiError(
-    response: Response,
-    fallback = `请求失败（HTTP ${response.status}）`,
-): Promise<{ message: string; code: string }> {
-    const raw = await response.text().catch(() => "");
-    if (!raw) return { message: fallback, code: "" };
-    try {
-        const payload = JSON.parse(raw) as { error?: unknown; code?: unknown };
-        return {
-            message: typeof payload.error === "string" && payload.error.trim()
-                ? payload.error.trim()
-                : fallback,
-            code: typeof payload.code === "string" ? payload.code : "",
-        };
-    } catch {
-        return { message: raw, code: "" };
-    }
 }
 
 function setPhase(phase: GenPhase, log?: string) {
@@ -130,6 +112,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
     const deadline = Date.now() + waitMs;
     let announcedWait = false;
     let failures = 0;
+    let timeoutRetries = 0;
 
     while (true) {
         let resp: Response;
@@ -169,8 +152,18 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
             throw noRetry(payload?.error || "Planner 请求无效");
         }
         if (!resp.ok) {
-            const message = await resp.text();
-            if (Date.now() >= deadline || failures++ >= 3) throw new Error(message);
+            const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
+            const plannerTimedOut = apiError.code === "PLANNER_TIMEOUT"
+                || apiError.code === "CLOUDFLARE_TIMEOUT"
+                || resp.status === 524;
+            if (plannerTimedOut) {
+                if (Date.now() >= deadline || timeoutRetries++ >= 1) throw new Error(apiError.message);
+                const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
+                genTask.logs.push("! Planner 响应超时，使用同一请求 ID 重试一次...");
+                await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+                continue;
+            }
+            if (Date.now() >= deadline || failures++ >= 3) throw new Error(apiError.message);
             await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
             continue;
         }
@@ -180,7 +173,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
 
 async function get(url: string) {
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) throw await responseError(resp);
     return resp.json() as any;
 }
 
@@ -1069,7 +1062,7 @@ async function streamFileGeneration(taskId: string): Promise<any> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId }),
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) throw await responseError(resp);
 
     const contentType = resp.headers.get("Content-Type") || "";
     if (contentType.includes("application/json")) {
@@ -1101,7 +1094,7 @@ async function streamBucketGeneration(
         }),
         signal: ctrl.signal,
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) throw await responseError(resp);
     return await readSSE(resp, { idleMs: BUCKET_IDLE_MS, onIdle: () => ctrl.abort() });
 }
 
@@ -1142,7 +1135,7 @@ async function streamGrade(taskId: string, correction?: string): Promise<any> {
         body: JSON.stringify({ taskId, correction }),
         signal: gradeAbort.signal,
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) throw await responseError(resp);
     return readSSE(resp);
 }
 
@@ -2016,7 +2009,7 @@ export async function appendFeature(appendText: string) {
         });
         if (resp.status === 402) { showSponsorModal.value = true; throw new Error("本月额度已用尽"); }
         if (resp.status === 401) { login(); throw new Error("请先登录后再使用"); }
-        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.ok) throw await responseError(resp);
         if (!resp.body) throw new Error("无响应流");
 
         // 读 DeepSeek 原生 SSE（透传），收集 content

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { getSkillBundles } from "../../functions/_lib/skills";
-import { shouldReusePersistedPlannerResult } from "../../functions/api/generate/plan";
+import {
+    PLANNER_LEASE_MS,
+    PLANNER_OPERATION_TIMEOUT_MS,
+    PLANNER_PREPARATION_TIMEOUT_MS,
+    PLANNER_UPSTREAM_TIMEOUT_MS,
+    shouldReusePersistedPlannerResult,
+} from "../../functions/api/generate/plan";
 import { normalizePlannerResumeState } from "../../src/logic/generateState";
 
 const RESULT_AUTHORIZATION = {
@@ -68,6 +74,14 @@ describe("Planner refresh resume state", () => {
 });
 
 describe("Planner Skill deadline", () => {
+    it("returns before Cloudflare's proxy read timeout and keeps the lease longer", () => {
+        expect(PLANNER_PREPARATION_TIMEOUT_MS).toBeLessThan(PLANNER_OPERATION_TIMEOUT_MS);
+        expect(PLANNER_UPSTREAM_TIMEOUT_MS).toBeLessThan(PLANNER_OPERATION_TIMEOUT_MS);
+        expect(PLANNER_OPERATION_TIMEOUT_MS).toBeLessThan(125_000);
+        expect(PLANNER_LEASE_MS).toBeGreaterThan(PLANNER_OPERATION_TIMEOUT_MS);
+        expect(PLANNER_LEASE_MS).toBeLessThan(125_000);
+    });
+
     it("propagates an AbortSignal through an in-flight GitHub fetch", async () => {
         const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
             const signal = init?.signal;

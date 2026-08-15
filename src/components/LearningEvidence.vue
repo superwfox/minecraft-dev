@@ -160,6 +160,7 @@ import {
     type LearningEvidenceItem,
     type LearningSearchedSource,
 } from "../logic/learningEvidenceState";
+import { responseError } from "../api/apiError";
 
 const props = defineProps<{
     taskId: string;
@@ -332,7 +333,7 @@ async function load() {
             params.set("revision", String(requestedIdentity.revision));
         }
         const resp = await fetch(`/api/learning/evidence?${params.toString()}`);
-        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.ok) throw await responseError(resp, "学习证据读取失败");
         const data = await resp.json();
         if (sequence !== loadSequence) return;
         const responseIdentity: LearningEvidenceIdentity = {

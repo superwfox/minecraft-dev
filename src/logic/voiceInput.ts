@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import { responseError } from "../api/apiError";
 
 export const isRecording = ref(false);
 export const voiceText = ref("");
@@ -109,7 +110,7 @@ export async function startVoice(onDone?: (text: string) => void) {
     let authData: { url: string; appId: string };
     try {
         const resp = await fetch("/api/voice-auth");
-        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.ok) throw await responseError(resp, "语音服务连接失败");
         authData = await resp.json() as any;
     } catch {
         cleanupAudio();
