@@ -11,7 +11,7 @@ export type GradePath = {
 };
 export type GradeInfo = { level: string; paths: GradePath[] };
 
-export type LearningStage = "planner" | "fix";
+export type LearningStage = "planner" | "fix" | "tool";
 export type LearningStatus = "idle" | "queued" | "discovering" | "fetching" | "verifying" | "ready" | "deferred" | "needs_review" | "failed" | "cancelled";
 export type LearningActiveStatus = Extract<LearningStatus, "queued" | "discovering" | "fetching" | "verifying">;
 export type LearningReasonCode =
@@ -39,6 +39,8 @@ export type LearningReasonCode =
     | "unresolved_knowledge_needs"
     | "planner_authorization_expired"
     | "fix_authorization_expired"
+    | "tool_authorization_expired"
+    | "tool_request_invalid"
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
@@ -196,7 +198,8 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "discovery_provider_incomplete", "discovery_provider_failed", "discovery_invalid_response",
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
-    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired", "revision_conflict", "lease_conflict",
+    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired",
+    "tool_authorization_expired", "tool_request_invalid", "revision_conflict", "lease_conflict",
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const LEARNING_STATUSES = new Set<LearningStatus>([
@@ -256,7 +259,7 @@ export function normalizeLearningProgress(value: unknown): LearningProgress {
     const status = typeof raw.status === "string" && LEARNING_STATUSES.has(raw.status as LearningStatus)
         ? raw.status as LearningStatus
         : "idle";
-    const stage = raw.stage === "planner" || raw.stage === "fix" ? raw.stage : undefined;
+    const stage = raw.stage === "planner" || raw.stage === "fix" || raw.stage === "tool" ? raw.stage : undefined;
     const jobId = typeof raw.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)
         ? raw.jobId
         : "";
@@ -343,7 +346,9 @@ export function normalizeLearningDebugMeta(value: unknown): LearningDebugMeta | 
     const jobId = typeof raw.jobId === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)
         ? raw.jobId
         : "";
-    const stage = raw.stage === "fix" ? "fix" : raw.stage === "planner" ? "planner" : undefined;
+    const stage = raw.stage === "fix" || raw.stage === "planner" || raw.stage === "tool"
+        ? raw.stage
+        : undefined;
     const status = typeof raw.status === "string" && raw.status !== "idle"
         && LEARNING_STATUSES.has(raw.status as LearningStatus)
         ? raw.status as Exclude<LearningStatus, "idle">
@@ -492,7 +497,9 @@ function normalizeLearningDebugEvent(value: unknown): LearningDebugEvent | null 
         || raw.kind === "conflict" || raw.kind === "client"
         ? raw.kind
         : undefined;
-    const stage = raw.stage === "planner" || raw.stage === "fix" ? raw.stage : undefined;
+    const stage = raw.stage === "planner" || raw.stage === "fix" || raw.stage === "tool"
+        ? raw.stage
+        : undefined;
     const endpoint = raw.endpoint === "start" || raw.endpoint === "step" || raw.endpoint === "status"
         ? raw.endpoint
         : undefined;

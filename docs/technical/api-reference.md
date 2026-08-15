@@ -16,6 +16,10 @@ functions/api/generate/build.ts    → POST /api/generate/build
 functions/api/generate/status.ts   → GET  /api/generate/status
 functions/api/generate/fix.ts      → POST /api/generate/fix     (SSE)
 functions/api/generate/download.ts → GET  /api/generate/download
+functions/api/learning/start.ts    → POST /api/learning/start
+functions/api/learning/step.ts     → POST /api/learning/step
+functions/api/learning/status.ts   → GET  /api/learning/status
+functions/api/learning/evidence.ts → GET  /api/learning/evidence
 ```
 
 ## 模型与 Thinking 参数
@@ -101,6 +105,8 @@ GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
 响应：`{ "taskId": "1710556800000-abc123" }`
 
 **模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-v4-pro`（thinking），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 D1。
+
+Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRequests`。前端推进对应 Learning job 后，以同一 `plannerRequestId` 和 `learningToolJobs` 重入；服务端把验证结果作为 `role: "tool"` 消息接回原始 thinking/tool-call 对话，再继续产出计划。Generator、Reviewer、Reworker 与 Fixer 使用同一协议。
 
 请求：`{ "taskId": "1710556800000-abc123" }`
 
@@ -286,7 +292,7 @@ data: [DONE]
 | `XFYUN_APP_ID` / `XFYUN_API_KEY` / `XFYUN_API_SECRET` | 讯飞语音 | https://console.xfyun.cn |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。该开关只允许平台 DeepSeek 在遇到未被静态契约或公共知识覆盖的原子技术缺口时启动 URL discovery，并不强制每个任务联网。GLM BYOK 即使配置该变量也只读取已有公共知识，不会触发 DeepSeek 自动联网。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，平台 DeepSeek 的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。GLM BYOK 只读取已有公共知识，不会收到该工具。
 
 ## KV 绑定
 

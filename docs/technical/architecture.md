@@ -180,6 +180,12 @@ sequenceDiagram
 
 > 生成完成后，用户也可进入 `/ide/:taskId` 在浏览器内编辑文件，再点「编译」跳回 `/chat` 重新构建。
 
+### 模型主动 Learning
+
+Planner、Generator、Reviewer、Reworker 与 Fixer 的 DeepSeek 请求都会附带原生 `learn_public_api` function tool。DS 负责判断何时缺少精确的版本化公开 API 事实；Pages Functions 将工具参数转换为原子 `KnowledgeNeed`，校验公开命名空间或任务已声明的外部依赖，再由 `/api/learning/start|step|status` 完成资料发现、抓取和证据验证。完成后，原始 assistant `reasoning_content`、`tool_calls` 与验证结果会按 DeepSeek function-calling 协议回放，模型从中断点继续。
+
+Learning job 与模型请求 ID、需求指纹和任务状态栅栏绑定，结果写入 D1 公共知识缓存；运行时限制每段模型对话最多两轮工具调用。前端只负责跨 Worker 请求推进 job 和恢复连接，不判断是否需要学习。
+
 ## 核心设计决策
 
 ### 为什么用 Cloudflare Pages？

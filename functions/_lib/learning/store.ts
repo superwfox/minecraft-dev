@@ -1023,6 +1023,7 @@ const PUBLIC_LEARNING_REASON_CODES = new Set<LearningEvidenceReason["code"]>([
     "persistent_diagnostic_gap",
 ]);
 const PUBLIC_INTEGRATION_KINDS = new Set<ImplementationRecipeV1["integrationKind"]>([
+    "public_api",
     "nms",
     "craftbukkit",
     "version_reflection",

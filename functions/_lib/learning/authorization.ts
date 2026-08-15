@@ -5,6 +5,10 @@ import {
 } from "./plannerAuthorization";
 import type { LearningJobRecord, LearningReasonCode } from "./types";
 import { taskOperationLeaseFromState } from "../taskStore";
+import {
+    currentModelLearningAuthorization,
+    sameModelLearningAuthorization,
+} from "./tool";
 
 async function sha256Hex(value: string): Promise<string> {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -31,7 +35,9 @@ export async function learningJobAuthorizationFailure(
         : "";
     const reasonCode: LearningReasonCode = job.stage === "fix"
         ? "fix_authorization_expired"
-        : "planner_authorization_expired";
+        : job.stage === "tool"
+            ? "tool_authorization_expired"
+            : "planner_authorization_expired";
     if (!currentTaskFence || !expectedTaskFence || currentTaskFence !== expectedTaskFence) {
         return reasonCode;
     }
@@ -40,6 +46,14 @@ export async function learningJobAuthorizationFailure(
         return sameFixLearningAuthorization(
             currentFixLearningAuthorization(state),
             job.work.fixAuthorization,
+        ) ? undefined : reasonCode;
+    }
+
+    if (job.stage === "tool") {
+        const requestId = job.work.toolAuthorization?.requestId ?? "";
+        return sameModelLearningAuthorization(
+            currentModelLearningAuthorization(state, requestId),
+            job.work.toolAuthorization,
         ) ? undefined : reasonCode;
     }
 

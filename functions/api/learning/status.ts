@@ -25,7 +25,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const taskId = params.get("taskId") || "";
     const jobId = params.get("jobId") || "";
     const stageParam = params.get("stage") || "";
-    const stage: LearningStage | undefined = stageParam === "planner" || stageParam === "fix"
+    const stage: LearningStage | undefined = stageParam === "planner" || stageParam === "fix" || stageParam === "tool"
         ? stageParam
         : undefined;
     if (!taskId) return json({ error: "Missing taskId" }, 400);

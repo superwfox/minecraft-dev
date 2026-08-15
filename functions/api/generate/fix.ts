@@ -9,7 +9,6 @@ import {
 } from "../../_lib/learning/assessment";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
-    createFixLearningAuthorization,
     createFixRepairAuthorization,
     currentFixRepairAuthorization,
     sameFixRepairAuthorization,
@@ -47,6 +46,19 @@ import {
     REPAIR_LEASE_RENEW_INTERVAL_MS,
     REPAIR_RECOVERY_LEASE_MS,
 } from "../../_lib/buildRepairRecovery";
+import {
+    createModelLearningRequest,
+    learningToolDefinition,
+    MAX_LEARNING_TOOL_ROUNDS,
+    putModelLearningRequest,
+    removeModelLearningRequest,
+    type ModelChatMessage,
+    type ModelLearningRequest,
+} from "../../_lib/learning/tool";
+import {
+    resolveModelLearningRequest,
+    type ModelLearningResolution,
+} from "../../_lib/learning/toolRuntime";
 
 interface Env {
     DB?: D1Database;
@@ -55,7 +67,7 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+interface AICallResult { content: string; message: any; model: string; usage?: UsageBreakdown; }
 
 interface PendingKnowledgeUsage {
     knowledgeId: string;
@@ -80,6 +92,8 @@ async function callAIStream(
     llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     parentSignal?: AbortSignal,
+    messages?: ModelChatMessage[],
+    tools: Record<string, unknown>[] = [],
 ): Promise<AICallResult> {
     const model = llm.modelFor("pro");
     const body = {
@@ -88,8 +102,9 @@ async function callAIStream(
         stream_options: { include_usage: true },
         reasoning_effort: "high",
         thinking: { type: "enabled" },
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        messages: messages ?? [{ role: "system", content: system }, { role: "user", content: user }],
     };
+    if (tools.length) (body as any).tools = tools;
 
     // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
     const ctrl = new AbortController();
@@ -111,8 +126,14 @@ async function callAIStream(
         const reader = resp.body!.getReader();
         const decoder = new TextDecoder();
         let full = "";
+        let reasoningContent = "";
         let buffer = "";
         let usage: UsageBreakdown | undefined;
+        const toolCalls = new Map<number, {
+            id: string;
+            type: "function";
+            function: { name: string; arguments: string };
+        }>();
 
         while (true) {
             const { done, value } = await reader.read();
@@ -129,16 +150,47 @@ async function callAIStream(
                 if (payload === "[DONE]") continue;
                 try {
                     const chunk = JSON.parse(payload);
-                    const delta = chunk.choices?.[0]?.delta?.content;
-                    if (delta) {
-                        full += delta;
-                        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
+                    const delta = chunk.choices?.[0]?.delta ?? {};
+                    if (typeof delta.reasoning_content === "string") {
+                        reasoningContent += delta.reasoning_content;
+                    }
+                    if (typeof delta.content === "string" && delta.content) {
+                        full += delta.content;
+                        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta.content })}\n\n`));
+                    }
+                    for (const rawCall of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+                        const index = Math.max(0, Number(rawCall?.index) || 0);
+                        const current = toolCalls.get(index) ?? {
+                            id: "",
+                            type: "function" as const,
+                            function: { name: "", arguments: "" },
+                        };
+                        if (typeof rawCall?.id === "string") current.id += rawCall.id;
+                        if (typeof rawCall?.function?.name === "string") current.function.name += rawCall.function.name;
+                        if (typeof rawCall?.function?.arguments === "string") {
+                            current.function.arguments += rawCall.function.arguments;
+                        }
+                        toolCalls.set(index, current);
                     }
                     if (chunk.usage) usage = chunk.usage;
                 } catch { /* skip */ }
             }
         }
-        return { content: full, model, usage };
+        return {
+            content: full,
+            message: {
+                role: "assistant",
+                content: full,
+                reasoning_content: reasoningContent,
+                ...(toolCalls.size ? {
+                    tool_calls: [...toolCalls.entries()]
+                        .sort(([left], [right]) => left - right)
+                        .map(([, call]) => call),
+                } : {}),
+            },
+            model,
+            usage,
+        };
     } finally {
         clearTimeout(idle);
         parentSignal?.removeEventListener("abort", abortFromParent);
@@ -217,6 +269,10 @@ function progressSummary(progress: DiagnosticProgress | null, rolledBackFiles: s
 }
 
 function revokeFixAuthorizations(state: any): void {
+    if (typeof state.fixLearningRequestId === "string") {
+        removeModelLearningRequest(state, state.fixLearningRequestId);
+    }
+    delete state.fixLearningRequestId;
     delete state.fixLearningAuthorization;
     delete state.fixRepairAuthorization;
     delete state.fixKnowledgeNeeds;
@@ -240,6 +296,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ? "diagnose"
         : body.mode === "inspect" ? "inspect" : "repair";
     const requestedRepairAuthorization = body.repairAuthorization as FixRepairAuthorization | undefined;
+    const learningToolJobs = body.learningToolJobs && typeof body.learningToolJobs === "object"
+        ? body.learningToolJobs as Record<string, string>
+        : {};
     const token = context.env.GITHUB_PAT;
     const uid: string = (context.data as any)?.uid || "";
 
@@ -277,6 +336,43 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // diagnose/inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
     const llm: LLMProvider | null = mode === "repair" ? await resolveLLM(context) : null;
+    const storedFixLearningRequestId = typeof state.fixLearningRequestId === "string"
+        && /^learnreq_[a-f0-9]{32}$/i.test(state.fixLearningRequestId)
+        ? state.fixLearningRequestId
+        : "";
+    let fixLearningResolution: ModelLearningResolution | null = null;
+    if (mode === "repair" && storedFixLearningRequestId) {
+        fixLearningResolution = await resolveModelLearningRequest({
+            env: context.env,
+            state,
+            uid,
+            taskId,
+            requestId: storedFixLearningRequestId,
+            jobId: learningToolJobs[storedFixLearningRequestId],
+            maxCharacters: 6_000,
+        });
+        const matchesCurrentDiagnostics = fixLearningResolution.status !== "missing"
+            && fixLearningResolution.request.origin === "fix"
+            && fixLearningResolution.request.originKey.startsWith(
+                `fix:${String(state.fixDiagnosticsFingerprint || "")}:`,
+            );
+        if (fixLearningResolution.status === "pending" && matchesCurrentDiagnostics) {
+            const request = fixLearningResolution.request;
+            return new Response(JSON.stringify({
+                fixed: 0,
+                changed: 0,
+                learningToolRequests: [{
+                    requestId: request.requestId,
+                    origin: request.origin,
+                    targetPath: request.targetPath,
+                    questions: request.needs.map((need) => need.claim.question),
+                }],
+            }), { headers: { "Content-Type": "application/json" } });
+        }
+        if (!matchesCurrentDiagnostics) {
+            fixLearningResolution = { status: "missing", request: null };
+        }
+    }
     const repairLeaseToken = mode === "repair" ? `repair:${crypto.randomUUID()}` : "";
     let repairLeaseMode: TaskOperationLeaseMode | null = null;
     let repairLeaseReleased = false;
@@ -658,15 +754,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     return;
                 }
                 state.fixRepairAuthorization = repairAuthorization;
-                const learningAuthorization = state.fixKnowledgeNeeds.length
-                    ? createFixLearningAuthorization(state, fingerprint)
-                    : null;
-                if (learningAuthorization) state.fixLearningAuthorization = learningAuthorization;
-                else delete state.fixLearningAuthorization;
-                const learningEligible = !!learningAuthorization && state.fixKnowledgeNeeds.length > 0;
-                const msg = learningEligible
-                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个持续存在的外部 API 技术缺口`
-                    : "▸ 当前诊断先按普通修复处理，不启动联网学习";
+                delete state.fixLearningAuthorization;
+                const msg = state.fixKnowledgeNeeds.length
+                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个外部 API 技术缺口；DS 可在修复时主动调用 Learning`
+                    : "▸ 构建诊断已就绪，交由 DS 生成修复候选";
                 state.logs.push(msg);
                 await persistState(true);
                 await writer.write(sseEvent(encoder, { type: "log", msg }));
@@ -676,9 +767,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     fingerprint,
                     diagnostics,
                     repairAuthorization,
-                    ...(learningAuthorization ? { learningAuthorization } : {}),
-                    knowledgeNeeds: learningEligible ? state.fixKnowledgeNeeds.length : 0,
-                    learningEligible,
+                    knowledgeNeeds: state.fixKnowledgeNeeds.length,
                 }));
                 await writer.write(encoder.encode("data: [DONE]\n\n"));
                 return;
@@ -850,6 +939,36 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             });
             assertRepairLease();
             state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+            if (fixLearningResolution?.status === "resolved") {
+                state.knowledgeUsed = mergeKnowledgeUsed(
+                    state.knowledgeUsed,
+                    fixLearningResolution.knowledgeUsed,
+                );
+                context.waitUntil(recordKnowledgeContextUsage({
+                    env: context.env,
+                    items: fixLearningResolution.knowledgeUsed,
+                    generationTaskId: taskId,
+                    stage: `tool:fix:${fixLearningResolution.request.targetPath || "project"}`,
+                    diagnosticBefore: fingerprint,
+                }));
+            }
+            let previousFixLearningRequest = fixLearningResolution?.status === "resolved"
+                ? fixLearningResolution.request
+                : null;
+            let fixContinuationMessages = fixLearningResolution?.status === "resolved"
+                ? fixLearningResolution.messages
+                : null;
+            const expectedFixLearningOriginKey = `fix:${fingerprint}:${filesToFix[0]}`;
+            if (previousFixLearningRequest
+                && previousFixLearningRequest.originKey !== expectedFixLearningOriginKey) {
+                removeModelLearningRequest(state, previousFixLearningRequest.requestId);
+                previousFixLearningRequest = null;
+                fixContinuationMessages = null;
+                delete state.fixLearningRequestId;
+            } else if (fixLearningResolution?.status === "missing") {
+                removeModelLearningRequest(state, storedFixLearningRequestId);
+                delete state.fixLearningRequestId;
+            }
             const appliedKnowledgeUsage: PendingKnowledgeUsage[] = [];
             const markKnowledgeApplied = (filePath: string) => {
                 assertRepairLease();
@@ -923,6 +1042,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     knowledge.context,
                     progressSummary(progress, rolledBackFiles),
                 );
+                const isLearningToolTurn = filePath === filesToFix[0];
+                const messages: ModelChatMessage[] = isLearningToolTurn && fixContinuationMessages
+                    ? fixContinuationMessages
+                    : [
+                        { role: "system", content: prompt.system },
+                        { role: "user", content: prompt.user },
+                    ];
+                const tools = isLearningToolTurn
+                    && (!previousFixLearningRequest
+                        || previousFixLearningRequest.round < MAX_LEARNING_TOOL_ROUNDS)
+                    ? learningToolDefinition(llm)
+                    : [];
                 let fixRes = await callAIStream(
                     llm,
                     prompt.system,
@@ -930,9 +1061,61 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     writer,
                     encoder,
                     repairAbort.signal,
+                    messages,
+                    tools,
                 );
-                markKnowledgeApplied(filePath);
                 await charge(fixRes);
+                if (isLearningToolTurn) {
+                    const learningRequest = tools.length ? await createModelLearningRequest({
+                        message: fixRes.message,
+                        messages,
+                        origin: "fix",
+                        originKey: expectedFixLearningOriginKey,
+                        targetPath: filePath,
+                        round: (previousFixLearningRequest?.round ?? 0) + 1,
+                        coreType: state.coreType,
+                        mcVersion: state.version,
+                        allowedDependencies: Array.isArray(state.grade?.vector?.external_deps)
+                            ? state.grade.vector.external_deps
+                            : [],
+                    }) : null;
+                    if (learningRequest) {
+                        if (previousFixLearningRequest) {
+                            removeModelLearningRequest(state, previousFixLearningRequest.requestId);
+                        }
+                        putModelLearningRequest(state, learningRequest);
+                        state.fixLearningRequestId = learningRequest.requestId;
+                        state.repairAttempts = Math.max(0, repairAttempt - 1);
+                        state.status = "error";
+                        state.error = null;
+                        delete state.repairStartedAt;
+                        await flushCharge();
+                        await persistState(true);
+                        const msg = `▸ DS 在修复 ${filePath.split("/").pop()} 时主动请求查证公开 API`;
+                        await writer.write(sseEvent(encoder, { type: "log", msg }));
+                        await writer.write(sseEvent(encoder, {
+                            type: "result",
+                            fixed: 0,
+                            changed: 0,
+                            learningToolRequests: [{
+                                requestId: learningRequest.requestId,
+                                origin: learningRequest.origin,
+                                targetPath: learningRequest.targetPath,
+                                questions: learningRequest.needs.map((need) => need.claim.question),
+                            }],
+                            repairAuthorization: requestedRepairAuthorization,
+                        }));
+                        await writer.write(encoder.encode("data: [DONE]\n\n"));
+                        return;
+                    }
+                    if (previousFixLearningRequest) {
+                        removeModelLearningRequest(state, previousFixLearningRequest.requestId);
+                    }
+                    previousFixLearningRequest = null;
+                    fixContinuationMessages = null;
+                    delete state.fixLearningRequestId;
+                }
+                markKnowledgeApplied(filePath);
                 let fixedContent = stripFences(fixRes.content).trim();
                 let knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
                 if (knownApiIssues.length) {

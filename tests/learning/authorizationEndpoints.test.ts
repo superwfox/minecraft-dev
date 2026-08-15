@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LearningJobRecord, LearningJobStatus } from "../../functions/_lib/learning/types";
+import { createModelLearningRequest } from "../../functions/_lib/learning/tool";
 import { makeNeed } from "./testData";
 
 const getLearningJobMock = vi.hoisted(() => vi.fn());
@@ -262,6 +263,97 @@ afterEach(() => {
 });
 
 describe("learning endpoint authorization", () => {
+    it("starts a model-owned tool job bound to the request and task fence", async () => {
+        const toolRequest = await createModelLearningRequest({
+            message: {
+                tool_calls: [{
+                    id: "call_fancy_hooks",
+                    type: "function",
+                    function: {
+                        name: "learn_public_api",
+                        arguments: JSON.stringify({
+                            subject: "dev.fancy.hooks.FancyHooksAPI#resolve",
+                            question: "What is the exact FancyHooksAPI#resolve signature for Paper 1.21.4?",
+                            answerType: "signature",
+                            sourcePolicy: "api_signature",
+                            integrationKind: "external_plugin",
+                            dependency: "FancyHooks",
+                            packageName: "dev.fancy.hooks",
+                            symbol: "dev.fancy.hooks.FancyHooksAPI#resolve",
+                            searchQueries: ["FancyHooksAPI resolve Paper 1.21.4 official documentation"],
+                            acceptanceCriteria: ["Official documentation states the exact method signature."],
+                        }),
+                    },
+                }],
+            },
+            messages: [{ role: "user", content: "Integrate FancyHooks." }],
+            origin: "generate",
+            originKey: "bucket:Main.java:generate:0",
+            targetPath: "src/main/java/example/Main.java",
+            coreType: "paper",
+            mcVersion: "1.21.4",
+            allowedDependencies: ["FancyHooks"],
+        });
+        expect(toolRequest).not.toBeNull();
+
+        findActiveKnowledgeMock.mockResolvedValue([]);
+        resolveLLMMock.mockResolvedValue({ canAutoLearn: true, providerId: "deepseek" });
+        createOrGetLearningJobMock.mockImplementation(async (_env: unknown, input: any) => ({
+            jobId: "learn-tool",
+            ownerUid: "user-1",
+            generationTaskId: "task-1",
+            stage: input.stage,
+            lookupHash: input.lookupHash,
+            status: "queued",
+            needs: input.needs,
+            work: input.work,
+            resultIds: [],
+            revision: 0,
+            leaseToken: "",
+            leaseUntil: 0,
+            error: "",
+            createdAt: input.now,
+            updatedAt: input.now,
+        } satisfies LearningJobRecord));
+
+        const raw = JSON.stringify({
+            uid: "user-1",
+            coreType: "paper",
+            version: "1.21.4",
+            userPrompt: "Integrate FancyHooks into the plugin.",
+            grade: { vector: { external_deps: ["FancyHooks"] } },
+            modelLearningRequests: { [toolRequest!.requestId]: toolRequest },
+            __taskOperationFence: "state:tool-current",
+            __taskOperationLeaseUntil: 0,
+        });
+        const response = await startLearning(context(new Request(
+            "https://example.test/api/learning/start",
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    taskId: "task-1",
+                    stage: "tool",
+                    toolRequestId: toolRequest!.requestId,
+                }),
+            },
+        ), raw));
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+            learningProgress: { jobId: "learn-tool", stage: "tool", status: "queued" },
+        });
+        const input = createOrGetLearningJobMock.mock.calls[0][1] as any;
+        expect(input.stage).toBe("tool");
+        expect(input.work).toMatchObject({
+            taskStateFence: "state:tool-current",
+            toolAuthorization: {
+                requestId: toolRequest!.requestId,
+                needsFingerprint: toolRequest!.lookupHash,
+            },
+        });
+    });
+
     it("changes the deduplication identity when the task-state fence changes", async () => {
         findActiveKnowledgeMock.mockResolvedValue([]);
         resolveLLMMock.mockResolvedValue({ canAutoLearn: true, providerId: "deepseek" });

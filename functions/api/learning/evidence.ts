@@ -88,7 +88,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!taskId) return json({ error: "Missing taskId" }, 400);
 
     const hasJobIdentity = !!jobId || !!rawStage || rawRevision !== null;
-    const stage: LearningStage | "" = rawStage === "planner" || rawStage === "fix"
+    const stage: LearningStage | "" = rawStage === "planner" || rawStage === "fix" || rawStage === "tool"
         ? rawStage
         : "";
     const revision = rawRevision === null ? 0 : Number(rawRevision);

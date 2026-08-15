@@ -259,6 +259,7 @@ const learningStopped = computed(() =>
     || genTask.learningProgress.status === "cancelled",
 );
 const learningTitle = computed(() => {
+    if (genTask.learningProgress.stage === "tool") return "DS 主动联网查证";
     if (genTask.learningProgress.stage === "fix") return "修复前联网查证";
     if (genTask.learningProgress.stage === "planner") return "规划前联网查证";
     return "联网查证";

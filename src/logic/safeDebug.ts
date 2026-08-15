@@ -4,6 +4,7 @@ import type {
     LearningDebugEvent,
     LearningJobTelemetry,
     LearningReasonCode,
+    LearningStage,
     LearningStatus,
 } from "./generateState";
 
@@ -26,7 +27,8 @@ const LEARNING_REASON_CODES = new Set<LearningReasonCode>([
     "discovery_provider_incomplete", "discovery_provider_failed", "discovery_invalid_response",
     "no_candidate_sources", "no_fetchable_sources", "source_fetch_timeout", "verification_no_sources",
     "verification_timeout", "verification_http", "verification_invalid_response",
-    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired", "revision_conflict", "lease_conflict",
+    "verification_failed", "unresolved_knowledge_needs", "planner_authorization_expired", "fix_authorization_expired",
+    "tool_authorization_expired", "tool_request_invalid", "revision_conflict", "lease_conflict",
     "storage_unavailable", "job_deadline", "client_deadline", "client_network", "internal_error",
 ]);
 const BUCKET_DEBUG_MESSAGES = new Set([
@@ -79,7 +81,7 @@ type NormalizedLearningEvent = SafeLearningEvent & {
 };
 
 type SafeStageSummary = {
-    stage: "planner" | "fix";
+    stage: LearningStage;
     jobId?: string;
     status?: LearningStatus;
     revision?: number;
@@ -223,7 +225,9 @@ function normalizeLearningEvent(value: unknown): NormalizedLearningEvent | null 
         || raw.kind === "conflict" || raw.kind === "client"
         ? raw.kind
         : undefined;
-    const stage = raw.stage === "planner" || raw.stage === "fix" ? raw.stage : undefined;
+    const stage = raw.stage === "planner" || raw.stage === "fix" || raw.stage === "tool"
+        ? raw.stage
+        : undefined;
     const endpoint = raw.endpoint === "start" || raw.endpoint === "step" || raw.endpoint === "status"
         ? raw.endpoint
         : undefined;
@@ -336,7 +340,7 @@ function summarizeBuildDiagnostics(values: unknown[]): SafeDebugExport["build"][
 }
 
 function summarizeLearningStages(events: NormalizedLearningEvent[]): SafeStageSummary[] {
-    const summaries = new Map<"planner" | "fix", SafeStageSummary>();
+    const summaries = new Map<LearningStage, SafeStageSummary>();
     for (const event of events) {
         let summary = summaries.get(event.stage);
         if (!summary) {
@@ -365,8 +369,8 @@ function summarizeLearningStages(events: NormalizedLearningEvent[]): SafeStageSu
         if (event.responseRevision !== undefined) summary.revision = event.responseRevision;
         if (event.telemetry) summary.telemetry = event.telemetry;
     }
-    return ["planner", "fix"]
-        .map((stage) => summaries.get(stage as "planner" | "fix"))
+    return (["planner", "fix", "tool"] as LearningStage[])
+        .map((stage) => summaries.get(stage))
         .filter((summary): summary is SafeStageSummary => !!summary);
 }
 
