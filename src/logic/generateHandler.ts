@@ -449,10 +449,6 @@ interface FixRepairAuthorization {
     repairAttempts: number;
 }
 
-interface FixLearningAuthorization extends FixRepairAuthorization {
-    previousRunId: number;
-}
-
 function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | null {
     const runId = Number(value?.runId);
     const repairAttempts = Number(value?.repairAttempts);
@@ -467,21 +463,11 @@ function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | n
     return { runId, diagnosticsFingerprint, repairAttempts };
 }
 
-function normalizeFixLearningAuthorization(value: any): FixLearningAuthorization | null {
-    const repairAuthorization = normalizeFixRepairAuthorization(value);
-    const previousRunId = Number(value?.previousRunId);
-    if (!repairAuthorization
-        || !Number.isInteger(previousRunId)
-        || previousRunId <= 0
-        || repairAuthorization.repairAttempts < 1) return null;
-    return { ...repairAuthorization, previousRunId };
-}
-
 async function runLearning(
-    stage: LearningStage,
-    chosenPathId?: string,
-    options?: { resumeExisting?: boolean; fixAuthorization?: FixLearningAuthorization },
+    toolRequestId: string,
+    options?: { resumeExisting?: boolean },
 ): Promise<void> {
+    const stage: LearningStage = "tool";
     const startedAt = Date.now();
     let jobDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
     let lastMessage = "";
@@ -495,13 +481,12 @@ async function runLearning(
     const resumeRequested = options?.resumeExisting === true
         && restoredProgress.stage === stage;
     const unconfirmedLocalLearning = isUnconfirmedLearningProgress(restoredProgress);
-    if (stage !== "fix"
-        && resumeRequested
+    if (resumeRequested
         && LEARNING_TERMINAL.has(restoredProgress.status)
         && !unconfirmedLocalLearning) {
         return;
     }
-    const canResumeExactJob = stage !== "fix" && shouldResumeLearningProgress(
+    const canResumeExactJob = shouldResumeLearningProgress(
         restoredProgress,
         stage,
         options?.resumeExisting === true,
@@ -688,8 +673,7 @@ async function runLearning(
                 body: {
                     taskId: genTask.taskId,
                     stage,
-                    chosenPathId,
-                    fixAuthorization: options?.fixAuthorization,
+                    toolRequestId,
                     remainingMs: Math.max(1, jobDeadline - Date.now()),
                 },
                 deadline: outboundDeadline(),
@@ -844,13 +828,37 @@ async function runLearning(
 
     if (isTerminal()) return;
     if (!stopRetrying && Date.now() < outboundDeadline()) {
-        await runLearning(stage, chosenPathId, {
+        await runLearning(toolRequestId, {
             ...options,
             resumeExisting: true,
         });
         return;
     }
     markClientDeferred(Date.now() >= jobDeadline ? "client_deadline" : lastFailureReason);
+}
+
+async function runModelLearningToolRequests(
+    value: unknown,
+    jobIds: Record<string, string>,
+): Promise<boolean> {
+    if (!Array.isArray(value) || value.length === 0) return false;
+    const requests = value
+        .filter((item: any) => item && /^learnreq_[a-f0-9]{32}$/i.test(String(item.requestId || "")))
+        .slice(0, 3);
+    if (!requests.length) return false;
+
+    for (const request of requests) {
+        const requestId = String(request.requestId);
+        const question = Array.isArray(request.questions)
+            ? request.questions.find((item: unknown) => typeof item === "string")
+            : "";
+        genTask.logs.push(`▸ DS 主动调用 Learning${question ? `：${question}` : ""}`);
+        await runLearning(requestId);
+        if (genTask.learningProgress.jobId) {
+            jobIds[requestId] = genTask.learningProgress.jobId;
+        }
+    }
+    return true;
 }
 
 /** 从流式 JSON 文本中提取 "todos":[...] 数组里已完整闭合的对象 */
@@ -1076,12 +1084,21 @@ async function streamFileGeneration(taskId: string): Promise<any> {
  *  收不到任何字节(CF 强杀 / 上游彻底断死)才 abort → 前端重试同一桶。
  *  服务端在每个阶段后落盘，重试不会重做整份文件。 */
 const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
-async function streamBucketGeneration(taskId: string, bucketIndex: number): Promise<any> {
+async function streamBucketGeneration(
+    taskId: string,
+    bucketIndex: number,
+    learningToolJobs: Record<string, string> = {},
+): Promise<any> {
     const ctrl = new AbortController();
     const resp = await fetchWithByokFallback("/api/generate/bucket", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId, bucketIndex, superConcurrency: superConcurrency.value }),
+        body: JSON.stringify({
+            taskId,
+            bucketIndex,
+            superConcurrency: superConcurrency.value,
+            learningToolJobs,
+        }),
         signal: ctrl.signal,
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -1134,6 +1151,7 @@ async function streamBuildFix(
     taskId: string,
     mode: "diagnose" | "repair" | "inspect" = "repair",
     repairAuthorization?: FixRepairAuthorization,
+    learningToolJobs: Record<string, string> = {},
 ): Promise<any> {
     const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
@@ -1142,6 +1160,7 @@ async function streamBuildFix(
             taskId,
             mode,
             ...(mode === "repair" ? { repairAuthorization } : {}),
+            ...(mode === "repair" ? { learningToolJobs } : {}),
         }),
     });
     if (!resp.ok) {
@@ -1157,6 +1176,25 @@ async function streamBuildFix(
     }
 
     return readSSE(resp);
+}
+
+async function repairWithLearningTools(
+    taskId: string,
+    repairAuthorization: FixRepairAuthorization,
+): Promise<any> {
+    const learningToolJobs: Record<string, string> = {};
+    for (let round = 0; round <= 3; round++) {
+        const result = await streamBuildFix(
+            taskId,
+            "repair",
+            repairAuthorization,
+            learningToolJobs,
+        );
+        if (!await runModelLearningToolRequests(result?.learningToolRequests, learningToolJobs)) {
+            return result;
+        }
+    }
+    throw new Error("DS 连续请求 Learning 超过安全上限，已停止本轮自动修复");
 }
 
 async function recoverBuildRepair(taskId: string): Promise<any> {
@@ -1181,7 +1219,7 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
                 if (!repairAuthorization) {
                     throw new Error("现有自动修复缺少可恢复授权，请重新读取构建诊断");
                 }
-                return streamBuildFix(taskId, "repair", repairAuthorization);
+                return repairWithLearningTools(taskId, repairAuthorization);
             }
             await new Promise(resolve => setTimeout(resolve, Math.min(2_000, remainingMs)));
             continue;
@@ -1190,7 +1228,7 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
             throw new Error(status.error || "自动修复失败");
         }
         if (status.status === "error" && status.repairPending && repairAuthorization) {
-            return streamBuildFix(taskId, "repair", repairAuthorization);
+            return repairWithLearningTools(taskId, repairAuthorization);
         }
         if (Date.now() >= startGraceDeadline) {
             const diagnosis = await streamBuildFix(taskId, "diagnose");
@@ -1198,7 +1236,7 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
             if (!recoveredAuthorization) {
                 throw new Error(diagnosis?.reason || "未能恢复当前构建的修复授权");
             }
-            return streamBuildFix(taskId, "repair", recoveredAuthorization);
+            return repairWithLearningTools(taskId, recoveredAuthorization);
         }
         await new Promise(resolve => setTimeout(resolve, 1_000));
     }
@@ -1235,29 +1273,13 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
         if (!repairAuthorization) {
             throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
         }
-        if (diagnosis?.learningEligible === true && Number(diagnosis?.knowledgeNeeds) > 0) {
-            const learningAuthorization = normalizeFixLearningAuthorization(diagnosis?.learningAuthorization);
-            if (!learningAuthorization) {
-                throw new Error("服务端未返回当前诊断的联网学习授权");
-            }
-            genTask.logs.push(`▸ ${diagnosis.knowledgeNeeds} 个外部 API 技术缺口在普通修复后仍存在，继续查证`);
-            genTask.fixResumeStage = "learning";
-            persistGenTaskNow();
-            try {
-                await runLearning("fix", undefined, {
-                    resumeExisting: stage === "learning",
-                    fixAuthorization: learningAuthorization,
-                });
-            } catch (error: any) {
-                genTask.logs.push(`! 联网查证未完成，继续使用现有知识修复: ${error?.message || error}`);
-            }
-        } else if (stage === "learning") {
-            genTask.logs.push("▸ 服务端复核后不再满足学习条件，直接继续普通修复");
+        if (stage === "learning") {
+            genTask.logs.push("↻ 页面恢复：旧版预判学习阶段已迁移为 DS 工具调用，继续修复");
         }
 
         genTask.fixResumeStage = "repairing";
         persistGenTaskNow();
-        fixResult = await streamBuildFix(taskId, "repair", repairAuthorization);
+        fixResult = await repairWithLearningTools(taskId, repairAuthorization);
     }
 
     const changed = repairedFileCount(fixResult);
@@ -1353,6 +1375,7 @@ export async function resumeGenerate() {
         const bucketMap = new Map<number, number>();
         for (const f of genTask.files) { const b = f.bucket ?? 0; bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1); }
         const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
+        const learningToolJobs: Record<string, string> = {};
 
         for (const bucketIndex of sortedBucketIds) {
             let bucketDone = false, guard = 0, noProgress = 0;
@@ -1363,7 +1386,7 @@ export async function resumeGenerate() {
                 const doneBefore = doneCount();
                 let bucketResult: any = null;
                 for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
-                    try { bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex); }
+                    try { bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs); }
                     catch { bucketResult = null; }
                 }
                 if (!bucketResult) {
@@ -1373,6 +1396,10 @@ export async function resumeGenerate() {
                     continue;
                 }
                 if (bucketResult.replan) throw new Error("续跑仍未通过审查，请重试");
+                if (await runModelLearningToolRequests(bucketResult.learningToolRequests, learningToolJobs)) {
+                    noProgress = 0;
+                    continue;
+                }
                 for (const c of bucketResult.completed || []) {
                     const f = genTask.files.find(x => x.path === c.path);
                     if (f) { f.content = c.content; f.status = "done"; }
@@ -1563,19 +1590,8 @@ export async function startGenerate(
     }
     }
 
-    // ── Phase 2.8: Planner 前只查证明确的外部 API 实现缺口 ──
-    const hasPreparedPlannerLearning = resumePrepared
-        && genTask.learningProgress.stage === "planner"
-        && genTask.learningProgress.status !== "idle"
-        && (!LEARNING_TERMINAL.has(genTask.learningProgress.status)
-            || isUnconfirmedLearningProgress(genTask.learningProgress));
-    if (genTask.plannerLearningRequired || hasPreparedPlannerLearning) {
-        setPhase("planning", "正在查证外部 API 与目标版本实现...");
-        await runLearning("planner", chosenPathId, { resumeExisting: resumePrepared });
-    } else {
-        setPhase("planning", "未发现需要联网查证的外部 API，开始规划...");
-        genTask.logs.push("▸ 未发现 NMS、版本反射或明确第三方插件 API 缺口，跳过联网学习");
-    }
+    // Learning 的触发权交给后续 DS coding agent；这里仅进入规划，不再根据 Grader 结果抢跑。
+    setPhase("planning", "开始规划；DS 可在需要精确外部 API 证据时主动调用 Learning...");
 
     // ── Phase 3: planning + generating + build (with replan loop) ──
     const firstPlannerAttempt = resumePrepared && genTask.plannerRequestId
@@ -1610,13 +1626,26 @@ export async function startGenerate(
             // 必须在请求发出前同步落盘；刷新后才能复用同一 replan 意图与幂等 ID。
             persistGenTaskNow();
 
-            const planResult = await postPlanner({
-                taskId: genTask.taskId,
-                chosenPathId,
-                skillIds: [...selected],
-                replan: plannerReplan,
-                plannerRequestId,
-            });
+            const plannerLearningToolJobs: Record<string, string> = {};
+            let planResult: any;
+            for (let plannerToolTurn = 0; ; plannerToolTurn++) {
+                if (plannerToolTurn > 4) {
+                    throw new Error("Planner Learning 工具恢复次数超过安全上限");
+                }
+                planResult = await postPlanner({
+                    taskId: genTask.taskId,
+                    chosenPathId,
+                    skillIds: [...selected],
+                    replan: plannerReplan,
+                    plannerRequestId,
+                    learningToolJobs: plannerLearningToolJobs,
+                });
+                if (!await runModelLearningToolRequests(
+                    planResult?.learningToolRequests,
+                    plannerLearningToolJobs,
+                )) break;
+                setPhase("planning", "Learning 已返回，Planner 继续规划...");
+            }
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;
             genTask.javaVersion = planResult.javaVersion;
@@ -1644,6 +1673,7 @@ export async function startGenerate(
                 bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1);
             }
             const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
+            const learningToolJobs: Record<string, string> = {};
             let needReplan = false;
 
             let allBucketsDone = false;
@@ -1665,7 +1695,7 @@ export async function startGenerate(
                     let bucketResult: any = null;
                     for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
                         try {
-                            bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex);
+                            bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
                         } catch (be: any) {
                             const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
                             genTask.logs.push(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
@@ -1687,6 +1717,10 @@ export async function startGenerate(
                         continue;
                     }
                     if (bucketResult.replan) { needReplan = true; break; }
+                    if (await runModelLearningToolRequests(bucketResult.learningToolRequests, learningToolJobs)) {
+                        noProgress = 0;
+                        continue;
+                    }
                     // 服务端每次返回该桶已落盘的完成文件，可修复“落盘后断流”造成的前端状态缺口。
                     for (const c of bucketResult.completed || []) {
                         const f = genTask.files.find(x => x.path === c.path);
@@ -1844,20 +1878,6 @@ async function buildWithRetry(
             if (!repairAuthorization) {
                 throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
             }
-            if (diagnosis?.learningEligible === true && Number(diagnosis?.knowledgeNeeds) > 0) {
-                const learningAuthorization = normalizeFixLearningAuthorization(diagnosis?.learningAuthorization);
-                if (!learningAuthorization) {
-                    throw new Error("服务端未返回当前诊断的联网学习授权");
-                }
-                genTask.logs.push(`▸ ${diagnosis.knowledgeNeeds} 个外部 API 技术缺口在普通修复后仍存在，开始查证`);
-                genTask.fixResumeStage = "learning";
-                persistGenTaskNow();
-                try {
-                    await runLearning("fix", undefined, { fixAuthorization: learningAuthorization });
-                } catch (error: any) {
-                    genTask.logs.push(`! 联网查证未完成，继续使用现有知识修复: ${error?.message || error}`);
-                }
-            }
             genTask.fixResumeStage = "repairing";
             persistGenTaskNow();
         } else {
@@ -1865,11 +1885,9 @@ async function buildWithRetry(
             persistGenTaskNow();
         }
 
-        const fixResult = await streamBuildFix(
-            genTask.taskId,
-            canRepair ? "repair" : "inspect",
-            repairAuthorization ?? undefined,
-        );
+        const fixResult = canRepair && repairAuthorization
+            ? await repairWithLearningTools(genTask.taskId, repairAuthorization)
+            : await streamBuildFix(genTask.taskId, "inspect");
         if (!canRepair) {
             genTask.fixResumeStage = "";
             persistGenTaskNow();

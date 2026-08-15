@@ -6,6 +6,20 @@ import { resolveLLM } from "../../_lib/llm";
 import { buildApiContractContext } from "../../_lib/apiContracts";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
+    createModelLearningRequest,
+    getModelLearningRequest,
+    learningToolDefinition,
+    MAX_LEARNING_TOOL_ROUNDS,
+    putModelLearningRequest,
+    removeModelLearningRequest,
+    type ModelChatMessage,
+    type ModelLearningRequest,
+} from "../../_lib/learning/tool";
+import {
+    resolveModelLearningRequest,
+    type ModelLearningResolution,
+} from "../../_lib/learning/toolRuntime";
+import {
     assessPlannerLearningAuthorization,
     assessPlannerResultAuthorization,
     samePlannerResultAuthorization,
@@ -188,6 +202,25 @@ function plannerResultResponse(taskId: string, state: any): Response {
     });
 }
 
+function plannerLearningResponse(
+    taskId: string,
+    plannerRequestId: string,
+    request: ModelLearningRequest,
+): Response {
+    return new Response(JSON.stringify({
+        taskId,
+        plannerRequestId,
+        learningToolRequests: [{
+            requestId: request.requestId,
+            origin: request.origin,
+            targetPath: request.targetPath,
+            questions: request.needs.map((need) => need.claim.question),
+        }],
+    }), {
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
 function parsePlannerRequestId(value: unknown): string {
     return typeof value === "string" && /^plan_[a-z0-9]{16,64}$/i.test(value)
         ? value
@@ -351,6 +384,35 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     const plannerRequestId = suppliedPlannerRequestId
         || `plan_${crypto.randomUUID().replace(/-/g, "")}`;
+    const learningToolJobs = body.learningToolJobs && typeof body.learningToolJobs === "object"
+        ? body.learningToolJobs as Record<string, string>
+        : {};
+    const plannerLearningOriginKey = `planner:${plannerRequestId}`;
+    const initialState = JSON.parse(raw);
+    const storedPlannerLearningRequestId = typeof initialState.plannerLearningRequestId === "string"
+        && /^learnreq_[a-f0-9]{32}$/i.test(initialState.plannerLearningRequestId)
+        ? initialState.plannerLearningRequestId
+        : "";
+    let plannerLearningResolution: ModelLearningResolution | null = null;
+    if (storedPlannerLearningRequestId) {
+        plannerLearningResolution = await resolveModelLearningRequest({
+            env: context.env,
+            state: initialState,
+            uid,
+            taskId,
+            requestId: storedPlannerLearningRequestId,
+            jobId: learningToolJobs[storedPlannerLearningRequestId],
+            maxCharacters: 6_000,
+        });
+        if (plannerLearningResolution.status === "pending"
+            && plannerLearningResolution.request.originKey === plannerLearningOriginKey) {
+            return plannerLearningResponse(
+                taskId,
+                plannerRequestId,
+                plannerLearningResolution.request,
+            );
+        }
+    }
     const leaseToken = `planner_${crypto.randomUUID().replace(/-/g, "")}`;
     let leaseMode;
     try {
@@ -393,6 +455,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return new Response("Task state unavailable", { status: 503 });
         }
         const state = JSON.parse(latestAfterLeaseRaw);
+        const currentPlannerLearningRequestId = typeof state.plannerLearningRequestId === "string"
+            && /^learnreq_[a-f0-9]{32}$/i.test(state.plannerLearningRequestId)
+            ? state.plannerLearningRequestId
+            : "";
+        const currentPlannerLearningRequest = currentPlannerLearningRequestId
+            ? getModelLearningRequest(state, currentPlannerLearningRequestId)
+            : null;
+        let previousPlannerLearningRequest: ModelLearningRequest | null = null;
+        let plannerContinuationMessages: ModelChatMessage[] | null = null;
+        if (plannerLearningResolution?.status === "resolved"
+            && currentPlannerLearningRequest?.requestId === plannerLearningResolution.request.requestId
+            && currentPlannerLearningRequest.originKey === plannerLearningOriginKey) {
+            previousPlannerLearningRequest = plannerLearningResolution.request;
+            plannerContinuationMessages = plannerLearningResolution.messages;
+        } else if (currentPlannerLearningRequest?.originKey === plannerLearningOriginKey) {
+            return plannerLearningResponse(taskId, plannerRequestId, currentPlannerLearningRequest);
+        } else if (currentPlannerLearningRequestId) {
+            removeModelLearningRequest(state, currentPlannerLearningRequestId);
+            delete state.plannerLearningRequestId;
+        }
 
         // ─── 分级确认门：非直接级须先选定实现路径，否则不消耗全量 plan 调用 ───
         const chosenPathId = typeof body.chosenPathId === "string" ? body.chosenPathId.trim() : "";
@@ -494,6 +576,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             title: "Planner 已验证公共技术知识",
         });
         state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+        if (plannerLearningResolution?.status === "resolved"
+            && previousPlannerLearningRequest) {
+            state.knowledgeUsed = mergeKnowledgeUsed(
+                state.knowledgeUsed,
+                plannerLearningResolution.knowledgeUsed,
+            );
+            context.waitUntil(recordKnowledgeContextUsage({
+                env: context.env,
+                items: plannerLearningResolution.knowledgeUsed,
+                generationTaskId: taskId,
+                stage: "tool:planner",
+            }));
+        }
 
         const { system, user } = plannerPrompt(
             state.userPrompt,
@@ -524,6 +619,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             "Planner 模型调用超时",
             operationDeadline.signal,
         );
+        const plannerMessages: ModelChatMessage[] = plannerContinuationMessages ?? [
+            { role: "system", content: system },
+            { role: "user", content: user },
+        ];
+        const plannerTools = !previousPlannerLearningRequest
+            || previousPlannerLearningRequest.round < MAX_LEARNING_TOOL_ROUNDS
+            ? learningToolDefinition(llm)
+            : [];
         let resp: Response;
         let responseText: string;
         try {
@@ -534,7 +637,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     model: llm.modelFor("pro"),
                     reasoning_effort: "high",
                     thinking: { type: "enabled" },
-                    messages: [{ role: "system", content: system }, { role: "user", content: user }],
+                    messages: plannerMessages,
+                    ...(plannerTools.length ? { tools: plannerTools } : {}),
                 }),
                 signal: upstreamDeadline.signal,
             }), upstreamDeadline.signal, "Planner 模型调用超时");
@@ -555,7 +659,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }));
 
         const data = JSON.parse(responseText) as any;
-        const content = stripFences(data.choices?.[0]?.message?.content ?? "");
+        const modelMessage = data.choices?.[0]?.message ?? {};
+        const content = stripFences(modelMessage.content ?? "");
 
         // 计费：累积 Planner 调用成本到 D1 任务记录（BYOK 自带 key 时跳过）
         if (!llm.byok && uid && data.usage) {
@@ -575,6 +680,45 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 );
             }
         }
+
+        const nextPlannerLearningRequest = plannerTools.length
+            ? await createModelLearningRequest({
+                message: modelMessage,
+                messages: plannerMessages,
+                origin: "planner",
+                originKey: plannerLearningOriginKey,
+                round: (previousPlannerLearningRequest?.round ?? 0) + 1,
+                coreType: state.coreType,
+                mcVersion: state.version,
+                allowedDependencies: Array.isArray(state.grade?.vector?.external_deps)
+                    ? state.grade.vector.external_deps
+                    : [],
+            })
+            : null;
+        if (nextPlannerLearningRequest) {
+            if (previousPlannerLearningRequest) {
+                removeModelLearningRequest(state, previousPlannerLearningRequest.requestId);
+            }
+            putModelLearningRequest(state, nextPlannerLearningRequest);
+            state.plannerLearningRequestId = nextPlannerLearningRequest.requestId;
+            state.plannerRequestId = plannerRequestId;
+            state.logs.push("Planner 主动请求查证公开 API，等待 Learning 返回");
+            const committed = await withPlannerDeadline(() => putTaskWithPlannerLease(
+                context.env,
+                taskId,
+                JSON.stringify(state),
+                leaseToken,
+                leaseMode,
+                3600,
+                uid,
+            ), operationDeadline.signal, "提交 Planner Learning 请求超时");
+            if (!committed) return plannerBusyResponse();
+            return plannerLearningResponse(taskId, plannerRequestId, nextPlannerLearningRequest);
+        }
+        if (previousPlannerLearningRequest) {
+            removeModelLearningRequest(state, previousPlannerLearningRequest.requestId);
+        }
+        delete state.plannerLearningRequestId;
 
         let plan: any;
         try {

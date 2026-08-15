@@ -27,6 +27,7 @@ function safeCode(value: string, max: number): string {
 }
 
 const RECIPE_INTEGRATION_KINDS = new Set<ImplementationRecipeV1["integrationKind"]>([
+    "public_api",
     "nms",
     "craftbukkit",
     "version_reflection",

@@ -22,6 +22,18 @@ import {
 } from "../../_lib/learning/plannerAuthorization";
 import { learningSnapshot } from "../../_lib/learning/public";
 import {
+    currentModelLearningAuthorization,
+    getModelLearningRequest,
+    isAllowedModelLearningNeed,
+    modelLearningAllowedPublicTerms,
+    setModelLearningRequestResult,
+    type ModelLearningRequest,
+} from "../../_lib/learning/tool";
+import {
+    containsSharedKnowledgeForbiddenTerm,
+    sharedKnowledgeForbiddenTerms,
+} from "../../_lib/learning/privacy";
+import {
     createOrGetLearningJob,
     findActiveKnowledge,
     LearningStoreUnavailableError,
@@ -52,14 +64,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let body: any = {};
     try { body = await context.request.json(); } catch { /* validated below */ }
     const taskId = typeof body.taskId === "string" ? body.taskId : "";
-    const stage: LearningStage = body.stage === "fix" ? "fix" : "planner";
+    const stage: LearningStage | null = body.stage === "planner"
+        || body.stage === "fix"
+        || body.stage === "tool"
+        ? body.stage
+        : null;
     if (!taskId) return json({ error: "Missing taskId" }, 400);
+    if (!stage) return json({ error: "Invalid learning stage" }, 400);
 
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
 
     const chosenPathId = typeof body.chosenPathId === "string" ? body.chosenPathId.trim() : "";
+    const toolRequestId = typeof body.toolRequestId === "string" ? body.toolRequestId.trim() : "";
+    let toolRequest: ModelLearningRequest | null = null;
+    if (stage === "tool") {
+        toolRequest = getModelLearningRequest(state, toolRequestId);
+        if (!toolRequest) {
+            return json({
+                error: "Model learning tool request is no longer current",
+                reasonCode: "tool_authorization_expired",
+            }, 409);
+        }
+    }
     let pathSelectionChanged = false;
     if (stage === "planner") {
         const paths = Array.isArray(state.grade?.paths) ? state.grade.paths : [];
@@ -101,6 +129,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let needs: KnowledgeNeed[] = [];
     let contractCoveredCount = 0;
     let plannerAuthorization: PlannerLearningAuthorization | undefined;
+    let toolAuthorization: { requestId: string; needsFingerprint: string } | undefined;
     if (stage === "planner") {
         const plannerAssessment = await assessPlannerLearningAuthorization(state);
         if (!plannerAssessment) {
@@ -112,7 +141,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         needs = plannerAssessment.needs;
         contractCoveredCount = plannerAssessment.coveredCount;
         plannerAuthorization = plannerAssessment.authorization;
-    } else {
+    } else if (stage === "fix") {
         const assessment = assessKnowledgeNeeds(state.fixKnowledgeNeeds, {
             coreType: state.coreType,
             mcVersion: state.version,
@@ -135,10 +164,84 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }, eligibleNeeds);
         needs = deduplicateKnowledgeNeeds(contractCoverage.uncovered);
         contractCoveredCount = contractCoverage.covered.length;
+    } else {
+        const assessment = assessKnowledgeNeeds(toolRequest?.needs, {
+            coreType: state.coreType,
+            mcVersion: state.version,
+        });
+        if (!toolRequest
+            || assessment.accepted.length !== toolRequest.needs.length
+            || assessment.rejected.length > 0
+            || assessment.accepted.some((need) => !isAllowedModelLearningNeed(need, externalDeps))) {
+            setModelLearningRequestResult(state, toolRequestId, {
+                status: "deferred",
+                reasonCode: "tool_request_invalid",
+            });
+            try { await putTaskState(context.env, taskId, state, 3600, uid); }
+            catch { return storageUnavailable(); }
+            return json(learningSnapshot(null, [], 0, {
+                status: "deferred",
+                stage,
+                reasonCode: "tool_request_invalid",
+            }));
+        }
+        const allowedDependencyTerms = sharedKnowledgeForbiddenTerms({ externalDeps });
+        const allowedToolTerms = new Set([
+            ...allowedDependencyTerms,
+            ...modelLearningAllowedPublicTerms(assessment.accepted),
+        ]);
+        const identityTerms = sharedKnowledgeForbiddenTerms({
+            taskId,
+            projectName: state.projectName,
+            packageName: state.packageName,
+            generatedFilePaths: Array.isArray(state.generatedFiles)
+                ? state.generatedFiles.map((file: any) => typeof file?.path === "string" ? file.path : "").filter(Boolean)
+                : [],
+            clarifyRounds: Array.isArray(state.clarifyRounds) ? state.clarifyRounds : [],
+        });
+        const promptTerms = sharedKnowledgeForbiddenTerms({ userPrompt: state.userPrompt })
+            .filter((term) => !allowedToolTerms.has(term));
+        const privateTerms = [...new Set([...identityTerms, ...promptTerms])];
+        if (containsSharedKnowledgeForbiddenTerm(assessment.accepted, privateTerms)) {
+            setModelLearningRequestResult(state, toolRequestId, {
+                status: "deferred",
+                reasonCode: "tool_request_invalid",
+            });
+            try { await putTaskState(context.env, taskId, state, 3600, uid); }
+            catch { return storageUnavailable(); }
+            return json(learningSnapshot(null, [], 0, {
+                status: "deferred",
+                stage,
+                reasonCode: "tool_request_invalid",
+            }));
+        }
+        const contractCoverage = partitionKnowledgeNeedsByApiContracts({
+            coreType: state.coreType,
+            version: state.version,
+            externalDeps,
+            generatedFiles: Array.isArray(state.generatedFiles) ? state.generatedFiles : [],
+        }, assessment.accepted);
+        needs = deduplicateKnowledgeNeeds(contractCoverage.uncovered);
+        contractCoveredCount = contractCoverage.covered.length;
+        toolAuthorization = currentModelLearningAuthorization(state, toolRequestId) ?? undefined;
+        if (!toolAuthorization) {
+            return json({
+                error: "Model learning tool request is no longer current",
+                reasonCode: "tool_authorization_expired",
+            }, 409);
+        }
     }
     const lookupKeys = learningLookupKeys(needs);
 
     if (!needs.length) {
+        if (stage === "tool") {
+            setModelLearningRequestResult(state, toolRequestId, {
+                status: "ready",
+                reasonCode: contractCoveredCount ? "static_contract_covered" : "no_learning_needed",
+            });
+            try { await putTaskState(context.env, taskId, state, 3600, uid); }
+            catch { return storageUnavailable(); }
+        }
         return json(learningSnapshot(null, [], 0, {
             status: "ready",
             stage,
@@ -164,6 +267,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             });
             try {
                 state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, active);
+                if (stage === "tool") {
+                    setModelLearningRequestResult(state, toolRequestId, {
+                        status: "ready",
+                        reasonCode: "knowledge_cache_hit",
+                    });
+                }
                 await putTaskState(context.env, taskId, state, 3600, uid);
             } catch (error) {
                 console.warn("learning cache-hit task persistence failed", error);
@@ -172,14 +281,40 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return json(snapshot);
         }
 
-        const llm = await resolveLLM(context);
-        if (!llm.canAutoLearn) {
+        if (state.quotaExhausted) {
+            if (stage === "tool") {
+                state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, active);
+                setModelLearningRequestResult(state, toolRequestId, {
+                    status: "deferred",
+                    reasonCode: "quota_exhausted",
+                });
+                try { await putTaskState(context.env, taskId, state, 3600, uid); }
+                catch { return storageUnavailable(); }
+            }
             return json(learningSnapshot(null, active, 0, {
                 status: "deferred",
                 stage,
-                reasonCode: llm.providerId === "glm"
-                    ? "glm_auto_learning_disabled"
-                    : "auto_learning_disabled",
+                reasonCode: "quota_exhausted",
+            }));
+        }
+
+        const llm = await resolveLLM(context);
+        if (!llm.canAutoLearn) {
+            const reasonCode = llm.providerId === "glm"
+                ? "glm_auto_learning_disabled" as const
+                : "auto_learning_disabled" as const;
+            if (stage === "tool") {
+                setModelLearningRequestResult(state, toolRequestId, {
+                    status: "deferred",
+                    reasonCode,
+                });
+                try { await putTaskState(context.env, taskId, state, 3600, uid); }
+                catch { return storageUnavailable(); }
+            }
+            return json(learningSnapshot(null, active, 0, {
+                status: "deferred",
+                stage,
+                reasonCode,
                 message: llm.providerId === "deepseek"
                     ? "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续"
                     : undefined,
@@ -194,7 +329,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             ? `${baseLookupHash}.${fixAuthorization.runId}.${fixAuthorization.previousRunId}.${fixAuthorization.diagnosticsFingerprint}.${fixAuthorization.repairAttempts}`
             : plannerAuthorization
                 ? `${baseLookupHash}.${plannerAuthorization.needsFingerprint}.${plannerAuthorization.chosenPathId || "global"}`
-                : baseLookupHash;
+                : toolAuthorization
+                    ? `${baseLookupHash}.${toolAuthorization.requestId}.${toolAuthorization.needsFingerprint}`
+                    : baseLookupHash;
         const jobLookupHash = await bindLearningJobLookupHashToTaskFence(
             authorizationLookupHash,
             taskStateFence,
@@ -211,6 +348,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 taskStateFence,
                 ...(plannerAuthorization ? { plannerAuthorization } : {}),
                 ...(fixAuthorization ? { fixAuthorization } : {}),
+                ...(toolAuthorization ? { toolAuthorization } : {}),
                 ...(active.length ? {
                     cachedKnowledgeIds: active.map((item) => item.knowledgeId),
                 } : {}),

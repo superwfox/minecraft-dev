@@ -193,7 +193,9 @@ const evidenceIdentity = computed<LearningEvidenceIdentity>(() => {
         && /^[A-Za-z0-9_-]{1,100}$/.test(props.learningJobId)
         ? props.learningJobId
         : "";
-    const stage = jobId && (props.learningStage === "planner" || props.learningStage === "fix")
+    const stage = jobId && (props.learningStage === "planner"
+        || props.learningStage === "fix"
+        || props.learningStage === "tool")
         ? props.learningStage
         : "";
     const revision = jobId && Number.isInteger(Number(props.learningRevision))
@@ -274,6 +276,7 @@ function sourceTypeLabel(value: string) {
 }
 
 function integrationLabel(value: string) {
+    if (value === "public_api") return "公开 API";
     if (value === "nms") return "NMS";
     if (value === "craftbukkit") return "CraftBukkit";
     if (value === "version_reflection") return "版本反射";
@@ -334,7 +337,9 @@ async function load() {
         if (sequence !== loadSequence) return;
         const responseIdentity: LearningEvidenceIdentity = {
             jobId: typeof data.learningJobId === "string" ? data.learningJobId : "",
-            stage: data.learningStage === "planner" || data.learningStage === "fix"
+            stage: data.learningStage === "planner"
+                || data.learningStage === "fix"
+                || data.learningStage === "tool"
                 ? data.learningStage
                 : "",
             revision: Number.isInteger(Number(data.learningRevision))

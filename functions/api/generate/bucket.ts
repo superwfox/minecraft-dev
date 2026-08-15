@@ -11,6 +11,20 @@ import {
 } from "../../_lib/learning/plannerAuthorization";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import {
+    createModelLearningRequest,
+    learningToolDefinition,
+    MAX_LEARNING_TOOL_ROUNDS,
+    putModelLearningRequest,
+    removeModelLearningRequest,
+    type ModelChatMessage,
+    type ModelLearningOrigin,
+    type ModelLearningRequest,
+} from "../../_lib/learning/tool";
+import {
+    resolveModelLearningRequest,
+    type ModelLearningResolution,
+} from "../../_lib/learning/toolRuntime";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -30,8 +44,9 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+interface AICallResult { content: string; message: any; model: string; usage?: UsageBreakdown; }
 type ChargeFn = (r: AICallResult) => Promise<void>;
+type ResolveLearningToolFn = (requestId: string) => Promise<ModelLearningResolution>;
 
 function stripFences(raw: string): string {
     return raw.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "");
@@ -112,17 +127,27 @@ async function fetchWithBackoff(url: string, init: RequestInit, options: Backoff
     }
 }
 
-async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false, dbg: Dbg = noopDbg): Promise<AICallResult> {
+async function callAI(
+    llm: LLMProvider,
+    system: string,
+    user: string,
+    jsonMode = false,
+    usePro = false,
+    dbg: Dbg = noopDbg,
+    messages?: ModelChatMessage[],
+    tools: Record<string, unknown>[] = [],
+): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        messages: messages ?? [{ role: "system", content: system }, { role: "user", content: user }],
     };
     if (usePro) {
         body.reasoning_effort = "high";
         body.thinking = { type: "enabled" };
     }
     if (jsonMode) body.response_format = { type: "json_object" };
+    if (tools.length) body.tools = tools;
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
@@ -146,9 +171,10 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
         dbg("callAI:body-start", { model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
         dbg("callAI:body-done", { model, ms: Date.now() - t0 });
-        const content = data.choices?.[0]?.message?.content ?? "";
+        const message = data.choices?.[0]?.message ?? {};
+        const content = message.content ?? "";
         dbg("callAI:done", { model, ms: Date.now() - t0, contentLen: content.length });
-        return { content, model, usage: data.usage };
+        return { content, message, model, usage: data.usage };
     } catch (e: any) {
         dbg("callAI:throw", { model, ms: Date.now() - t0, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
         throw e;
@@ -166,6 +192,8 @@ async function callAIStream(
     pathTag: string,
     usePro = false,
     dbg: Dbg = noopDbg,
+    messages?: ModelChatMessage[],
+    tools: Record<string, unknown>[] = [],
 ): Promise<AICallResult> {
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse(几百次)会超 CPU
     // 被硬杀(debug 实测:29 次生成仅 2 次跑到 stream:done)。改为非流式,只做 1 次 resp.json()——
@@ -174,12 +202,13 @@ async function callAIStream(
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        messages: messages ?? [{ role: "system", content: system }, { role: "user", content: user }],
     };
     if (usePro) {
         body.reasoning_effort = "high";
         body.thinking = { type: "enabled" };
     }
+    if (tools.length) body.tools = tools;
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
@@ -203,9 +232,10 @@ async function callAIStream(
         dbg("stream:body-start", { path: pathTag, model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
         dbg("stream:body-done", { path: pathTag, model, ms: Date.now() - t0 });
-        const content = data.choices?.[0]?.message?.content ?? "";
+        const message = data.choices?.[0]?.message ?? {};
+        const content = message.content ?? "";
         dbg("stream:done", { path: pathTag, ms: Date.now() - t0, len: content.length });
-        return { content, model, usage: data.usage };
+        return { content, message, model, usage: data.usage };
     } catch (e: any) {
         dbg("stream:throw", { path: pathTag, ms: Date.now() - t0, err: e?.name, msg: String(e?.message || e).slice(0, 400) });
         throw e;
@@ -232,6 +262,7 @@ interface FileGenerationCheckpoint {
     dynamicFiles: DynamicFileCheckpoint[];
     dynamicIndex: number;
     lastReason: string;
+    learningRequestId?: string;
 }
 
 interface GeneratedFileOutput {
@@ -248,6 +279,7 @@ interface FileStageOutcome {
     newFiles: GeneratedFileOutput[];
     progressed: boolean;
     nextStage: FileGenerationStage | "done";
+    learningToolRequests: ModelLearningRequest[];
 }
 
 const FILE_GENERATION_STAGES = new Set<FileGenerationStage>([
@@ -290,6 +322,10 @@ function checkpointFor(state: any, path: string): FileGenerationCheckpoint {
             : [],
         dynamicIndex: Math.max(0, Number(raw.dynamicIndex) || 0),
         lastReason: typeof raw.lastReason === "string" ? raw.lastReason.slice(0, 2_000) : "",
+        learningRequestId: typeof raw.learningRequestId === "string"
+            && /^learnreq_[a-f0-9]{32}$/i.test(raw.learningRequestId)
+            ? raw.learningRequestId
+            : undefined,
     };
     if (checkpoint.stage !== "generate" && !checkpoint.content.trim()) return initialCheckpoint(path);
     if (checkpoint.stage === "dynamic_generate" && checkpoint.dynamicIndex >= checkpoint.dynamicFiles.length) {
@@ -316,6 +352,86 @@ function nonEmptyModelContent(result: AICallResult, stage: string): string {
     return content;
 }
 
+type LearningAwareCallResult =
+    | { kind: "result"; result: AICallResult }
+    | { kind: "learning"; request: ModelLearningRequest };
+
+async function callWithLearningTool(input: {
+    llm: LLMProvider;
+    state: any;
+    checkpoint: FileGenerationCheckpoint;
+    system: string;
+    user: string;
+    origin: ModelLearningOrigin;
+    originKey: string;
+    targetPath: string;
+    coreType: string;
+    mcVersion: string;
+    resolveTool: ResolveLearningToolFn;
+    charge: ChargeFn;
+    invoke: (
+        messages: ModelChatMessage[],
+        tools: Record<string, unknown>[],
+    ) => Promise<AICallResult>;
+}): Promise<LearningAwareCallResult> {
+    const baseMessages: ModelChatMessage[] = [
+        { role: "system", content: input.system },
+        { role: "user", content: input.user },
+    ];
+    let messages = baseMessages;
+    let previousRequest: ModelLearningRequest | null = null;
+    const pendingId = input.checkpoint.learningRequestId;
+    if (pendingId) {
+        const resolution = await input.resolveTool(pendingId);
+        const request = resolution.status === "missing" ? null : resolution.request;
+        const matchesCallSite = request?.origin === input.origin
+            && request.originKey === input.originKey
+            && request.targetPath === input.targetPath;
+        if (!matchesCallSite) {
+            removeModelLearningRequest(input.state, pendingId);
+            delete input.checkpoint.learningRequestId;
+        } else if (resolution.status === "pending") {
+            return { kind: "learning", request: resolution.request };
+        } else if (resolution.status === "resolved") {
+            previousRequest = resolution.request;
+            messages = resolution.messages;
+        } else {
+            removeModelLearningRequest(input.state, pendingId);
+            delete input.checkpoint.learningRequestId;
+        }
+    }
+
+    const tools = previousRequest?.round === undefined
+        || previousRequest.round < MAX_LEARNING_TOOL_ROUNDS
+        ? learningToolDefinition(input.llm)
+        : [];
+    const result = await input.invoke(messages, tools);
+    await input.charge(result);
+    const nextRequest = tools.length ? await createModelLearningRequest({
+        message: result.message,
+        messages,
+        origin: input.origin,
+        originKey: input.originKey,
+        targetPath: input.targetPath,
+        round: (previousRequest?.round ?? 0) + 1,
+        coreType: input.coreType,
+        mcVersion: input.mcVersion,
+        allowedDependencies: Array.isArray(input.state.grade?.vector?.external_deps)
+            ? input.state.grade.vector.external_deps
+            : [],
+    }) : null;
+    if (nextRequest) {
+        if (previousRequest) removeModelLearningRequest(input.state, previousRequest.requestId);
+        putModelLearningRequest(input.state, nextRequest);
+        input.checkpoint.learningRequestId = nextRequest.requestId;
+        return { kind: "learning", request: nextRequest };
+    }
+
+    if (previousRequest) removeModelLearningRequest(input.state, previousRequest.requestId);
+    delete input.checkpoint.learningRequestId;
+    return { kind: "result", result };
+}
+
 function safeMissingClasses(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return [...new Set(value
@@ -337,6 +453,7 @@ async function processFileStage(
     state: any,
     knowledgeContext: string,
     onKnowledgeApplied: (filePath: string) => void,
+    resolveLearningTool: ResolveLearningToolFn,
     charge: ChargeFn,
     dbg: Dbg = noopDbg,
 ): Promise<FileStageOutcome> {
@@ -369,6 +486,14 @@ async function processFileStage(
         newFiles: [],
         progressed: true,
         nextStage,
+        learningToolRequests: [],
+    });
+    const waitForLearning = (
+        request: ModelLearningRequest,
+        nextStage: FileGenerationStage = checkpoint.stage,
+    ): FileStageOutcome => ({
+        ...outcome(nextStage),
+        learningToolRequests: [request],
     });
     const complete = async (): Promise<FileStageOutcome> => {
         const apiSummary = extractFileSummary(filePath, checkpoint.content, target.role);
@@ -392,6 +517,7 @@ async function processFileStage(
             newFiles: [],
             progressed: true,
             nextStage: "done",
+            learningToolRequests: [],
         };
     };
     const runRework = async (): Promise<FileStageOutcome> => {
@@ -407,8 +533,25 @@ async function processFileStage(
             apiContractCtx,
             knowledgeContext,
         );
-        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, filePath, false, dbg);
-        await charge(rwRes);
+        const call = await callWithLearningTool({
+            llm,
+            state,
+            checkpoint,
+            system: rw.system,
+            user: rw.user,
+            origin: "rework",
+            originKey: `bucket:${filePath}:rework:${checkpoint.reworkCount}`,
+            targetPath: filePath,
+            coreType: ctx.coreType,
+            mcVersion: ctx.version,
+            resolveTool: resolveLearningTool,
+            charge,
+            invoke: (messages, tools) => callAIStream(
+                llm, rw.system, rw.user, writer, encoder, filePath, false, dbg, messages, tools,
+            ),
+        });
+        if (call.kind === "learning") return waitForLearning(call.request, "rework");
+        const rwRes = call.result;
         checkpoint.content = nonEmptyModelContent(rwRes, "返工");
         if (checkpoint.reworkCount >= MAX_REWORK) {
             const warnMsg = `! ${filePath} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
@@ -425,17 +568,34 @@ async function processFileStage(
         await logGeneration(state, writer, encoder, `▸ 正在生成 ${filePath}`, filePath);
         dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
         dbg("file:gen-begin", { path: filePath });
-        const initialRes = await callAIStream(
+        const call = await callWithLearningTool({
             llm,
-            dispatched.gen.system,
-            dispatched.gen.user,
-            writer,
-            encoder,
-            filePath,
-            false,
-            dbg,
-        );
-        await charge(initialRes);
+            state,
+            checkpoint,
+            system: dispatched.gen.system,
+            user: dispatched.gen.user,
+            origin: "generate",
+            originKey: `bucket:${filePath}:generate:0`,
+            targetPath: filePath,
+            coreType: ctx.coreType,
+            mcVersion: ctx.version,
+            resolveTool: resolveLearningTool,
+            charge,
+            invoke: (messages, tools) => callAIStream(
+                llm,
+                dispatched.gen.system,
+                dispatched.gen.user,
+                writer,
+                encoder,
+                filePath,
+                false,
+                dbg,
+                messages,
+                tools,
+            ),
+        });
+        if (call.kind === "learning") return waitForLearning(call.request, "generate");
+        const initialRes = call.result;
         checkpoint.content = nonEmptyModelContent(initialRes, "生成");
         checkpoint.stage = "review";
         try { onKnowledgeApplied(filePath); } catch { /* usage telemetry is best effort */ }
@@ -471,17 +631,34 @@ async function processFileStage(
             `▸ 动态生成 ${dynamic.className} (${checkpoint.dynamicIndex + 1}/${checkpoint.dynamicFiles.length})`,
             filePath,
         );
-        const subRes = await callAIStream(
+        const call = await callWithLearningTool({
             llm,
-            subDispatched.gen.system,
-            subDispatched.gen.user,
-            writer,
-            encoder,
-            dynamic.path,
-            false,
-            dbg,
-        );
-        await charge(subRes);
+            state,
+            checkpoint,
+            system: subDispatched.gen.system,
+            user: subDispatched.gen.user,
+            origin: "generate",
+            originKey: `bucket:${filePath}:dynamic:${checkpoint.dynamicIndex}`,
+            targetPath: dynamic.path,
+            coreType: ctx.coreType,
+            mcVersion: ctx.version,
+            resolveTool: resolveLearningTool,
+            charge,
+            invoke: (messages, tools) => callAIStream(
+                llm,
+                subDispatched.gen.system,
+                subDispatched.gen.user,
+                writer,
+                encoder,
+                dynamic.path,
+                false,
+                dbg,
+                messages,
+                tools,
+            ),
+        });
+        if (call.kind === "learning") return waitForLearning(call.request, "dynamic_generate");
+        const subRes = call.result;
         const content = nonEmptyModelContent(subRes, "动态生成");
         try { onKnowledgeApplied(dynamic.path); } catch { /* usage telemetry is best effort */ }
         checkpoint.dynamicIndex++;
@@ -515,8 +692,32 @@ async function processFileStage(
         reviewUsedModel = true;
         const check = dispatched.checker(filePath, checkpoint.content);
         // 首轮用快速模型；只有返工后的复审才启用深度模型，兼顾常规速度与问题文件质量。
-        const reviewRes = await callAI(llm, check.system, check.user, true, checkpoint.reworkCount > 0, dbg);
-        await charge(reviewRes);
+        const call = await callWithLearningTool({
+            llm,
+            state,
+            checkpoint,
+            system: check.system,
+            user: check.user,
+            origin: "review",
+            originKey: `bucket:${filePath}:review:${checkpoint.reworkCount}`,
+            targetPath: filePath,
+            coreType: ctx.coreType,
+            mcVersion: ctx.version,
+            resolveTool: resolveLearningTool,
+            charge,
+            invoke: (messages, tools) => callAI(
+                llm,
+                check.system,
+                check.user,
+                true,
+                checkpoint.reworkCount > 0,
+                dbg,
+                messages,
+                tools,
+            ),
+        });
+        if (call.kind === "learning") return waitForLearning(call.request, "review");
+        const reviewRes = call.result;
         try {
             review = JSON.parse(stripFences(reviewRes.content));
         } catch {
@@ -579,7 +780,11 @@ async function processFileStage(
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
-    const { taskId, bucketIndex, superConcurrency } = await context.request.json() as any;
+    const body = await context.request.json() as any;
+    const { taskId, bucketIndex, superConcurrency } = body;
+    const learningToolJobs = body.learningToolJobs && typeof body.learningToolJobs === "object"
+        ? body.learningToolJobs as Record<string, string>
+        : {};
     const uid: string = (context.data as any)?.uid || "";
     // 默认每请求推进一个文件的一个阶段；超级并发只会并行多个独立阶段，不再把整份文件工作流塞进单请求。
     let concurrency = 1;
@@ -673,6 +878,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             generationTaskId: taskId,
             stage: `file:${filePath}`,
         }));
+    };
+    const resolveLearningTool: ResolveLearningToolFn = async (requestId) => {
+        const resolution = await resolveModelLearningRequest({
+            env: context.env,
+            state,
+            uid,
+            taskId,
+            requestId,
+            jobId: learningToolJobs[requestId],
+            maxCharacters: 6_000,
+        });
+        if (resolution.status === "resolved") {
+            state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, resolution.knowledgeUsed);
+            context.waitUntil(recordKnowledgeContextUsage({
+                env: context.env,
+                items: resolution.knowledgeUsed,
+                generationTaskId: taskId,
+                stage: `tool:${resolution.request.origin}:${resolution.request.targetPath || "project"}`,
+            }));
+        }
+        return resolution;
     };
 
     const { readable, writable } = new TransformStream<Uint8Array>();
@@ -773,6 +999,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         state,
                         knowledge.context,
                         markKnowledgeApplied,
+                        resolveLearningTool,
                         charge,
                         dbg,
                     );
@@ -793,6 +1020,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
             }));
             const results = settled.filter((result): result is FileStageOutcome => !!result);
+            const learningToolRequests = results.flatMap((result) => result.learningToolRequests);
             const upsertGeneratedFile = (file: GeneratedFileOutput & { reworkCount?: number }) => {
                 const entry = {
                     path: file.path,
@@ -849,6 +1077,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 progressed: results.length,
                 completed: completed.length,
                 errors: errors.length,
+                learningToolRequests: learningToolRequests.length,
                 generatedTotal: state.generatedFiles.length,
             });
             await writeSSE(writer, encoder, {
@@ -862,6 +1091,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 active: results.map(result => ({ path: result.path, stage: result.nextStage })),
                 completed,
                 newFiles,
+                learningToolRequests: learningToolRequests.map((request) => ({
+                    requestId: request.requestId,
+                    origin: request.origin,
+                    targetPath: request.targetPath,
+                    questions: request.needs.map((need) => need.claim.question),
+                })),
                 errors,
                 bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
             });

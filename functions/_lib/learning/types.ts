@@ -78,7 +78,7 @@ export interface VerificationResult {
     recipe?: ImplementationRecipeV1;
 }
 
-export type LearningStage = "planner" | "fix";
+export type LearningStage = "planner" | "fix" | "tool";
 export type LearningProviderStatus = "completed" | "incomplete" | "failed" | "unknown";
 export type LearningReasonCode =
     | "no_learning_needed"
@@ -105,6 +105,8 @@ export type LearningReasonCode =
     | "unresolved_knowledge_needs"
     | "planner_authorization_expired"
     | "fix_authorization_expired"
+    | "tool_authorization_expired"
+    | "tool_request_invalid"
     | "revision_conflict"
     | "lease_conflict"
     | "storage_unavailable"
@@ -228,6 +230,10 @@ export interface LearningJobWork {
         previousRunId: number;
         diagnosticsFingerprint: string;
         repairAttempts: number;
+    };
+    toolAuthorization?: {
+        requestId: string;
+        needsFingerprint: string;
     };
     currentNeed?: string;
     completedNeeds?: number;

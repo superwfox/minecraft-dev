@@ -26,6 +26,7 @@ const SOURCE_REJECTION_CODES = new Set([
     "source_limit",
 ]);
 const INTEGRATION_KINDS = new Set([
+    "public_api",
     "nms",
     "craftbukkit",
     "version_reflection",
@@ -58,7 +59,7 @@ export interface LearningEvidenceReason {
 export interface ImplementationRecipe {
     schemaVersion: "implementation_recipe.v1";
     language: "java";
-    integrationKind: "nms" | "craftbukkit" | "version_reflection" | "external_plugin";
+    integrationKind: "public_api" | "nms" | "craftbukkit" | "version_reflection" | "external_plugin";
     title: string;
     code: string;
     imports: string[];
