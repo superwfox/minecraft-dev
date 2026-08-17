@@ -3,7 +3,13 @@
 // 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 D1 任务成本。
 
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
-import { resolveLLM, tierFromModel } from "../_lib/llm";
+import {
+    deepSeekKeyRequiredResponse,
+    resolveLLM,
+    resolveTaskLLM,
+    tierFromModel,
+    type LLMProvider,
+} from "../_lib/llm";
 import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
 import { buildApiContractContext } from "../_lib/apiContracts";
 
@@ -14,28 +20,31 @@ interface Env {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
-    const llm = await resolveLLM(context);
-    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
-
-    const tier = tierFromModel(body.model);
-    const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
     const uid: string = (context.data as any)?.uid || "";
     let taskState: any = null;
+    let llm: LLMProvider;
 
     // 带 taskId 的调用必须命中当前用户的任务，避免越权读取上下文或错误归集费用。
     if (taskId) {
         const stateRaw = await getOwnedTask(context.env, taskId, uid);
         if (!stateRaw) return new Response("Task not found", { status: 404 });
-        try {
-            taskState = JSON.parse(stateRaw);
-            if (taskState.quotaExhausted) {
-                return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
-                    status: 402, headers: { "Content-Type": "application/json" },
-                });
-            }
-        } catch { /* ignore */ }
+        try { taskState = JSON.parse(stateRaw); } catch { return new Response("Task state unavailable", { status: 503 }); }
+        const resolved = await resolveTaskLLM(context, taskState);
+        if (!resolved) return deepSeekKeyRequiredResponse();
+        llm = resolved;
+        if (taskState.quotaExhausted && !llm.byok) {
+            return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                status: 402, headers: { "Content-Type": "application/json" },
+            });
+        }
+    } else {
+        llm = await resolveLLM(context);
     }
+    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
+
+    const tier = tierFromModel(body.model);
+    const model = llm.modelFor(tier);
 
     const messages = Array.isArray(body.messages)
         ? body.messages.map((message: any) => ({ ...message }))
@@ -138,10 +147,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         // 流结束后累积成本（BYOK 自带 key 时跳过）
-        if (!llm.byok && uid && taskId && usage) {
+        if (!llm.byok && uid && usage) {
+            const billingTaskId = taskId || `adhoc:${uid}`;
             try {
-                const cost = await accumulateCost(context.env, uid, taskId, model, usage);
-                if (cost.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+                const cost = await accumulateCost(context.env, uid, billingTaskId, model, usage, !!taskId);
+                if (cost.outOfQuota && taskId) await markTaskQuotaExhausted(context.env, taskId, uid);
             } catch { /* ignore */ }
         }
     })();

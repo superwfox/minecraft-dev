@@ -1,7 +1,7 @@
 import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
-import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
@@ -25,6 +25,7 @@ import {
     resolveModelLearningRequest,
     type ModelLearningResolution,
 } from "../../_lib/learning/toolRuntime";
+import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -70,6 +71,30 @@ async function writeSSE(
     data: any,
 ): Promise<void> {
     try { await writer.write(sseEvent(encoder, data)); } catch { /* generation continues after client disconnect */ }
+}
+
+interface BucketStreamError {
+    message: string;
+    code: string;
+    status: number;
+    retryable: boolean;
+}
+
+function bucketStreamError(error: unknown, fallbackCode = "BUCKET_FAILED"): BucketStreamError {
+    if (error instanceof OpenAIUpstreamHttpError) {
+        return {
+            message: error.message,
+            code: error.code,
+            status: error.status,
+            retryable: error.status !== 401,
+        };
+    }
+    return {
+        message: error instanceof Error ? error.message : String(error),
+        code: fallbackCode,
+        status: 500,
+        retryable: true,
+    };
 }
 
 interface BackoffOptions {
@@ -163,10 +188,14 @@ async function callAI(
             onRetry: ({ attempt, status, waitMs }) => dbg("callAI:retry", { model, attempt, status, waitMs }),
         });
         dbg("callAI:http", { model, status: resp.status, ms: Date.now() - t0 });
-        if (!resp.ok) {
-            const txt = await resp.text();
-            dbg("callAI:http-err", { status: resp.status, body: txt.slice(0, 400) });
-            throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
+        try {
+            await assertOpenAIResponse(resp);
+        } catch (error) {
+            dbg("callAI:http-err", {
+                status: resp.status,
+                body: (error instanceof Error ? error.message : String(error)).slice(0, 400),
+            });
+            throw error;
         }
         dbg("callAI:body-start", { model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
@@ -224,10 +253,15 @@ async function callAIStream(
             onRetry: ({ attempt, status, waitMs }) => dbg("stream:retry", { path: pathTag, model, attempt, status, waitMs }),
         });
         dbg("stream:http", { path: pathTag, status: resp.status, ms: Date.now() - t0 });
-        if (!resp.ok) {
-            const txt = await resp.text();
-            dbg("stream:http-err", { path: pathTag, status: resp.status, body: txt.slice(0, 400) });
-            throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
+        try {
+            await assertOpenAIResponse(resp);
+        } catch (error) {
+            dbg("stream:http-err", {
+                path: pathTag,
+                status: resp.status,
+                body: (error instanceof Error ? error.message : String(error)).slice(0, 400),
+            });
+            throw error;
         }
         dbg("stream:body-start", { path: pathTag, model, ms: Date.now() - t0 });
         const data = await resp.json() as any;
@@ -795,11 +829,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    const llm = await resolveTaskLLM(context, state);
+    if (!llm) return deepSeekKeyRequiredResponse();
     // 挂了 skill 的任务：prompt 更大、文件更多，强制串行，避免大 prompt × 并发撞 CF Worker 限制
     if (state.skills?.length) concurrency = 1;
 
-    if (state.quotaExhausted) {
-        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+    if (state.plannerBillingSettled === false || state.plannerAttemptBillingPending) {
+        return new Response(JSON.stringify({
+            error: "Planner 额度结算尚未完成，请先重试 Planner",
+            code: "PLANNER_SETTLEMENT_PENDING",
+        }), {
+            status: 503,
+            headers: { "Content-Type": "application/json", "Retry-After": "2" },
+        });
+    }
+
+    if (state.quotaExhausted && !llm.byok) {
+        return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
             status: 402, headers: { "Content-Type": "application/json" },
         });
     }
@@ -828,7 +874,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const llm = await resolveLLM(context);
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -977,7 +1022,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 return;
             }
 
-            const errors: { path: string; reason: string }[] = [];
+            const errors: Array<BucketStreamError & { path: string; reason: string }> = [];
             state.fileStatuses ??= {};
             state.generationCheckpoints ??= {};
             for (const target of targets) state.fileStatuses[target.path] = "generating";
@@ -1006,7 +1051,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     dbg("task:ok", { path: target.path, stage: result.nextStage, done: !!result.completed });
                     return result;
                 } catch (taskErr: any) {
-                    const reason = taskErr?.message ? String(taskErr.message) : String(taskErr);
+                    const mapped = bucketStreamError(taskErr, "FILE_STAGE_FAILED");
+                    const reason = mapped.message;
                     dbg("task:throw", {
                         path: target.path,
                         stage: checkpoint.stage,
@@ -1014,7 +1060,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         msg: reason.slice(0, 400),
                         stack: String(taskErr?.stack || "").slice(0, 600),
                     });
-                    errors.push({ path: target.path, reason });
+                    errors.push({ path: target.path, reason, ...mapped });
                     await logGeneration(state, writer, encoder, `× ${target.path} 当前阶段中断：${reason}`, target.path);
                     return null;
                 }
@@ -1060,6 +1106,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             const completed = completedBucketFiles();
             const newFiles = dynamicFilesForClient();
+            const primaryError = errors.find(error => !error.retryable) ?? errors[0];
+            const retryable = errors.length > 0 && errors.every(error => error.retryable);
             for (const result of results) {
                 dbg("stage:persisted", { path: result.path, stage: result.nextStage, done: !!result.completed });
                 if (result.completed) {
@@ -1071,6 +1119,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
             }
             for (const newFile of newFiles) await writeSSE(writer, encoder, { type: "new_file", ...newFile });
+
+            if (primaryError) {
+                await writeSSE(writer, encoder, {
+                    type: "error",
+                    stage: "bucket",
+                    error: primaryError.message,
+                    code: primaryError.code,
+                    status: primaryError.status,
+                    retryable,
+                });
+            }
 
             dbg("result:ok", {
                 bucketDone,
@@ -1086,8 +1145,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 bucketDone,
                 done: bucketDone && state.currentBucket >= buckets.length,
                 progressed: results.length > 0,
-                retryable: errors.length > 0,
-                retryAfterMs: errors.length > 0 ? 1_500 : 0,
+                retryable,
+                retryAfterMs: retryable ? 1_500 : 0,
+                ...(primaryError ? {
+                    error: primaryError.message,
+                    code: primaryError.code,
+                    status: primaryError.status,
+                } : {}),
                 active: results.map(result => ({ path: result.path, stage: result.nextStage })),
                 completed,
                 newFiles,
@@ -1102,19 +1166,36 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             });
             try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } catch (e: any) {
-            const errMsg = e?.message ? String(e.message) : String(e);
+            const mapped = bucketStreamError(e);
+            const errMsg = mapped.message;
             dbg("process:catch", { err: e?.name, msg: errMsg.slice(0, 400), stack: String(e?.stack || "").slice(0, 800) });
             await writeSSE(writer, encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` });
+            await writeSSE(writer, encoder, {
+                type: "error",
+                stage: "bucket",
+                error: errMsg,
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
+            });
             await writeSSE(writer, encoder, {
                 type: "result",
                 bucketIndex,
                 bucketDone: false,
                 progressed: false,
-                retryable: true,
-                retryAfterMs: 1_500,
+                error: errMsg,
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
+                retryAfterMs: mapped.retryable ? 1_500 : 0,
                 completed: [],
                 newFiles: [],
-                errors: [{ reason: errMsg }],
+                errors: [{
+                    reason: errMsg,
+                    code: mapped.code,
+                    status: mapped.status,
+                    retryable: mapped.retryable,
+                }],
             });
             try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } finally {

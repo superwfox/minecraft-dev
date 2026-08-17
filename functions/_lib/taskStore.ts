@@ -132,6 +132,19 @@ export function applyTaskQuotaExhausted(raw: string, exhausted: boolean): string
     }
 }
 
+function applyAuthoritativeTaskQuota(raw: string, exhausted: boolean): string {
+    if (exhausted) return applyTaskQuotaExhausted(raw, true);
+    try {
+        const state = JSON.parse(raw) as Record<string, unknown>;
+        if (!state || typeof state !== "object" || Array.isArray(state)) return raw;
+        if (!("quotaExhausted" in state)) return raw;
+        delete state.quotaExhausted;
+        return JSON.stringify(state);
+    } catch {
+        return raw;
+    }
+}
+
 function parseTaskState(raw: string): Record<string, unknown> | null {
     try {
         const state = JSON.parse(raw) as unknown;
@@ -240,7 +253,7 @@ async function readD1Task(db: D1Database, taskId: string, ownerUid?: string): Pr
     const raw = result.results.map((row) => row.payload).join("");
     const first = result.results[0];
     return applyTaskOperationMetadata(
-        applyTaskQuotaExhausted(raw, !!first?.quota_exhausted),
+        applyAuthoritativeTaskQuota(raw, !!first?.quota_exhausted),
         String(first?.planner_lease_token ?? ""),
         Number(first?.planner_lease_until) || 0,
     );
@@ -381,22 +394,25 @@ async function writeD1TaskWithOperationLease(
     expirationTtl: number,
     ownerUid: string,
     releaseLease: boolean,
+    costDelta = 0,
 ): Promise<boolean> {
     const preparedState = prepareTaskStateForStorage(raw);
     const chunks = splitState(preparedState.raw);
     const expirationMs = Math.max(60, expirationTtl) * 1000;
     const writeToken = `write:${crypto.randomUUID()}`;
     const finalToken = releaseLease ? operationCompletionFence(leaseToken) : leaseToken;
+    const normalizedCostDelta = Number.isFinite(costDelta) ? Math.max(0, costDelta) : 0;
     const statements: D1PreparedStatement[] = [
         db.prepare(`
             UPDATE generation_tasks
             SET planner_lease_token = ?4,
+                cost_total = cost_total + ?6,
                 updated_at = ${D1_NOW_MS_SQL},
                 expires_at = ${D1_NOW_MS_SQL} + ?5
             WHERE task_id = ?1 AND owner_uid = ?2
               AND planner_lease_token = ?3
               AND planner_lease_until > ${D1_NOW_MS_SQL}
-        `).bind(taskId, ownerUid, leaseToken, writeToken, expirationMs),
+        `).bind(taskId, ownerUid, leaseToken, writeToken, expirationMs, normalizedCostDelta),
     ];
 
     for (let index = 0; index < chunks.length; index++) {
@@ -560,6 +576,32 @@ export async function putTaskWithOperationLease(
         expirationTtl,
         ownerUid,
         releaseLease,
+    );
+}
+
+/** Atomically persist fenced task state and add one already-priced LLM cost delta. */
+export async function putTaskWithOperationLeaseAndCost(
+    env: TaskStoreEnv,
+    taskId: string,
+    raw: string,
+    leaseToken: string,
+    leaseMode: TaskOperationLeaseMode,
+    costDelta: number,
+    expirationTtl = STATE_TTL_SECONDS,
+    ownerUid = "",
+    releaseLease = false,
+): Promise<boolean> {
+    if (!taskId || !ownerUid || !leaseToken) throw new TaskOwnershipError();
+    if (leaseMode !== "d1" || !env.DB) return false;
+    return writeD1TaskWithOperationLease(
+        env.DB,
+        taskId,
+        raw,
+        leaseToken,
+        expirationTtl,
+        ownerUid,
+        releaseLease,
+        costDelta,
     );
 }
 
@@ -833,6 +875,30 @@ export async function markTaskQuotaExhausted(
     await env.TASKS.put(taskQuotaKey(taskId), ownerUid, { expirationTtl: STATE_TTL_SECONDS });
 }
 
+/** Clear quota locks for a user after paid balance is restored. */
+export async function clearUserTaskQuotaExhausted(
+    env: TaskStoreEnv,
+    ownerUid: string,
+): Promise<void> {
+    if (!ownerUid || !env.DB) return;
+
+    const active = await env.DB.prepare(`
+        SELECT task_id
+        FROM generation_tasks
+        WHERE owner_uid = ?1 AND expires_at > ?2
+    `).bind(ownerUid, Date.now()).all<{ task_id: string }>();
+
+    await env.DB.prepare(`
+        UPDATE generation_tasks
+        SET quota_exhausted = 0, updated_at = ?2
+        WHERE owner_uid = ?1 AND quota_exhausted != 0
+    `).bind(ownerUid, Date.now()).run();
+
+    await Promise.all((active.results ?? []).map((row) =>
+        env.TASKS.delete(taskQuotaKey(String(row.task_id ?? ""))),
+    ));
+}
+
 /** Delete completed task data only when it belongs to the authenticated owner. */
 export async function deleteTask(env: TaskStoreEnv, taskId: string, ownerUid: string): Promise<void> {
     if (!ownerUid) return;
@@ -972,12 +1038,12 @@ export async function setTaskCostConsumedInD1(
 ): Promise<boolean> {
     if (!env.DB) return false;
     try {
-        await env.DB.prepare(`
+        const result = await env.DB.prepare(`
             UPDATE generation_tasks
             SET cost_consumed = MAX(cost_consumed, ?3), updated_at = ?4
             WHERE task_id = ?1 AND owner_uid = ?2
         `).bind(taskId, ownerUid, consumed, Date.now()).run();
-        return true;
+        return Number(result.meta?.changes) > 0;
     } catch (error) {
         console.warn("D1 consumed-cost update failed", error);
         return false;

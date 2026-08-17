@@ -307,64 +307,7 @@ watch(() => genTask.streamingContent, async () => {
 
 <!-- 截图：生成进度面板 -->
 
-### 9. 语音输入集成
-
-`voiceInput.ts` 封装讯飞 WebSocket STT，提供简洁的 API。
-
-**核心接口**：
-```typescript
-export const isRecording = ref(false);
-export const voiceText = ref("");
-
-export async function startVoice() {
-  // 获取签名 URL
-  const { url, appId } = await fetch("/api/voice-auth").then(r => r.json());
-
-  // 连接 WebSocket
-  ws = new WebSocket(url);
-
-  // 开始录音
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  // ... PCM 编码和发送
-}
-
-export function stopVoice() {
-  ws.send(JSON.stringify({ data: { status: 2 } }));
-  isRecording.value = false;
-}
-```
-
-**组件使用**：
-```vue
-<button @click="toggleVoice" :class="{recording: isRecording}">
-  ◉
-</button>
-
-<script setup>
-import { isRecording, voiceText, startVoice, stopVoice } from "../logic/voiceInput";
-
-const toggleVoice = () => {
-  if (isRecording.value) {
-    stopVoice();
-  } else {
-    startVoice();
-  }
-};
-
-watch(voiceText, (text) => {
-  inputText.value += text;
-});
-</script>
-```
-
-**效果**：
-- 点击按钮开始录音
-- 实时转写文字追加到输入框
-- 再次点击停止录音
-
-[详细了解语音识别 →](/features/voice-input)
-
-### 10. Session 持久化与中断恢复
+### 9. Session 持久化与中断恢复
 
 `sessionPersist.ts` 用 `watch(deep)` + 300ms 防抖把 `chatBlocks` 和 `genTask` 写入 `localStorage["tahai-session-v1"]`：
 
@@ -441,20 +384,8 @@ const { list, containerProps, wrapperProps } = useVirtualList(
 );
 ```
 
-### 3. 防抖输入
-
-语音识别结果防抖，避免频繁更新：
-```typescript
-import { useDebounceFn } from "@vueuse/core";
-
-const updateInput = useDebounceFn((text: string) => {
-  inputText.value += text;
-}, 300);
-```
-
 ## 下一步
 
-- [了解语音识别](/features/voice-input)：深入了解讯飞 STT 集成
 - [浏览器 IDE](/features/ide)：Monaco 编辑器与字节码补全
 - [查看架构设计](/technical/architecture)：了解前后端如何协作
 - [API 参考](/technical/api-reference)：查看完整的 API 文档

@@ -149,6 +149,36 @@ export function normalizeBuildRequestId(value: unknown): string {
         : "";
 }
 
+function normalizeStageRequestId(value: unknown, stage: "clarify" | "grade"): string {
+    return typeof value === "string" && new RegExp(`^${stage}_[a-z0-9]{16,64}$`, "i").test(value.trim())
+        ? value.trim()
+        : "";
+}
+
+export function normalizeClarifyRequestId(value: unknown): string {
+    return normalizeStageRequestId(value, "clarify");
+}
+
+export function normalizeGradeRequestId(value: unknown): string {
+    return normalizeStageRequestId(value, "grade");
+}
+
+function normalizeClarifyRequestAnswers(value: unknown): Record<string, string | string[]> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const answers: Record<string, string | string[]> = {};
+    for (const [key, answer] of Object.entries(value as Record<string, unknown>)) {
+        if (!key || key.length > 200 || key === "__proto__" || key === "constructor" || key === "prototype") continue;
+        if (typeof answer === "string") {
+            answers[key] = answer;
+            continue;
+        }
+        if (Array.isArray(answer) && answer.every(item => typeof item === "string")) {
+            answers[key] = answer.slice(0, 100) as string[];
+        }
+    }
+    return Object.keys(answers).length ? answers : null;
+}
+
 const FIX_RESUME_STAGES = new Set<FixResumeStage>([
     "",
     "diagnosing",
@@ -415,6 +445,10 @@ export type GenTask = {
     streamingContent: string;
     streamingPhase: string;
     streamingFile: string;
+    preflightStage: "" | "clarify" | "grade" | "plan";
+    preflightThinking: string;
+    preflightOutput: string;
+    preflightActive: boolean;
     clarifyTodos: TodoItem[];
     clarifyRound: number;
     clarifyHistory: ClarifyRound[];
@@ -423,6 +457,11 @@ export type GenTask = {
     moreInputHint: string;
     grade: GradeInfo | null;
     chosenPathId: string;
+    clarifyRequestId: string;
+    clarifyRequestAnswers: Record<string, string | string[]> | null;
+    clarifyRequestExtraPrompt: string;
+    gradeRequestId: string;
+    gradeRequestCorrection: string;
     plannerRequestId: string;
     plannerReplan: boolean;
     plannerAttempt: number;
@@ -456,6 +495,10 @@ export const genTask = reactive<GenTask>({
     streamingContent: "",
     streamingPhase: "",
     streamingFile: "",
+    preflightStage: "",
+    preflightThinking: "",
+    preflightOutput: "",
+    preflightActive: false,
     clarifyTodos: [],
     clarifyRound: 0,
     clarifyHistory: [],
@@ -464,6 +507,11 @@ export const genTask = reactive<GenTask>({
     moreInputHint: "",
     grade: null,
     chosenPathId: "",
+    clarifyRequestId: "",
+    clarifyRequestAnswers: null,
+    clarifyRequestExtraPrompt: "",
+    gradeRequestId: "",
+    gradeRequestCorrection: "",
     plannerRequestId: "",
     plannerReplan: false,
     plannerAttempt: 0,
@@ -567,6 +615,10 @@ export function resetGenTask() {
     genTask.streamingContent = "";
     genTask.streamingPhase = "";
     genTask.streamingFile = "";
+    genTask.preflightStage = "";
+    genTask.preflightThinking = "";
+    genTask.preflightOutput = "";
+    genTask.preflightActive = false;
     genTask.clarifyTodos = [];
     genTask.clarifyRound = 0;
     genTask.clarifyHistory = [];
@@ -575,6 +627,11 @@ export function resetGenTask() {
     genTask.moreInputHint = "";
     genTask.grade = null;
     genTask.chosenPathId = "";
+    genTask.clarifyRequestId = "";
+    genTask.clarifyRequestAnswers = null;
+    genTask.clarifyRequestExtraPrompt = "";
+    genTask.gradeRequestId = "";
+    genTask.gradeRequestCorrection = "";
     genTask.plannerRequestId = "";
     genTask.plannerReplan = false;
     genTask.plannerAttempt = 0;
@@ -630,9 +687,18 @@ function writeGenTaskSnapshot() {
             })),
             currentIndex: genTask.currentIndex,
             logs: genTask.logs.slice(-200),
+            preflightStage: genTask.preflightStage,
+            clarifyTodos: genTask.clarifyTodos,
+            clarifyRound: genTask.clarifyRound,
             clarifyHistory: genTask.clarifyHistory,
+            moreInputHint: genTask.moreInputHint,
             grade: genTask.grade,
             chosenPathId: genTask.chosenPathId,
+            clarifyRequestId: genTask.clarifyRequestId,
+            clarifyRequestAnswers: genTask.clarifyRequestAnswers,
+            clarifyRequestExtraPrompt: genTask.clarifyRequestExtraPrompt,
+            gradeRequestId: genTask.gradeRequestId,
+            gradeRequestCorrection: genTask.gradeRequestCorrection,
             plannerRequestId: genTask.plannerRequestId,
             plannerReplan: genTask.plannerReplan,
             plannerAttempt: genTask.plannerAttempt,
@@ -686,9 +752,24 @@ export function restoreGenTask(): boolean {
         genTask.files = s.files || [];
         genTask.currentIndex = genTask.files.filter(file => file?.status === "done").length;
         genTask.logs = s.logs || [];
+        genTask.preflightStage = s.preflightStage === "clarify" || s.preflightStage === "grade" || s.preflightStage === "plan"
+            ? s.preflightStage
+            : "";
+        genTask.clarifyTodos = Array.isArray(s.clarifyTodos) ? s.clarifyTodos : [];
+        genTask.clarifyRound = optionalCount(s.clarifyRound) ?? 0;
         genTask.clarifyHistory = s.clarifyHistory || [];
+        genTask.moreInputHint = typeof s.moreInputHint === "string" ? s.moreInputHint : "";
         genTask.grade = s.grade || null;
         genTask.chosenPathId = s.chosenPathId || "";
+        genTask.clarifyRequestId = normalizeClarifyRequestId(s.clarifyRequestId);
+        genTask.clarifyRequestAnswers = normalizeClarifyRequestAnswers(s.clarifyRequestAnswers);
+        genTask.clarifyRequestExtraPrompt = typeof s.clarifyRequestExtraPrompt === "string"
+            ? s.clarifyRequestExtraPrompt
+            : "";
+        genTask.gradeRequestId = normalizeGradeRequestId(s.gradeRequestId);
+        genTask.gradeRequestCorrection = typeof s.gradeRequestCorrection === "string"
+            ? s.gradeRequestCorrection
+            : "";
         const plannerResume = normalizePlannerResumeState(s);
         genTask.plannerRequestId = plannerResume.plannerRequestId;
         genTask.plannerReplan = plannerResume.plannerReplan;
@@ -724,6 +805,9 @@ watch(
         genTask.files.filter(f => f.status === "done").length,
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
+        genTask.preflightStage, genTask.clarifyTodos.length, genTask.clarifyRound,
+        genTask.clarifyHistory.length, genTask.moreInputHint,
+        genTask.clarifyRequestId, genTask.gradeRequestId,
         genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt,
         genTask.plannerLearningRequired, genTask.plannerLearningNeedCount,
         genTask.buildRequestId, genTask.fixResumeStage],

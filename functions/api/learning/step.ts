@@ -1,5 +1,5 @@
 import { discoverLearningSources } from "../../_lib/deepseekResponses";
-import { resolveLLM } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM } from "../../_lib/llm";
 import { knowledgeLookupKey } from "../../_lib/learning/assessment";
 import {
     LEARNING_DISCOVERY_LIMIT_MS,
@@ -206,6 +206,7 @@ function applyVerificationFailureTelemetry(
     result: Extract<Awaited<ReturnType<typeof verifyKnowledgeNeed>>, { ok: false }>,
 ): void {
     telemetry.verificationFailures++;
+    telemetry.verificationLastHttpStatus = result.httpStatus;
     if (result.reasonCode === "verification_timeout") telemetry.verificationTimeouts++;
     if (result.reasonCode === "verification_invalid_response") telemetry.verificationInvalidResponses++;
     if (result.httpStatus >= 400 && result.httpStatus < 500) telemetry.verificationHttp4xx++;
@@ -226,6 +227,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
+    const llm = await resolveTaskLLM(context, state);
+    if (!llm) return deepSeekKeyRequiredResponse();
     let forbiddenTerms: string[] = [];
 
     let current: LearningJobRecord | null = null;
@@ -268,25 +271,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return storageUnavailable();
     }
 
-    let llm: Awaited<ReturnType<typeof resolveLLM>>;
-    try {
-        llm = await resolveLLM(context);
-    } catch (error) {
-        console.warn("learning provider resolution failed", error);
-        llm = {
-            providerId: "deepseek",
-            url: "",
-            apiKey: "",
-            byok: false,
-            learningCacheRead: true,
-            canAutoLearn: false,
-            modelFor: () => "",
-        };
-    }
-
     let preflightReason: LearningReasonCode | undefined;
     if (learningJobNeedsFinalization(current)) preflightReason = "job_deadline";
-    else if (state.quotaExhausted) preflightReason = "quota_exhausted";
+    else if (state.quotaExhausted && !llm.byok) preflightReason = "quota_exhausted";
     else if (!llm.canAutoLearn || llm.providerId !== "deepseek") {
         preflightReason = llm.providerId === "glm"
             ? "glm_auto_learning_disabled"
@@ -390,7 +377,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const charge = async (entries: UsageCostEntry[]): Promise<boolean> => {
-        if (!entries.length) return false;
+        if (llm.byok || !entries.length) return false;
         const cost = await accumulateCosts(context.env, uid, taskId, entries);
         if (cost.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
         return cost.outOfQuota;
@@ -418,7 +405,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let discovery: Awaited<ReturnType<typeof discoverLearningSources>>;
         try {
             discovery = await discoverLearningSources({
-                apiKey: context.env.DEEPSEEK_API_KEY,
+                apiKey: llm.apiKey,
                 needs: leased.needs,
                 budgetMs: discoveryBudget.budgetMs,
             });

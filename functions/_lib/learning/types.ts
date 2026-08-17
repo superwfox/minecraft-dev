@@ -205,6 +205,7 @@ export interface LearningJobTelemetry {
     verificationTimeouts: number;
     verificationHttp4xx: number;
     verificationHttp5xx: number;
+    verificationLastHttpStatus: number;
     verificationInvalidResponses: number;
     verificationElapsedMs: number;
 }

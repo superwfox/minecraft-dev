@@ -251,14 +251,38 @@ async function ensureMermaid() {
     if (mermaidMod) return mermaidMod;
     const m = (await import("mermaid")).default;
     m.initialize({
-        startOnLoad: false, theme: "dark", securityLevel: "loose",
-        flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" },
+        startOnLoad: false, theme: "dark", securityLevel: "strict",
+        flowchart: { useMaxWidth: false, htmlLabels: false, curve: "basis" },
     });
     mermaidMod = m;
     return m;
 }
 function escapeHtml(s: string) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function sanitizeMermaidSvg(svg: string): string {
+    const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+    if (doc.querySelector("parsererror")) throw new Error("Invalid Mermaid SVG");
+
+    doc.querySelectorAll("script, foreignObject, iframe, object, embed, link, meta").forEach((node) => node.remove());
+    doc.querySelectorAll("*").forEach((node) => {
+        for (const attr of Array.from(node.attributes)) {
+            const name = attr.name.toLowerCase();
+            const value = attr.value.trim();
+            if (name.startsWith("on")) {
+                node.removeAttribute(attr.name);
+                continue;
+            }
+            if ((name === "href" || name === "xlink:href" || name === "src") && !value.startsWith("#")) {
+                node.removeAttribute(attr.name);
+                continue;
+            }
+            if (name === "style" && /url\s*\(\s*['\"]?\s*(?:javascript:|https?:|data:text\/html)/i.test(value)) {
+                node.removeAttribute(attr.name);
+            }
+        }
+    });
+    return doc.documentElement.outerHTML;
 }
 async function openPreview(card: CardKind | null) {
     if (!card) return;
@@ -270,7 +294,7 @@ async function openPreview(card: CardKind | null) {
         const m = await ensureMermaid();
         const { svg } = await m.render("pcmmd-" + Math.random().toString(36).slice(2), card.mermaid);
         if (previewOpen.value) {
-            previewSvg.value = svg;
+            previewSvg.value = sanitizeMermaidSvg(svg);
             await nextTick();
             fitView();
         }

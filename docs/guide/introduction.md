@@ -51,10 +51,10 @@ Minecraft 插件开发是一个充满创意的领域，但对于新手和非专�
 - 覆盖 MC 1.7 到 1.21 版本
 - 自动选择合适的 Java 版本（8/17/21）
 
-**5. 登录即用，免费额度**
-- GitHub 一键登录，每月白送 **5 件** 免费生成额度（每月 1 号清零）
-- 额度不够可充值支持作者（1 元 = 1 件，¥25 银徽 / ¥50 金徽）
-- 累计赞助满 ¥25 还可**自带智谱 GLM Key**，用自己的 key 生成、不计平台额度
+**5. 登录即用，自带 DeepSeek Key**
+- GitHub 一键登录，所有用户均可填写自己的 DeepSeek API Key
+- Key 保存在当前浏览器；适合直连的对话请求不经过 Pages Functions
+- 原有充值余额继续保留，也可充值使用平台模型（1 元 = 1 件，¥25 银徽 / ¥50 金徽）
 
 ## 技术创新
 
@@ -94,7 +94,6 @@ graph LR
 - **Vue 3 Composition API**：响应式状态管理，无需 Vuex/Pinia
 - **Canvas 粒子背景**：方块粒子动画，营造 MC 氛围
 - **毛玻璃 UI**：backdrop-filter 实现，深色主题友好
-- **语音输入**：讯飞 WebSocket STT，解放双手
 
 [详细了解前端实现 →](/features/frontend-highlights)
 

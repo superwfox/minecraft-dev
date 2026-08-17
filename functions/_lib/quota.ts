@@ -9,16 +9,16 @@ import {
 // 用户额度与限流继续使用 KV；高频任务成本优先存入 D1。
 //
 // 模型：
-//   - 免费额度：每月 FREE_MONTHLY 件，每月 1 号清零（key free:<uid>:<yyyymm>）
-//   - 充值额度：订单兑换得来的永久余额，不随月清零（存于 user:<uid>）
-//   - 剩余 = 免费剩余 + 充值余额；扣费先扣免费、再扣充值
+//   - 免费额度已取消，freeRemaining 固定返回 0 以兼容旧客户端；
+//   - 充值额度：订单兑换得来的永久余额，不随月清零（存于 user:<uid>）；
+//   - 共享 DeepSeek 仅消耗充值余额，用户自带 key 的请求由调用方跳过额度与计费；
 //   - 徽章档位按「累计充值金额」判定
 //   - 订单去重：order:<outTradeNo> 标记已兑换
 //
 // 注意：KV 最终一致 + 读改写有竞态窗口，这里做的是「软限额」。
 // 严格限流请叠加 Cloudflare WAF Rate Limiting。
 
-export const FREE_MONTHLY = 5;
+export const FREE_MONTHLY = 0;
 export const YUAN_PER_QUOTA = 1; // 1 元 = 1 件额度
 
 // 单任务按金额累积扣费：跨过 COST_PER_QUOTA 元即追扣下一件
@@ -41,10 +41,6 @@ const TIERS: { name: Exclude<Tier, "none">; min: number }[] = [
 ];
 
 const IP_LIMIT_PER_MIN = 120;
-
-function yyyymm(d = new Date()): string {
-    return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-}
 
 export function yyyymmdd(d = new Date()): string {
     return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
@@ -85,32 +81,22 @@ export interface QuotaInfo {
 
 export async function getQuota(kv: KVNamespace, uid: string): Promise<QuotaInfo> {
     const user = await getUser(kv, uid);
-    const usedRaw = await kv.get(`free:${uid}:${yyyymm()}`);
-    const used = usedRaw ? parseInt(usedRaw) || 0 : 0;
-    const freeRemaining = Math.max(0, FREE_MONTHLY - used);
     return {
-        freeRemaining,
+        freeRemaining: 0,
         paidBalance: user.paidBalance,
         totalRecharged: user.totalRecharged,
-        remaining: freeRemaining + user.paidBalance,
+        remaining: user.paidBalance,
         tier: tierOf(user.totalRecharged),
     };
 }
 
-/** 仅检查会员档位时只读取 user key，避免额外读取当月免费额度。 */
+/** 仅检查会员档位时读取用户充值记录。 */
 export async function getTier(kv: KVNamespace, uid: string): Promise<Tier> {
     return tierOf((await getUser(kv, uid)).totalRecharged);
 }
 
-/** 扣 1 件：先扣免费，再扣充值。返回是否成功。 */
+/** 扣 1 件充值额度。返回是否成功。 */
 export async function consume(kv: KVNamespace, uid: string): Promise<boolean> {
-    const month = yyyymm();
-    const usedRaw = await kv.get(`free:${uid}:${month}`);
-    const used = usedRaw ? parseInt(usedRaw) || 0 : 0;
-    if (used < FREE_MONTHLY) {
-        await kv.put(`free:${uid}:${month}`, String(used + 1), { expirationTtl: 40 * 24 * 3600 });
-        return true;
-    }
     const user = await getUser(kv, uid);
     if (user.paidBalance > 0) {
         user.paidBalance -= 1;
@@ -186,7 +172,7 @@ export interface UsageCostEntry {
     usage?: UsageBreakdown;
 }
 
-function costOf(model: string, u: UsageBreakdown): number {
+export function usageCost(model: string, u: UsageBreakdown): number {
     const p = MODEL_PRICING[model];
     if (!p) return 0;
     const hit = u.prompt_cache_hit_tokens ?? 0;
@@ -195,17 +181,62 @@ function costOf(model: string, u: UsageBreakdown): number {
     return (hit * p.cacheHit + miss * p.input + out * p.output) / 1_000_000;
 }
 
+async function settleD1TaskQuota(
+    env: TaskStoreEnv,
+    uid: string,
+    taskId: string,
+    record: { total: number; consumed: number },
+    prepaid = true,
+): Promise<{ consumed: number; total: number; outOfQuota: boolean }> {
+    let consumed = record.consumed;
+    let outOfQuota = false;
+    const target = prepaid
+        ? Math.floor(record.total / COST_PER_QUOTA)
+        : Math.ceil(record.total / COST_PER_QUOTA);
+    while (consumed < target) {
+        const ok = await consume(env.TASKS, uid);
+        if (!ok) { outOfQuota = true; break; }
+        consumed++;
+    }
+    if (consumed !== record.consumed) {
+        let persisted = false;
+        for (let attempt = 0; attempt < 3 && !persisted; attempt++) {
+            persisted = await setTaskCostConsumedInD1(env, taskId, uid, consumed);
+        }
+        if (!persisted) {
+            const latest = await getTaskCostFromD1(env, taskId, uid);
+            if (!latest || latest.consumed < consumed) {
+                throw new Error("D1 task quota settlement cursor update failed");
+            }
+        }
+    }
+    return { consumed, total: record.total, outOfQuota };
+}
+
+/** Reconcile quota consumption after a fenced operation atomically records its cost. */
+export async function settleTaskCostQuota(
+    env: TaskStoreEnv,
+    uid: string,
+    taskId: string,
+): Promise<{ consumed: number; total: number; outOfQuota: boolean }> {
+    const record = await getTaskCostFromD1(env, taskId, uid);
+    if (!record) throw new Error("D1 task cost is unavailable");
+    return settleD1TaskQuota(env, uid, taskId, record);
+}
+
 /**
  * 累积单任务 LLM 成本；跨过 COST_PER_QUOTA 阈值时自动扣额度。
- * mode-1（plan 新建任务）已预扣 1 件覆盖首个 0~0.8 元区间，所以从第 2 件起按差额追扣。
+ * 共享 DeepSeek 的 mode-1（plan 新建任务）已预扣 1 件覆盖首个 0~0.8 元区间，
+ * 所以从第 2 件起按差额追扣；BYOK 请求不会进入本函数。
  * 余额耗尽时返回 outOfQuota=true，调用方应在 state 上打标记，下次入口拒绝。
  */
 export async function accumulateCosts(
     env: TaskStoreEnv, uid: string, taskId: string,
     entries: UsageCostEntry[],
+    prepaid = true,
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
     if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
-    const cost = entries.reduce((sum, entry) => sum + (entry.usage ? costOf(entry.model, entry.usage) : 0), 0);
+    const cost = entries.reduce((sum, entry) => sum + (entry.usage ? usageCost(entry.model, entry.usage) : 0), 0);
     if (cost <= 0) {
         const d1Rec = await getTaskCostFromD1(env, taskId, uid);
         if (d1Rec) return { ...d1Rec, outOfQuota: false, delta: 0 };
@@ -216,18 +247,8 @@ export async function accumulateCosts(
 
     const d1Rec = await addTaskCostInD1(env, taskId, uid, cost);
     if (d1Rec) {
-        let consumed = d1Rec.consumed;
-        let outOfQuota = false;
-        const target = Math.floor(d1Rec.total / COST_PER_QUOTA);
-        while (consumed < target) {
-            const ok = await consume(env.TASKS, uid);
-            if (!ok) { outOfQuota = true; break; }
-            consumed++;
-        }
-        if (consumed !== d1Rec.consumed) {
-            await setTaskCostConsumedInD1(env, taskId, uid, consumed);
-        }
-        return { consumed, total: d1Rec.total, outOfQuota, delta: cost };
+        const settled = await settleD1TaskQuota(env, uid, taskId, d1Rec, prepaid);
+        return { ...settled, delta: cost };
     }
 
     const key = `taskCost:${taskId}`;
@@ -236,7 +257,9 @@ export async function accumulateCosts(
     rec.total += cost;
 
     let outOfQuota = false;
-    const target = Math.floor(rec.total / COST_PER_QUOTA);
+    const target = prepaid
+        ? Math.floor(rec.total / COST_PER_QUOTA)
+        : Math.ceil(rec.total / COST_PER_QUOTA);
     while (rec.consumed < target) {
         const ok = await consume(env.TASKS, uid);
         if (!ok) { outOfQuota = true; break; }
@@ -249,10 +272,10 @@ export async function accumulateCosts(
 /** 单次调用兼容入口；同一请求包含多次 LLM 调用时优先使用 accumulateCosts 批量结算。 */
 export async function accumulateCost(
     env: TaskStoreEnv, uid: string, taskId: string,
-    model: string, usage?: UsageBreakdown,
+    model: string, usage?: UsageBreakdown, prepaid = true,
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
     if (!usage) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
-    return accumulateCosts(env, uid, taskId, [{ model, usage }]);
+    return accumulateCosts(env, uid, taskId, [{ model, usage }], prepaid);
 }
 
 export async function getTaskCost(

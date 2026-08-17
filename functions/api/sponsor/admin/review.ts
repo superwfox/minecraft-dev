@@ -4,8 +4,10 @@
 import { verifySession, getSessionCookie } from "../../../_lib/session";
 import { isAdmin, getPending, deletePending } from "../../../_lib/sponsor";
 import { redeem } from "../../../_lib/quota";
+import { clearUserTaskQuotaExhausted } from "../../../_lib/taskStore";
 
 interface Env {
+    DB?: D1Database;
     SESSION_SECRET: string;
     TASKS: KVNamespace;
     ADMIN_UID: string;
@@ -32,6 +34,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (action === "approve") {
         // 以备注码作为去重 key 发额度（redeem 内部 order:<code> 标记防重复）
         const r = await redeem(context.env.TASKS, p.uid, p.code, p.amount);
+        if (r.ok) {
+            try {
+                await clearUserTaskQuotaExhausted(context.env, p.uid);
+            } catch (error) {
+                console.warn("recharged task quota unlock failed", error);
+            }
+        }
         await deletePending(context.env.TASKS, p.code, p.uid);
         return json({ ok: r.ok, reason: r.reason, added: r.added, login: p.login, amount: p.amount });
     }

@@ -22,7 +22,7 @@
       <!-- 选档位 + 付款 -->
       <template v-else>
         <div class="sp-body">
-          免费额度每月 1 号刷新；也可付款充值（1 元 = 1 件）。
+          充值额度按 1 元 = 1 件计算。
           <b>付款时务必在备注里填下方专属码</b>，提交后管理员核对到账。
         </div>
 
@@ -63,26 +63,6 @@
           <button class="sp-btn" @click="onPaid">我已付款，提交待确认</button>
         </template>
 
-        <div v-if="isSilverPlus" class="sp-byok">
-          <div class="sp-byok-head">外接 API · 自带 GLM Key<span class="sp-byok-badge">银牌+</span></div>
-          <div class="sp-byok-tip">
-            填入你的智谱 <b>GLM</b> API Key 后，生成将走你自己的 key、<b>不计平台额度</b>（构建次数上限仍受限）。
-            兼容通用 API Key 与 Coding Plan Key，系统会自动识别端点。
-            Key 仅保存在本地浏览器，不会上传留存。
-          </div>
-          <div class="sp-byok-row">
-            <input v-model="byokKeyInput" type="password" class="sp-byok-input"
-                   placeholder="GLM API Key" autocomplete="off" spellcheck="false"/>
-            <button class="sp-byok-go" @click="saveByokKey">{{ byokSaved ? "已保存" : "保存" }}</button>
-          </div>
-          <label class="sp-byok-toggle" :class="{ off: !byok.enabled }">
-            <input type="checkbox" :checked="byok.enabled" :disabled="!byok.key" @change="toggleByok"/>
-            <span>{{ byok.enabled
-              ? (byok.endpoint === "coding" ? "已启用 · 正用 Coding Plan Key 生成" : "已启用 · 正用你的 GLM Key 生成")
-              : (byok.key ? "未启用（用平台额度）" : "先保存 Key 再启用") }}</span>
-          </label>
-        </div>
-
         <div v-if="errMsg" class="sp-err">{{ errMsg }}</div>
         <div class="sp-close" @click="close">关闭</div>
       </template>
@@ -93,7 +73,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { showSponsorModal, authState, fetchMe, requestSponsor, requestSponsorAmount, SPONSOR_TIERS } from "../logic/auth";
-import { byok, saveByok } from "../logic/byok";
 
 const method = ref<"alipay" | "wechat">("alipay");
 const selectedTier = ref("");
@@ -107,28 +86,6 @@ const copied = ref(false);
 const qrError = ref(false);
 const customAmount = ref("");
 const customValid = computed(() => Math.floor(Number(customAmount.value)) >= 1);
-
-// BYOK：仅银牌+（tier !== none）可见外接 GLM key 入口
-const isSilverPlus = computed(() => !!authState.quota && authState.quota.tier !== "none");
-const byokKeyInput = ref(byok.key);
-const byokSaved = ref(false);
-
-function saveByokKey() {
-    const nextKey = byokKeyInput.value.trim();
-    if (nextKey !== byok.key) byok.endpoint = "standard";
-    byok.key = nextKey;
-    byok.provider = "glm";
-    byok.enabled = !!byok.key; // 有 key 即默认启用；清空即停用
-    saveByok();
-    byokSaved.value = true;
-    setTimeout(() => (byokSaved.value = false), 1500);
-}
-
-function toggleByok() {
-    if (!byok.key) return;
-    byok.enabled = !byok.enabled;
-    saveByok();
-}
 
 let pollTimer: any = null;
 let baseline = 0;
@@ -144,8 +101,6 @@ function reset() {
     copied.value = false;
     qrError.value = false;
     customAmount.value = "";
-    byokKeyInput.value = byok.key; // 回填已存 key（BYOK 状态本身不在此重置）
-    byokSaved.value = false;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
@@ -364,71 +319,6 @@ function close() {
 .sp-wait-text { font-size: 14px; line-height: 1.6; color: rgba(255, 255, 255, 0.82); }
 .sp-note { font-size: 12px; color: rgba(255, 255, 255, 0.55); }
 .sp-note b { color: #ffe08a; }
-
-.sp-byok {
-    margin-top: 18px;
-    padding-top: 16px;
-    border-top: 1px dashed rgba(255, 255, 255, 0.14);
-    text-align: left;
-}
-.sp-byok-head {
-    font-size: 14px;
-    color: wheat;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-}
-.sp-byok-badge {
-    font-size: 10px;
-    padding: 1px 7px;
-    border-radius: 8px;
-    background: rgba(255, 224, 138, 0.18);
-    color: #ffe08a;
-    border: 1px solid rgba(255, 224, 138, 0.4);
-}
-.sp-byok-tip {
-    font-size: 12px;
-    line-height: 1.6;
-    color: rgba(255, 255, 255, 0.62);
-    margin-bottom: 10px;
-}
-.sp-byok-tip b { color: wheat; }
-.sp-byok-row { display: flex; gap: 8px; align-items: center; }
-.sp-byok-input {
-    flex: 1;
-    min-width: 0;
-    padding: 8px 10px;
-    border-radius: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background: rgba(255, 255, 255, 0.04);
-    color: wheat;
-    font-size: 13px;
-    outline: none;
-}
-.sp-byok-input:focus { border-color: wheat; }
-.sp-byok-go {
-    flex-shrink: 0;
-    padding: 8px 16px;
-    border-radius: 10px;
-    border: none;
-    background: wheat;
-    color: #1c1812;
-    font-size: 13px;
-    cursor: pointer;
-}
-.sp-byok-toggle {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    margin-top: 9px;
-    font-size: 12px;
-    color: #9be39b;
-    cursor: pointer;
-    user-select: none;
-}
-.sp-byok-toggle.off { color: rgba(255, 255, 255, 0.5); }
-.sp-byok-toggle input { accent-color: wheat; cursor: pointer; }
 
 .sp-done { font-size: 18px; color: #9be39b; margin: 18px 0; }
 .sp-err { margin-top: 12px; font-size: 13px; color: #ff9a8a; }

@@ -3,7 +3,6 @@ import { reactive, ref } from "vue";
 export type Tier = "diamond" | "gold" | "silver" | "none";
 
 export interface QuotaInfo {
-    freeRemaining: number;
     paidBalance: number;
     totalRecharged: number;
     remaining: number;

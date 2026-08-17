@@ -2,7 +2,7 @@ import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs } from "../../_lib/github";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
-import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
 import {
     buildDiagnosticKnowledgeNeeds,
     filterFixKnowledgeNeeds,
@@ -59,6 +59,7 @@ import {
     resolveModelLearningRequest,
     type ModelLearningResolution,
 } from "../../_lib/learning/toolRuntime";
+import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
 
 interface Env {
     DB?: D1Database;
@@ -86,6 +87,28 @@ class RepairLeaseLostError extends Error {
         super("Repair lease lost");
         this.name = "RepairLeaseLostError";
     }
+}
+
+function fixStreamError(error: unknown): {
+    message: string;
+    code: string;
+    status: number;
+    retryable: boolean;
+} {
+    if (error instanceof OpenAIUpstreamHttpError) {
+        return {
+            message: error.message,
+            code: error.code,
+            status: error.status,
+            retryable: error.status !== 401,
+        };
+    }
+    return {
+        message: error instanceof Error ? error.message : String(error),
+        code: "FIX_FAILED",
+        status: 500,
+        retryable: true,
+    };
 }
 
 async function callAIStream(
@@ -121,7 +144,7 @@ async function callAIStream(
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
-        if (!resp.ok) throw new Error(await resp.text());
+        await assertOpenAIResponse(resp);
 
         const reader = resp.body!.getReader();
         const decoder = new TextDecoder();
@@ -305,6 +328,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     let state = JSON.parse(raw);
+    const llm: LLMProvider | null = mode === "repair"
+        ? await resolveTaskLLM(context, state)
+        : null;
+    if (mode === "repair" && !llm) return deepSeekKeyRequiredResponse();
 
     if (mode !== "repair" && state.status !== "error") {
         return new Response(JSON.stringify({
@@ -322,8 +349,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return repairAuthorizationExpired();
     }
 
-    if (mode === "repair" && state.quotaExhausted) {
-        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+    if (mode === "repair" && state.quotaExhausted && !llm?.byok) {
+        return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
             status: 402, headers: { "Content-Type": "application/json" },
         });
     }
@@ -335,7 +362,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     // diagnose/inspect 只抓取并结构化构建日志，不应依赖模型配置或剩余额度。
-    const llm: LLMProvider | null = mode === "repair" ? await resolveLLM(context) : null;
     const storedFixLearningRequestId = typeof state.fixLearningRequestId === "string"
         && /^learnreq_[a-f0-9]{32}$/i.test(state.fixLearningRequestId)
         ? state.fixLearningRequestId
@@ -468,9 +494,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await releaseRepairLease().catch((releaseError) => console.warn("repair lease release failed", releaseError));
             return new Response("Task state unavailable", { status: 503 });
         }
-        if (state.quotaExhausted) {
+        if (state.quotaExhausted && !llm?.byok) {
             await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
-            return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+            return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
                 status: 402, headers: { "Content-Type": "application/json" },
             });
         }
@@ -1275,16 +1301,32 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
             }
 
-            const message = leaseFailure
-                ? "自动修复执行权已失效，正在恢复最新任务状态"
-                : e?.message || "自动修复失败";
+            const mapped = leaseFailure
+                ? {
+                    message: "自动修复执行权已失效，正在恢复最新任务状态",
+                    code: "REPAIR_LEASE_LOST",
+                    status: 409,
+                    retryable: true,
+                }
+                : fixStreamError(e);
+            const message = mapped.message;
             await writer.write(sseEvent(encoder, { type: "log", msg: `× ${message}` }));
+            await writer.write(sseEvent(encoder, {
+                type: "error",
+                stage: "fix",
+                error: message,
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
+            }));
             await writer.write(sseEvent(encoder, {
                 type: "result",
                 fixed: 0,
                 changed: 0,
                 error: message,
-                ...(leaseFailure ? { code: "REPAIR_LEASE_LOST" } : {}),
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
             }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {

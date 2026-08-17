@@ -33,42 +33,58 @@
   </GlassCard>
   <Teleport to="body">
     <div
-      v-if="authState.user"
+      v-if="authState.loaded"
       class="quota-pop"
       :class="{ open: quotaOpen }"
       :style="quotaPopStyle"
       @pointerenter="cancelQuotaClose"
       @pointerleave="scheduleQuotaClose"
     >
-      <div class="quota-line">剩余额度：<b>{{ authState.quota?.remaining ?? 0 }}</b></div>
-      <div class="quota-sub" v-if="authState.quota">
-        免费 {{ authState.quota.freeRemaining }} · 充值 {{ authState.quota.paidBalance }}
+      <template v-if="authState.user">
+        <div class="quota-line">充值额度：<b>{{ authState.quota?.paidBalance ?? 0 }}</b></div>
+        <button class="recharge-btn" type="button" @click="openSponsor">充值额度</button>
+      </template>
+      <template v-else>
+        <div class="quota-line">账户</div>
+        <button class="recharge-btn quota-login" type="button" @click="login">登录后充值</button>
+      </template>
+
+      <div class="key-summary">
+        <div class="key-summary-head">
+          <span>DeepSeek Key</span>
+          <span class="key-summary-state" :class="{ ready: deepSeekKeyConfigured }">
+            {{ deepSeekKeyConfigured ? "已配置" : "未配置" }}
+          </span>
+        </div>
+        <div v-if="deepSeekKeyConfigured" class="key-summary-value">•••• {{ deepSeekKeyLastFour }}</div>
+        <button class="key-manage-btn" type="button" @click="openDeepSeekSettings">
+          {{ deepSeekKeyConfigured ? "管理 Key" : "填写 Key" }}
+        </button>
       </div>
-      <button class="recharge-btn" @click="openSponsor">充值额度</button>
-      <div class="quota-logout" @click="doLogout">退出登录</div>
+
+      <div v-if="authState.user" class="quota-logout" @click="doLogout">退出登录</div>
     </div>
-  </Teleport>
-  <Teleport to="body">
-    <Transition name="byok-notice">
-      <div v-if="byokNotice.visible" class="byok-notice" role="alert">
-        <span>{{ byokNotice.message }}</span>
-        <button type="button" aria-label="关闭提示" @click="dismissByokNotice">×</button>
-      </div>
-    </Transition>
   </Teleport>
   <router-view/>
   <SponsorModal/>
+  <DeepSeekKeyModal/>
 </template>
 
 <script setup lang="ts">
 import {provide, ref, onMounted, onBeforeUnmount, computed} from "vue";
 import GlassCard from "./components/glassCard.vue";
+import DeepSeekKeyModal from "./components/DeepSeekKeyModal.vue";
 import SponsorModal from "./components/sponsorModal.vue";
 import TopNav from "./components/TopNav.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
 import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
-import {byokNotice, dismissByokNotice} from "./logic/byok";
+import {
+  deepSeekKeyConfigured,
+  deepSeekKeyLastFour,
+  openDeepSeekKeyModal,
+  promptForDeepSeekKey,
+} from "./logic/byok";
 
 const router = useRouter();
 const goHome = () => router.push("/");
@@ -85,7 +101,7 @@ const quotaPopStyle = computed(() => ({
   left: `${quotaPosition.value.left}px`,
 }));
 
-const QUOTA_WIDTH = 220;
+const QUOTA_WIDTH = 244;
 const QUOTA_GAP = 8;
 const VIEWPORT_GUTTER = 12;
 let quotaCloseTimer: number | undefined;
@@ -110,7 +126,6 @@ function cancelQuotaClose() {
 }
 
 function openQuota() {
-  if (!authState.user) return;
   cancelQuotaClose();
   updateQuotaPosition();
   quotaOpen.value = true;
@@ -130,6 +145,12 @@ function openSponsor() {
   showSponsorModal.value = true;
 }
 
+function openDeepSeekSettings() {
+  cancelQuotaClose();
+  quotaOpen.value = false;
+  openDeepSeekKeyModal("manage");
+}
+
 function doLogout() {
   cancelQuotaClose();
   quotaOpen.value = false;
@@ -140,6 +161,7 @@ restoreSession();
 onMounted(() => {
   startSessionPersistence();
   fetchMe();
+  promptForDeepSeekKey();
   window.addEventListener("resize", updateQuotaPosition);
 });
 
@@ -262,7 +284,7 @@ body {
 
 .quota-pop {
   position: fixed;
-  width: min(220px, calc(100vw - 24px));
+  width: min(244px, calc(100vw - 24px));
   padding: 14px 14px 10px;
   border-radius: 14px;
   background: rgba(8, 9, 10, 0.94);
@@ -302,12 +324,6 @@ body {
 .quota-line b {
   color: var(--line-strong);
   font-size: 17px;
-}
-
-.quota-sub {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--text-muted);
 }
 
 .redeem-row {
@@ -360,7 +376,7 @@ body {
 .recharge-btn {
   margin-top: 12px;
   width: 100%;
-  padding: 8px 0;
+  padding: 8px 12px;
   border-radius: 8px;
   border: none;
   background: var(--oak);
@@ -371,6 +387,68 @@ body {
 }
 .recharge-btn:hover {
   background: var(--oak-hover);
+}
+
+.quota-login {
+  border: 1px solid rgba(198, 176, 125, 0.34);
+  background: rgba(198, 176, 125, 0.08);
+  color: var(--oak);
+}
+
+.quota-login:hover {
+  background: rgba(198, 176, 125, 0.14);
+}
+
+.key-summary {
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.key-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.key-summary-state {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.key-summary-state.ready {
+  color: #90c9a1;
+}
+
+.key-summary-value {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-manage-btn {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 9px;
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.key-manage-btn:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+  color: var(--text-primary);
 }
 
 .quota-logout {
@@ -385,55 +463,6 @@ body {
 
 .quota-logout:hover {
   color: var(--text-primary);
-}
-
-.byok-notice {
-  position: fixed;
-  top: 76px;
-  left: 50%;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  width: min(620px, calc(100vw - 28px));
-  padding: 12px 14px;
-  border: 1px solid rgba(198, 176, 125, 0.42);
-  border-radius: 12px;
-  background: rgba(18, 17, 13, 0.96);
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.58);
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.55;
-  transform: translateX(-50%);
-}
-
-.byok-notice span {
-  flex: 1;
-}
-
-.byok-notice button {
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.byok-notice button:hover {
-  color: var(--text-primary);
-}
-
-.byok-notice-enter-active,
-.byok-notice-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-
-.byok-notice-enter-from,
-.byok-notice-leave-to {
-  opacity: 0;
-  transform: translateX(-50%) translateY(-8px);
 }
 
 * {

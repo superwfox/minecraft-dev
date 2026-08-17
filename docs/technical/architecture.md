@@ -20,7 +20,6 @@ graph TB
 
     subgraph "外部服务"
         DeepSeek[DeepSeek API]
-        XFYun[讯飞语音 API]
         Maven[Maven 仓库<br/>PaperMC / SpigotMC]
         GitHub[GitHub API]
         Actions[GitHub Actions]
@@ -32,7 +31,6 @@ graph TB
     Functions --> D1
     Functions --> KV
     Functions --> DeepSeek
-    Functions --> XFYun
     Functions --> Maven
     Functions --> GitHub
     GitHub --> Actions
@@ -63,8 +61,7 @@ src/
 │   ├── chatHandler.ts        # precheck → getInfo → getTodoList 编排
 │   ├── generateState.ts      # GenTask 响应式状态 + Clarify/ExtraPrompt resolver
 │   ├── generateHandler.ts    # 桶遍历 + SSE 路由 + replan/fix 回路
-│   ├── sessionPersist.ts     # localStorage 持久化 + 中断态恢复
-│   └── voiceInput.ts         # 讯飞 WebSocket 语音输入
+│   └── sessionPersist.ts     # localStorage 持久化 + 中断态恢复
 ├── ide/                      # 浏览器内 IDE 模块（见「浏览器 IDE」）
 │   ├── pages/IDEPage.vue
 │   ├── components/            # EditorPanel / FileTree / TabBar / BottomChatDock / SelectionPopup
@@ -84,7 +81,6 @@ functions/
 ├── api/
 │   ├── chat.ts                # 非流式 LLM 代理（model 含 pro 时注入 thinking）
 │   ├── stream.ts              # SSE LLM 代理
-│   ├── voice-auth.ts          # 讯飞鉴权签名
 │   ├── maven/jar.ts           # Maven 仓库 JAR / metadata 代理（IDE 补全用）
 │   └── generate/
 │       ├── plan.ts            # Planner（双模式：建 task + 出蓝图/文件树/深度桶）
@@ -223,9 +219,7 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 |------|------|
 | `DEEPSEEK_API_KEY` | DeepSeek API 认证 |
 | `GITHUB_PAT` | GitHub API（对 `minecraft-dev-workflow` 有 repo + workflow 权限）|
-| `XFYUN_APP_ID` / `XFYUN_API_KEY` / `XFYUN_API_SECRET` | 讯飞语音鉴权 |
 
-- **语音鉴权**：讯飞 WebSocket 的 HMAC-SHA256 签名在 `voice-auth.ts` 服务端完成，前端只拿到签名后的 URL。
 - **Maven 代理白名单**：`maven/jar.ts` 仅允许 PaperMC / SpigotMC / Maven Central，防止 Worker 被当作任意 GET 代理。
 - **GitHub 临时分支**：每次构建建 `build-<taskId>` 分支，成功后立即删除。
 

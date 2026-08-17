@@ -24,7 +24,6 @@ export default withMermaid(defineConfig({
                     { text: "可视化蓝图", link: "/features/blueprint" },
                     { text: "技能库", link: "/features/skills" },
                     { text: "前端亮点", link: "/features/frontend-highlights" },
-                    { text: "语音输入", link: "/features/voice-input" },
                 ],
             },
             {
@@ -53,7 +52,6 @@ export default withMermaid(defineConfig({
                     { text: "可视化蓝图", link: "/features/blueprint" },
                     { text: "技能库", link: "/features/skills" },
                     { text: "前端亮点", link: "/features/frontend-highlights" },
-                    { text: "语音输入", link: "/features/voice-input" },
                 ],
             },
             {

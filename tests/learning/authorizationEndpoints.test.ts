@@ -29,6 +29,7 @@ vi.mock("../../functions/_lib/learning/store", async (importOriginal) => ({
 vi.mock("../../functions/_lib/llm", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     resolveLLM: resolveLLMMock,
+    resolveTaskLLM: resolveLLMMock,
 }));
 
 vi.mock("../../functions/_lib/deepseekResponses", async (importOriginal) => ({
@@ -414,6 +415,16 @@ describe("learning endpoint authorization", () => {
 
     it("checks authorization before returning a terminal step snapshot", async () => {
         getLearningJobMock.mockResolvedValue(terminalJob());
+        resolveLLMMock.mockResolvedValue({
+            providerId: "deepseek",
+            url: "https://api.deepseek.com/chat/completions",
+            apiKey: "test-key",
+            byok: false,
+            credentialId: "",
+            learningCacheRead: true,
+            canAutoLearn: true,
+            modelFor: () => "deepseek-v4-flash",
+        });
         const response = await stepLearning(context(new Request(
             "https://example.test/api/learning/step",
             {
@@ -493,6 +504,7 @@ describe("learning endpoint authorization", () => {
                 url: "https://api.deepseek.com/chat/completions",
                 apiKey: "test-key",
                 byok: false,
+                credentialId: "",
                 learningCacheRead: true,
                 canAutoLearn: true,
                 modelFor: () => "deepseek-v4-flash",

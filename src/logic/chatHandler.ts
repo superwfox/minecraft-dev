@@ -8,7 +8,7 @@ import {
     combineUserMessages,
 } from "./chatState";
 import { streamGetInfo, consistChat, precheckPrompt } from "../api/deepseek";
-import type { ChatMsg } from "../api/deepseek";
+import type { ChatMsg, StreamCallbacks, StreamHandle } from "../api/deepseek";
 import { authState, fetchMe } from "./auth";
 import { startGenerate } from "./generateHandler";
 
@@ -28,7 +28,56 @@ export function clearRebuildInfo() { _rebuildInfo = null; }
 
 // analyze(需求分析)阶段的 abort controller；ESC 撤回时中断
 let analyzeAbort: AbortController | null = null;
-export function interruptAnalyze() { analyzeAbort?.abort(); }
+let fallbackHandle: StreamHandle | null = null;
+let fallbackBlock: ChatBlock | null = null;
+
+export function interruptAnalyze(centerText?: Ref<string>) {
+    analyzeAbort?.abort();
+    analyzeAbort = null;
+    const handle = fallbackHandle;
+    const block = fallbackBlock;
+    fallbackHandle = null;
+    fallbackBlock = null;
+    handle?.stop();
+    if (block?.phase === "streaming") {
+        block.phase = "done";
+        block.streamText = "";
+        block.rawMsg = "";
+        block.thinkingText = "";
+        block.outputText = "";
+        block.streamStage = "";
+        streamTick.value++;
+    }
+    if (centerText) centerText.value = "已中断";
+}
+
+function beginDraftStream(block: ChatBlock, stage: ChatBlock["streamStage"]) {
+    block.streamStage = stage;
+    block.thinkingText = "";
+    block.outputText = "";
+    block.rawMsg = "";
+}
+
+function draftStreamCallbacks(block: ChatBlock): StreamCallbacks {
+    return {
+        onThinking(chunk) {
+            block.thinkingText += chunk;
+            streamTick.value++;
+        },
+        onOutput(chunk) {
+            block.outputText += chunk;
+            block.rawMsg += chunk;
+            streamTick.value++;
+        },
+    };
+}
+
+function handleAnalyzeAbort(block: ChatBlock, centerText: Ref<string>) {
+    const idx = chatBlocks.indexOf(block);
+    if (idx >= 0 && block.userMessages.length === 1) chatBlocks.splice(idx, 1);
+    else { block.phase = "error"; block.error = "已中断"; }
+    centerText.value = "已中断";
+}
 
 export async function handleUserInput(
     input: string,
@@ -68,13 +117,20 @@ export async function handleUserInput(
     if (!draft) draft = createDraftBlock(input);
 
     const combined = combineUserMessages(draft.userMessages);
+    const analyzeController = new AbortController();
+    analyzeAbort = analyzeController;
 
     // 阶段0: 需求完整性预检查
     if (onIncomplete) {
         centerText.value = "正在检查需求完整性...";
         draft.phase = "analyzing";
+        beginDraftStream(draft, "precheck");
         try {
-            const pre = await precheckPrompt(combined);
+            const pre = await precheckPrompt(
+                combined,
+                draftStreamCallbacks(draft),
+                analyzeController.signal,
+            );
             if (!pre.complete) {
                 draft.phase = "error";
                 draft.error = pre.hint || "需求描述不完整，请补充";
@@ -82,8 +138,15 @@ export async function handleUserInput(
                 onIncomplete(input, pre.hint || "请补充核心功能、玩家交互、触发方式");
                 return;
             }
-        } catch {
-            // 预检查失败不阻塞，继续
+        } catch (e: any) {
+            if (e?.name === "AbortError") {
+                handleAnalyzeAbort(draft, centerText);
+                return;
+            }
+            draft.phase = "error";
+            draft.error = "需求完整性检查失败: " + (e?.message || e);
+            centerText.value = "请求失败";
+            return;
         }
     }
 
@@ -93,20 +156,16 @@ export async function handleUserInput(
 
     let info: any;
     try {
-        draft.rawMsg = "";
-        analyzeAbort = new AbortController();
-        const raw = await streamGetInfo(combined, (chunk) => {
-            draft.rawMsg += chunk;
-            streamTick.value++;
-        }, analyzeAbort.signal);
+        beginDraftStream(draft, "analysis");
+        const raw = await streamGetInfo(
+            combined,
+            draftStreamCallbacks(draft),
+            analyzeController.signal,
+        );
         info = tryParseJson(raw);
     } catch (e: any) {
         if (e?.name === "AbortError") {
-            // ESC 撤回：丢弃刚建的单条草稿，回到干净 idle 输入态
-            const idx = chatBlocks.indexOf(draft);
-            if (idx >= 0 && draft.userMessages.length === 1) chatBlocks.splice(idx, 1);
-            else { draft.phase = "error"; draft.error = "已中断"; }
-            centerText.value = "已中断";
+            handleAnalyzeAbort(draft, centerText);
             return;
         }
         draft.phase = "error";
@@ -142,6 +201,9 @@ export async function handleUserInput(
 export async function continueAfterSelect(block: ChatBlock, centerText: Ref<string>) {
     // 平台新方向：不再生成「开发步骤」预览，确认核心/版本后直接进入需求确认(clarify)+生成。
     block.rawMsg = "";
+    block.thinkingText = "";
+    block.outputText = "";
+    block.streamStage = "";
     block.phase = "done";
     block.draft = false;
     centerText.value = "正在进入需求确认...";
@@ -153,14 +215,40 @@ export async function continueAfterSelect(block: ChatBlock, centerText: Ref<stri
 
 function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>) {
     block.streamText = "";
-    consistChat(fallbackHistory, input, (chunk) => {
+    block.thinkingText = "";
+    block.outputText = "";
+    block.streamStage = "chat";
+    analyzeAbort = null;
+    const handle = consistChat(fallbackHistory, input, (chunk) => {
         block.streamText = block.streamText + chunk;
         streamTick.value++;
     }, () => {
         fallbackHistory.push({ role: "user", content: input });
         fallbackHistory.push({ role: "assistant", content: block.streamText || "" });
         block.phase = "done";
+        block.thinkingText = "";
+        block.outputText = "";
+        block.streamStage = "";
         centerText.value = "就绪";
+    }, (chunk) => {
+        block.thinkingText += chunk;
+        streamTick.value++;
+    });
+    fallbackHandle = handle;
+    fallbackBlock = block;
+    void handle.done.catch((error: any) => {
+        if (error?.name === "AbortError") return;
+        if (block.phase === "streaming") {
+            block.phase = "error";
+            block.error = "回复中断: " + (error?.message || error);
+            block.thinkingText = "";
+            block.outputText = "";
+            block.streamStage = "";
+            centerText.value = "请求失败";
+        }
+    }).finally(() => {
+        if (fallbackHandle === handle) fallbackHandle = null;
+        if (fallbackBlock === block) fallbackBlock = null;
     });
 }
 

@@ -1,24 +1,23 @@
 <template>
   <div class="chat-page" :class="{ 'is-focus': inFocusPhase }">
 
-    <Transition name="ambient-field">
-      <div v-if="ambientVisible" class="ambient-field" aria-hidden="true">
-        <Transition name="wedge-swap">
-          <div :key="ambientCorner" class="pixel-wedge" :class="`from-${ambientCorner}`">
-            <span
-              v-for="pixel in ambientPixels"
-              :key="pixel.id"
-              class="wedge-pixel"
-              :style="pixel.style"
-            ></span>
-          </div>
-        </Transition>
-      </div>
-    </Transition>
-
     <!-- ════════ 聚焦阶段：居中输入 + 需求确认 ════════ -->
     <div v-if="inFocusPhase" class="focus-stack">
-      <div v-if="statusText" class="focus-status">{{ statusText }}</div>
+      <Transition name="welcome-collapse">
+        <div v-if="showWelcome" class="focus-welcome">
+          <Blocks :size="42" :stroke-width="1.35" aria-hidden="true"/>
+          <h1>
+            <span>今天想构建什么</span>
+            <template v-if="welcomeLogin">
+              <span>，</span>
+              <span class="welcome-user" :title="welcomeLogin">{{ welcomeLogin }}</span>
+            </template>
+            <span>？</span>
+          </h1>
+        </div>
+      </Transition>
+
+      <div v-if="statusText && !liveProcessVisible" class="focus-status">{{ statusText }}</div>
 
       <div v-if="activeError" class="focus-error">
         <span class="focus-error-msg">{{ activeError }}</span>
@@ -26,16 +25,43 @@
       </div>
 
       <!-- 离题对话回复（fallback） -->
-      <div v-if="fallbackText" class="focus-fallback">{{ fallbackText }}</div>
+      <div v-if="fallbackText && !liveProcessVisible" class="focus-fallback">{{ fallbackText }}</div>
 
-      <!-- Reasoner 思考流（折叠） -->
-      <div v-if="genTask.reasoningContent" class="reasoning-wrap">
-        <div class="reasoning-head" @click="genTask.reasoningVisible = !genTask.reasoningVisible">
-          <span class="reasoning-title">ai thinking</span>
-          <span class="reasoning-toggle">{{ genTask.reasoningVisible ? "收起" : "展开" }}</span>
+      <!-- FileGen 前置阶段的 thinking / output 双流 -->
+      <section v-if="liveProcessVisible" class="live-process" aria-live="polite">
+        <div class="live-process-head">
+          <span class="live-process-status">
+            <LoaderCircle v-if="liveProcessActive" class="live-spinner" :size="15" aria-hidden="true"/>
+            <span>{{ liveStageLabel }}</span>
+          </span>
+          <button
+            v-if="activeThinking"
+            type="button"
+            class="thinking-toggle"
+            :aria-expanded="genTask.reasoningVisible"
+            @click="genTask.reasoningVisible = !genTask.reasoningVisible"
+          >
+            <BrainCircuit :size="14" aria-hidden="true"/>
+            <span>思考</span>
+            <ChevronUp v-if="genTask.reasoningVisible" :size="14" aria-hidden="true"/>
+            <ChevronDown v-else :size="14" aria-hidden="true"/>
+          </button>
         </div>
-        <div v-if="genTask.reasoningVisible" ref="reasonBodyEl" class="reasoning-body">{{ genTask.reasoningContent }}</div>
-      </div>
+        <div class="live-process-body">
+          <div v-if="activeThinking && genTask.reasoningVisible" ref="reasonBodyEl" class="live-thinking">
+            {{ activeThinking }}
+          </div>
+          <div v-if="activeOutput" ref="outputBodyEl" class="live-output" :class="{ 'is-full': !activeThinking || !genTask.reasoningVisible }">
+            <span class="live-output-label">输出</span>
+            <pre>{{ activeOutput }}</pre>
+          </div>
+          <div
+            v-else-if="liveProcessActive"
+            class="live-waiting"
+            :class="{ 'is-full': !activeThinking || !genTask.reasoningVisible }"
+          >等待首个响应片段…</div>
+        </div>
+      </section>
 
       <!-- Q&A 收敛：需求确认完成的问答收敛成 ─问/·答 -->
       <div v-if="qaRecap.length" class="qa-recap">
@@ -91,38 +117,34 @@
         <span class="cs-label">技能</span>
         <span v-for="b in chosenSkills" :key="b.id" class="cs-chip" :title="b.capability || ''">
           {{ b.name || b.id }}
-          <button class="cs-x" @click="removeSkill(b.id)" title="移除技能"><X :size="12"/></button>
+          <button class="cs-x" :disabled="composerDisabled" @click="removeSkill(b.id)" title="移除技能"><X :size="12"/></button>
         </span>
       </div>
 
-      <!-- Thinking 与输入框共享同一占位，工作态直接替换输入框 -->
-      <div class="composer-stage" :class="{'is-working': aiWorking}" :style="workingStageStyle">
-        <div v-if="aiWorking" class="focus-marquee" :style="workingBoxStyle">
-          <ThinkingMarquee variant="hero" @size-change="onWorkingSize"/>
-        </div>
-
-        <div v-else class="composer" :class="{ disabled: composerDisabled }">
+      <div class="composer-stage">
+        <div class="composer" :class="{ disabled: composerDisabled }">
           <div class="composer-input-shell">
-            <textarea ref="composerEl" class="composer-input" v-model="inputText"
-                      :placeholder="composerPlaceholder" :disabled="composerDisabled"
-                      rows="2"
-                      @compositionstart="onImeCompositionStart"
-                      @compositionend="onImeCompositionEnd"
-                      @keydown.enter.exact="onComposerEnter"></textarea>
-          </div>
-          <div class="composer-actions">
-            <button class="action-btn voice-btn" :class="{recording: isRecording}"
-                    @click="toggleVoice" :disabled="sending" title="语音输入">
-              <Square v-if="isRecording" :size="16"/><Mic v-else :size="17"/><span>{{ isRecording ? "停止" : "语音" }}</span>
-            </button>
-            <button class="action-btn skill-toggle" :class="{ on: trayOpen }" @click="toggleTray" title="技能">
-              <Layers3 :size="17"/><span>技能</span>
-              <span v-if="selected.length" class="skill-toggle-badge">{{ selected.length }}</span>
-            </button>
-            <button class="action-btn refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部"><RotateCcw :size="16"/><span>重置</span></button>
-            <div class="composer-spacer"></div>
-            <button class="send-btn" @click="send"
-                    :disabled="composerDisabled || !inputText.trim()" title="发送 (Enter)"><Send :size="17"/><span>发送</span></button>
+            <MarkdownComposer
+              ref="composerEl"
+              v-model="inputText"
+              class="composer-input"
+              :placeholder="composerPlaceholder"
+              :disabled="composerDisabled"
+              @submit="send"
+            />
+            <div class="composer-actions">
+              <button class="action-btn skill-toggle" :class="{ on: trayOpen }" :disabled="composerDisabled" @click="toggleTray" title="技能">
+                <Layers3 :size="17"/><span>技能</span>
+                <span v-if="selected.length" class="skill-toggle-badge">{{ selected.length }}</span>
+              </button>
+              <span class="composer-mode"><Blocks :size="15" aria-hidden="true"/><span>插件生成</span></span>
+              <div class="composer-spacer"></div>
+              <button class="action-btn icon-action refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部" aria-label="重置全部">
+                <RotateCcw :size="16"/>
+              </button>
+              <button class="send-btn icon-action" @click="send"
+                      :disabled="composerDisabled || !inputText.trim()" title="发送 (Enter)" aria-label="发送"><Send :size="17"/></button>
+            </div>
           </div>
         </div>
       </div>
@@ -169,16 +191,26 @@ import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, resetChat} from "../logic/chatState";
 import {handleUserInput, continueAfterSelect, CORE_TYPES, VERSIONS, getRebuildInfo, clearRebuildInfo, interruptAnalyze} from "../logic/chatHandler";
 import GenerateProgress from "../components/GenerateProgress.vue";
-import ThinkingMarquee from "../components/ThinkingMarquee.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
+import MarkdownComposer from "../components/MarkdownComposer.vue";
 import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
 import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../logic/skills";
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting, restoreGenTask} from "../logic/generateState";
 import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
-import {isRecording, voiceText, startVoice, stopVoice} from "../logic/voiceInput";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
-import {Layers3, Mic, RotateCcw, Send, Square, X} from "lucide-vue-next";
+import {authState} from "../logic/auth";
+import {
+    Blocks,
+    BrainCircuit,
+    ChevronDown,
+    ChevronUp,
+    Layers3,
+    LoaderCircle,
+    RotateCcw,
+    Send,
+    X,
+} from "lucide-vue-next";
 
 const centerText = inject<Ref<string>>("centerText")!;
 
@@ -186,20 +218,10 @@ const inputText = ref("");
 const extraInput = ref("");
 const lastSubmitted = ref(""); // 记住上次提交的需求，ESC 中断后恢复回输入框
 const sending = ref(false);
-const composerEl = ref<HTMLTextAreaElement | null>(null);
+const composerEl = ref<{ focusEnd: () => void } | null>(null);
 const reasonBodyEl = ref<HTMLElement | null>(null); // 思考流容器，用于自动粘底
+const outputBodyEl = ref<HTMLElement | null>(null);
 const showResetModal = ref(false);
-const workingSize = ref({width: 640, height: 180});
-
-// 思考流自动跟随到底部:内容增长时,若用户本就贴着底部就跟随滚到底;
-// 若用户上翻查看历史(距底 > 60px)则不打扰。pinned 判定在 DOM 更新前读取旧位置,更新后再滚。
-watch(() => genTask.reasoningContent, () => {
-    const el = reasonBodyEl.value;
-    if (!el) return;
-    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    if (!pinned) return;
-    nextTick(() => { if (reasonBodyEl.value) reasonBodyEl.value.scrollTop = reasonBodyEl.value.scrollHeight; });
-});
 
 // 缺失参数选择
 const selectingBlock = ref<ChatBlock | null>(null);
@@ -208,154 +230,106 @@ const selectCore = ref("");
 const selectVer = ref("");
 
 // ── 视图态：尚未产出文件时都用居中聚焦视图；一旦开始生成文件切到进度视图 ──
-const inFocusPhase = computed(() => genTask.files.length === 0 && !(genTask.phase === "planning" && !!genTask.taskId));
+const inFocusPhase = computed(() => genTask.files.length === 0);
 
-const AMBIENT_CORNERS = ["tl", "tr", "br", "bl"] as const;
-type AmbientCorner = typeof AMBIENT_CORNERS[number];
-
-function seededRandom(seed: number) {
-    let state = seed >>> 0;
-    return () => {
-        state += 0x6D2B79F5;
-        let value = state;
-        value = Math.imul(value ^ (value >>> 15), value | 1);
-        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-    };
-}
-
-const ambientRandom = seededRandom(0x0B51D1A);
-const AMBIENT_PIXEL_PALETTE = [
-    [190, 163, 103], // wheat
-    [164, 137, 82],  // muted wheat
-    [145, 94, 45],   // ochre
-    [105, 68, 39],   // deep ochre
-    [126, 112, 88],  // warm gray
-    [78, 77, 72],    // graphite
-    [48, 50, 49],    // deep gray
-] as const;
-const ambientPixels = Array.from({length: 124}, (_, id) => {
-    // Scatter the same block particles across the complete triangular cone.
-    const progress = 0.03 + Math.sqrt(ambientRandom()) * 0.83;
-    const longAxis = progress * 0.94;
-    const shortAxis = progress * 0.31;
-    const crossSection = ambientRandom();
-    const jitter = (ambientRandom() - 0.5) * (0.012 + progress * 0.018);
-    const x = Math.min(0.94, Math.max(0.012, shortAxis + (longAxis - shortAxis) * crossSection + jitter));
-    const y = Math.min(0.94, Math.max(0.012, longAxis - (longAxis - shortAxis) * crossSection - jitter));
-    const width = Math.round(5 + (1 - progress) * 9 + ambientRandom() * 5);
-    const height = Math.round(2 + (1 - progress) * 2 + ambientRandom() * 2);
-    const alpha = (0.055 + Math.pow(1 - progress, 1.38) * (0.36 + ambientRandom() * 0.18)).toFixed(3);
-    const color = AMBIENT_PIXEL_PALETTE[Math.floor(ambientRandom() * AMBIENT_PIXEL_PALETTE.length)];
-    const lift = 5 + ambientRandom() * 9;
-    const turn = Math.round((ambientRandom() * 2 - 1) * 38);
-
-    return {
-        id,
-        style: {
-            "--x": `${(x * 100).toFixed(2)}%`,
-            "--y": `${(y * 100).toFixed(2)}%`,
-            "--pixel-width": `${width}px`,
-            "--pixel-height": `${height}px`,
-            "--alpha": alpha,
-            "--pixel-color": `rgb(${color[0]} ${color[1]} ${color[2]})`,
-            "--delay": `${(-ambientRandom() * 7.5).toFixed(2)}s`,
-            "--duration": `${(5.1 + ambientRandom() * 3.4).toFixed(2)}s`,
-            "--lift-start": `${(lift * 0.45).toFixed(1)}px`,
-            "--lift-peak": `${(-lift).toFixed(1)}px`,
-            "--lift-mid": `${(-lift * 0.35).toFixed(1)}px`,
-            "--lift-end": `${(lift * 0.28).toFixed(1)}px`,
-            "--turn-start": `${(-turn * 0.35).toFixed(1)}deg`,
-            "--turn-peak": `${turn}deg`,
-            "--turn-mid": `${(turn * 0.58).toFixed(1)}deg`,
-            "--turn-end": `${(-turn * 0.18).toFixed(1)}deg`,
-        },
-    };
-});
-
-// The ambient field exists only before the first valid request. Restored tasks never flash it.
-const ambientReady = ref(false);
-const ambientDismissed = ref(
-    genTask.phase !== "idle"
-    || !!genTask.taskId
-    || genTask.files.length > 0
-    || chatBlocks.length > 0
-);
-const ambientVisible = computed(() =>
-    ambientReady.value
-    && inFocusPhase.value
-    && genTask.phase === "idle"
-    && !ambientDismissed.value
-);
-const ambientCorner = ref<AmbientCorner>(AMBIENT_CORNERS[0]);
-const prefersReducedMotion = ref(false);
-let ambientCornerIndex = 0;
-let ambientCycleTimer: number | undefined;
-let motionQuery: MediaQueryList | null = null;
-
-function stopAmbientCycle() {
-    if (ambientCycleTimer === undefined) return;
-    window.clearInterval(ambientCycleTimer);
-    ambientCycleTimer = undefined;
-}
-
-function startAmbientCycle() {
-    stopAmbientCycle();
-    if (!ambientVisible.value || prefersReducedMotion.value) return;
-    ambientCycleTimer = window.setInterval(() => {
-        ambientCornerIndex = (ambientCornerIndex + 1) % AMBIENT_CORNERS.length;
-        ambientCorner.value = AMBIENT_CORNERS[ambientCornerIndex];
-    }, 12000);
-}
-
-function resetAmbientCycle() {
-    stopAmbientCycle();
-    ambientCornerIndex = 0;
-    ambientCorner.value = AMBIENT_CORNERS[0];
-    startAmbientCycle();
-}
-
-function onMotionPreferenceChange(event: MediaQueryListEvent) {
-    prefersReducedMotion.value = event.matches;
-    if (event.matches) stopAmbientCycle();
-    else startAmbientCycle();
-}
-
-watch(ambientVisible, (visible) => {
-    if (visible) startAmbientCycle();
-    else stopAmbientCycle();
-});
-
-// AI 正在「后台思考」（非流式、无逐字流）→ 显示跑马灯缓解等待
+// 前置阶段连接尚未返回首个片段时，保留明确的工作态。
 const aiWorking = computed(() =>
     (sending.value && !selectingBlock.value)
     || (["clarifying", "grading", "planning"].includes(genTask.phase)
         && !clarifyWaiting.value && !pathGateWaiting.value)
 );
-const workingStageStyle = computed(() => aiWorking.value ? {
-    height: `${workingSize.value.height}px`,
-    flexBasis: `${workingSize.value.height}px`,
-} : undefined);
-const workingBoxStyle = computed(() => ({
-    width: `${workingSize.value.width}px`,
-    height: `${workingSize.value.height}px`,
-}));
-
-function onWorkingSize(size: {width: number; height: number}) {
-    workingSize.value = size;
-}
-const showRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
 
 // 已选 skill：输入框上方的紧凑上下文条
 const chosenSkills = computed(() => selectedBriefs());
 
 const activeDraft = computed(() => chatBlocks.length ? chatBlocks[chatBlocks.length - 1] : null);
-const activeError = computed(() => {
-    if (genTask.phase === "error" && genTask.error) return genTask.error;
-    const b = activeDraft.value;
-    return b && b.phase === "error" ? (b.error || "") : "";
+const draftWorkActive = computed(() => {
+    const phase = activeDraft.value?.phase;
+    return !!phase && ["analyzing", "fetching", "rendering", "streaming"].includes(phase);
 });
+const showWelcome = computed(() =>
+    genTask.phase === "idle"
+    && !activeDraft.value
+    && !selectingBlock.value
+    && !sending.value
+    && inputText.value.length === 0
+);
+const welcomeLogin = computed(() => authState.user?.login?.trim() || "");
+const currentPreflightStage = computed<"" | "clarify" | "grade" | "plan">(() => {
+    if (genTask.phase === "clarifying") return "clarify";
+    if (genTask.phase === "grading") return "grade";
+    if (genTask.phase === "planning") return "plan";
+    return "";
+});
+const hasCurrentPreflightStream = computed(() =>
+    !!currentPreflightStage.value
+    && genTask.preflightStage === currentPreflightStage.value
+);
+const activeThinking = computed(() => {
+    if (hasCurrentPreflightStream.value) return genTask.preflightThinking;
+    return activeDraft.value?.thinkingText || "";
+});
+const activeOutput = computed(() => {
+    if (hasCurrentPreflightStream.value) return genTask.preflightOutput;
+    const draft = activeDraft.value;
+    if (!draft) return "";
+    return draft.phase === "streaming" ? draft.streamText : (draft.outputText || "");
+});
+const liveProcessActive = computed(() =>
+    sending.value
+    || genTask.preflightActive
+    || draftWorkActive.value
+    || aiWorking.value
+);
+const liveProcessVisible = computed(() =>
+    !selectingBlock.value
+    && !clarifyWaiting.value
+    && !pathGateWaiting.value
+    && activeDraft.value?.phase !== "error"
+    && (genTask.phase !== "error" || sending.value || draftWorkActive.value)
+    && genTask.phase !== "awaiting_input"
+    && (liveProcessActive.value || !!activeThinking.value || !!activeOutput.value)
+);
+const liveStageLabel = computed(() => {
+    if (currentPreflightStage.value === "clarify") return "正在确认需求细节";
+    if (currentPreflightStage.value === "grade") return "正在分析实现复杂度";
+    if (currentPreflightStage.value === "plan") return "正在规划项目结构";
+    if (activeDraft.value?.streamStage === "precheck") return "正在检查需求完整性";
+    if (activeDraft.value?.streamStage === "analysis") return "正在识别插件目标";
+    if (activeDraft.value?.streamStage === "chat") return "正在回复";
+    return statusText.value || "正在处理需求";
+});
+const activeError = computed(() => {
+    const b = activeDraft.value;
+    if (b?.phase === "error") return b.error || "";
+    if (sending.value || draftWorkActive.value) return "";
+    return genTask.phase === "error" ? genTask.error : "";
+});
+const showRetry = computed(() =>
+    canRetryGenerate()
+    && genTask.phase === "error"
+    && !sending.value
+    && !draftWorkActive.value
+    && activeDraft.value?.phase !== "error"
+);
 const fallbackText = computed(() => activeDraft.value?.streamText || "");
+
+// 内容增长时仅在用户仍贴近底部时自动跟随，避免打断手动回看。
+watch(activeThinking, () => {
+    const el = reasonBodyEl.value;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (!pinned) return;
+    nextTick(() => { if (reasonBodyEl.value) reasonBodyEl.value.scrollTop = reasonBodyEl.value.scrollHeight; });
+});
+
+watch(activeOutput, () => {
+    const el = outputBodyEl.value;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (!pinned) return;
+    nextTick(() => { if (outputBodyEl.value) outputBodyEl.value.scrollTop = outputBodyEl.value.scrollHeight; });
+});
 
 // Q&A 收敛：从已确认的澄清历史构建紧凑问答列表
 const qaRecap = computed(() => {
@@ -374,25 +348,36 @@ const qaRecap = computed(() => {
 // 有活动确认卡时，输入框降权禁用（焦点交给上方卡片）
 const composerDisabled = computed(() =>
     sending.value
+    || activeDraft.value?.phase === "streaming"
     || !!selectingBlock.value
+    || genTask.phase === "planning"
     || genTask.phase === "clarifying"
     || genTask.phase === "grading"
     || genTask.phase === "confirming"
     || genTask.phase === "awaiting_input"
 );
 const composerPlaceholder = computed(() =>
-    composerDisabled.value && !sending.value
-        ? "请在上方完成确认…"
-        : "描述你的需求，AI 将与你确认后直接生成插件"
+    composerDisabled.value
+        ? (clarifyWaiting.value || pathGateWaiting.value || genTask.phase === "awaiting_input"
+            ? "请先完成上方确认"
+            : "正在处理当前需求")
+        : "描述你想制作的 Minecraft 插件"
 );
 
+watch(composerDisabled, (disabled) => {
+    if (disabled) trayOpen.value = false;
+}, { immediate: true });
+
 const canRefresh = computed(() =>
-    !sending.value && ["idle", "done", "error"].includes(genTask.phase)
+    !sending.value
+    && activeDraft.value?.phase !== "streaming"
+    && ["idle", "done", "error"].includes(genTask.phase)
 );
 
 // ESC 仅在思考/需求确认阶段可中断
 const canInterrupt = computed(() =>
     sending.value
+    || activeDraft.value?.phase === "streaming"
     || genTask.phase === "clarifying"
     || genTask.phase === "grading"
     || genTask.phase === "confirming"
@@ -431,20 +416,13 @@ async function confirmSelect() {
 
 function onIncomplete(original: string, hint: string) {
     inputText.value = `${original}\n\n补充方向：${hint}`;
-    nextTick(() => {
-        const el = composerEl.value;
-        if (el) {
-            el.focus();
-            const len = el.value.length;
-            el.setSelectionRange(len, len);
-        }
-    });
+    nextTick(() => composerEl.value?.focusEnd());
 }
 
 async function send() {
     const text = inputText.value.trim();
     if (!text || composerDisabled.value) return;
-    ambientDismissed.value = true;
+    trayOpen.value = false;
     lastSubmitted.value = text;
     inputText.value = "";
     sending.value = true;
@@ -459,12 +437,6 @@ async function send() {
     } finally {
         sending.value = false;
     }
-}
-
-function onComposerEnter(event: KeyboardEvent) {
-    if (isImeComposing(event)) return;
-    event.preventDefault();
-    void send();
 }
 
 function sendExtra() {
@@ -487,6 +459,7 @@ function onRefresh() {
 
 async function doReset() {
     showResetModal.value = false;
+    trayOpen.value = false;
     const tid = genTask.taskId;
     if (tid) {
         try {
@@ -501,59 +474,55 @@ async function doReset() {
     lastSubmitted.value = "";
     centerText.value = "";
     selectingBlock.value = null;
-    ambientDismissed.value = false;
-    resetAmbientCycle();
 }
 
-// ── 语音 ──
-let voiceBaseText = "";
-function toggleVoice() {
-    if (isRecording.value) {
-        stopVoice();
-    } else {
-        voiceBaseText = inputText.value;
-        startVoice();
-    }
+// 抽屉使用捕获阶段兜底，避免 SkillTray 先关闭后，冒泡监听误判为撤回请求。
+function onTrayEscapeCapture(e: KeyboardEvent) {
+    if (e.key !== "Escape" || !trayOpen.value) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    trayOpen.value = false;
 }
-watch(voiceText, (t) => {
-    if (isRecording.value) inputText.value = voiceBaseText + t;
-});
 
 // ── ESC 撤回中断（仅思考/需求确认阶段；token 由后端 waitUntil 自动结算）──
 function onKeydown(e: KeyboardEvent) {
-    if (e.key !== "Escape" || !canInterrupt.value) return;
+    if (e.key !== "Escape") return;
+    if (trayOpen.value) {
+        e.preventDefault();
+        trayOpen.value = false;
+        return;
+    }
+    const shouldInterrupt = canInterrupt.value;
+    if (!shouldInterrupt) return;
     e.preventDefault();
-    interruptAnalyze();   // 中断 analyze（若在分析中）
+    interruptAnalyze(centerText); // 中断 analyze / fallback（若在处理中）
     interruptGenerate();  // 中断 clarify / awaiting（若在确认中）
     sending.value = false;
     centerText.value = "已中断";
     // 恢复中断前的需求输入，方便用户改了再发
-    if (!inputText.value && lastSubmitted.value) inputText.value = lastSubmitted.value;
+    if (!inputText.value && lastSubmitted.value) {
+        inputText.value = lastSubmitted.value;
+        nextTick(() => composerEl.value?.focusEnd());
+    }
 }
 // 刷新恢复：若上次生成态还在（且当前是全新页面 idle），还原并按阶段续跑，避免刷新即失败。
 onMounted(() => {
+    window.addEventListener("keydown", onTrayEscapeCapture, true);
     window.addEventListener("keydown", onKeydown);
-    motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    prefersReducedMotion.value = motionQuery.matches;
-    motionQuery.addEventListener("change", onMotionPreferenceChange);
 
     if (genTask.phase === "idle" && !genTask.taskId && restoreGenTask()) {
-        ambientDismissed.value = true;
         // done/error 只还原展示；进行中的阶段交给 resumeGenerate 续跑
         if (!["done", "error", "idle"].includes(genTask.phase)) {
             resumeGenerate().catch(() => { });
         }
     }
 
-    ambientReady.value = true;
-    startAmbientCycle();
 });
 
 onBeforeUnmount(() => {
+    window.removeEventListener("keydown", onTrayEscapeCapture, true);
     window.removeEventListener("keydown", onKeydown);
-    motionQuery?.removeEventListener("change", onMotionPreferenceChange);
-    motionQuery = null;
-    stopAmbientCycle();
+    trayOpen.value = false;
 });
 
 // 顶栏中部状态文案
@@ -589,6 +558,7 @@ watch(() => genTask.phase, (p) => {
   --muted: #88847d;
   --warm: #bcb7ad;
   --warm-light: #e8e3d9;
+  --accent: #d77a52;
   min-height: 100vh;
   width: 100%;
   padding: 100px 16px 120px;
@@ -598,7 +568,7 @@ watch(() => genTask.phase, (p) => {
   margin: 0 auto;
   box-sizing: border-box;
   position: relative;
-  background: #000;
+  background: #11110f;
   color: var(--text);
   font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -615,79 +585,54 @@ watch(() => genTask.phase, (p) => {
 .focus-stack {
   position: relative;
   z-index: 1;
-  width: min(640px, 100%);
+  width: min(1000px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   align-items: stretch;
 }
 
-/* The cone is filled entirely by block particles; the canvas stays pure black. */
-.ambient-field {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
+.focus-welcome {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  max-height: 76px;
+  margin-bottom: 30px;
   overflow: hidden;
-  pointer-events: none;
-  background: transparent;
-  contain: strict;
+  color: var(--accent);
 }
-.ambient-field-enter-active,
-.ambient-field-leave-active {
-  transition: opacity 0.58s ease;
+.welcome-collapse-enter-active,
+.welcome-collapse-leave-active {
+  overflow: hidden;
+  transition: opacity 0.22s ease, transform 0.22s ease, max-height 0.25s ease, margin-bottom 0.25s ease;
 }
-.ambient-field-enter-from,
-.ambient-field-leave-to {
+.welcome-collapse-enter-from,
+.welcome-collapse-leave-to {
+  max-height: 0;
+  margin-bottom: 0;
   opacity: 0;
+  transform: translateY(-8px);
 }
-.pixel-wedge {
-  position: absolute;
-  inset: 0;
-  opacity: 0.86;
-  will-change: opacity;
+.focus-welcome h1 {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  min-width: 0;
+  max-width: min(780px, calc(100vw - 110px));
+  margin: 0;
+  color: #f0ede7;
+  font-family: "Jiangxizhuokai", "Songti SC", "STSong", serif;
+  font-size: 46px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: 0;
+  white-space: nowrap;
 }
-.wedge-swap-enter-active,
-.wedge-swap-leave-active {
-  transition: opacity 1.35s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.wedge-swap-leave-active { position: absolute; }
-.wedge-swap-enter-from,
-.wedge-swap-leave-to { opacity: 0; }
-.wedge-pixel {
-  position: absolute;
-  width: var(--pixel-width);
-  height: var(--pixel-height);
-  border-radius: 0.5px;
-  background: var(--pixel-color);
-  opacity: var(--alpha);
-  animation: wedgePixel var(--duration) cubic-bezier(0.22, 0.7, 0.26, 1) var(--delay) infinite;
-  will-change: transform, opacity;
-}
-.from-tl .wedge-pixel { left: var(--x); top: var(--y); }
-.from-tr .wedge-pixel { right: var(--x); top: var(--y); }
-.from-br .wedge-pixel { right: var(--x); bottom: var(--y); }
-.from-bl .wedge-pixel { left: var(--x); bottom: var(--y); }
-@keyframes wedgePixel {
-  0%, 100% {
-    opacity: 0;
-    transform: translate3d(0, var(--lift-start), 0) rotate(var(--turn-start)) scale(0.25);
-  }
-  18% {
-    opacity: var(--alpha);
-    transform: translate3d(0, 0, 0) rotate(0deg) scale(0.86);
-  }
-  42% {
-    opacity: var(--alpha);
-    transform: translate3d(0, var(--lift-peak), 0) rotate(var(--turn-peak)) scale(1.08);
-  }
-  64% {
-    opacity: calc(var(--alpha) * 0.72);
-    transform: translate3d(0, var(--lift-mid), 0) rotate(var(--turn-mid)) scale(0.78);
-  }
-  82% {
-    opacity: 0;
-    transform: translate3d(0, var(--lift-end), 0) rotate(var(--turn-end)) scale(0.38);
-  }
+.welcome-user {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .focus-status {
@@ -700,33 +645,8 @@ watch(() => genTask.phase, (p) => {
 }
 .composer-stage {
   width: 100%;
-  height: 116px;
-  flex: 0 0 116px;
-}
-.composer-stage.is-working {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: height 0.24s ease, flex-basis 0.24s ease;
-}
-.focus-marquee {
-  flex: 0 0 auto;
-  max-width: calc(100vw - 24px);
-  min-height: 0;
-  box-sizing: border-box;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--surface);
-  box-shadow: inset 0 1px 0 rgba(244, 241, 236, 0.035);
-}
-.focus-marquee {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px 32px;
-  --oak-border: var(--line-bright);
-  --oak-highlight: #d5c9ac;
-  transition: width 0.24s ease, height 0.24s ease;
+  height: 190px;
+  flex: 0 0 190px;
 }
 .focus-error {
   text-align: center;
@@ -739,7 +659,12 @@ watch(() => genTask.phase, (p) => {
   align-items: center;
   gap: 10px;
 }
-.focus-error-msg { white-space: pre-wrap; }
+.focus-error-msg {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .focus-retry {
   padding: 7px 18px;
   font-size: 13px;
@@ -803,7 +728,7 @@ watch(() => genTask.phase, (p) => {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
   padding: 0;
   background: transparent;
   border: 0;
@@ -813,15 +738,17 @@ watch(() => genTask.phase, (p) => {
   flex: 1;
   min-height: 0;
   display: flex;
-  padding: 12px 14px 10px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(5, 5, 3, 0.84);
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 20px 14px;
+  border: 1px solid rgba(232, 227, 217, 0.2);
+  border-radius: 14px;
+  background: rgba(28, 28, 26, 0.94);
   backdrop-filter: blur(22px) saturate(88%);
   -webkit-backdrop-filter: blur(22px) saturate(88%);
   box-shadow:
     inset 0 1px 0 rgba(244, 241, 236, 0.04),
-    0 14px 38px rgba(0, 0, 0, 0.24);
+    0 18px 48px rgba(0, 0, 0, 0.3);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .composer-input-shell:focus-within {
@@ -852,8 +779,8 @@ watch(() => genTask.phase, (p) => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 24px;
-  padding: 1px 3px 1px 8px;
+  min-height: 28px;
+  padding: 4px 4px 4px 10px;
   border-radius: 4px;
   background: rgba(198, 176, 125, 0.055);
   border: 1px solid rgba(198, 176, 125, 0.2);
@@ -873,12 +800,13 @@ watch(() => genTask.phase, (p) => {
   padding: 0;
   border-radius: 3px;
 }
-.cs-x:hover { color: #f4f1ec; background: rgba(209, 200, 182, 0.08); }
+.cs-x:hover:not(:disabled) { color: #f4f1ec; background: rgba(209, 200, 182, 0.08); }
 .cs-x:focus-visible { outline: 2px solid rgba(213, 201, 172, 0.7); outline-offset: 1px; }
+.cs-x:disabled { opacity: 0.35; cursor: not-allowed; }
 .composer-input {
   flex: 1;
   width: 100%;
-  min-height: 0;
+  min-height: 92px;
   padding: 0;
   box-sizing: border-box;
   resize: none;
@@ -887,28 +815,40 @@ watch(() => genTask.phase, (p) => {
   outline: none;
   color: #f4f1ec;
   caret-color: var(--warm-light);
-  font: 400 15px/1.48 system-ui, "Noto Sans SC", "PingFang SC", sans-serif;
+  font: 400 16px/1.52 system-ui, "Noto Sans SC", "PingFang SC", sans-serif;
 }
-.composer-input::placeholder { color: rgba(232, 227, 217, 0.4); opacity: 1; }
 .composer-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0;
+  min-height: 38px;
+  padding: 12px 0 0;
+  border-top: 1px solid rgba(232, 227, 217, 0.09);
 }
 .composer-spacer { flex: 1; }
+
+.composer-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  color: rgba(232, 227, 217, 0.58);
+  font-size: 12px;
+  white-space: nowrap;
+}
 
 .action-btn,
 .send-btn {
   position: relative;
   top: 0;
-  height: 30px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 0 11px;
-  border-radius: 8px;
+  padding: 0 13px;
+  border-radius: 6px;
   border: 1px solid rgba(232, 227, 217, 0.2);
   border-bottom-color: rgba(232, 227, 217, 0.09);
   background: rgba(8, 8, 6, 0.78);
@@ -934,10 +874,8 @@ watch(() => genTask.phase, (p) => {
 .action-btn:disabled,
 .send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
-.voice-btn,
 .skill-toggle,
 .refresh-btn { background: rgba(4, 4, 2, 0.66); }
-.voice-btn:hover:not(:disabled),
 .skill-toggle:hover:not(:disabled),
 .refresh-btn:hover:not(:disabled) { background: rgba(209, 200, 182, 0.06); }
 
@@ -981,26 +919,20 @@ watch(() => genTask.phase, (p) => {
   line-height: 16px;
   text-align: center;
 }
-.voice-btn.recording {
-  background: #2a1718;
-  border-color: #9b4949;
-  color: #f0b0ac;
-  animation: pulse 1s infinite;
-}
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(191, 80, 80, 0.28); }
-  50% { box-shadow: 0 0 0 6px rgba(191, 80, 80, 0); }
-}
-
 .send-btn {
   flex-shrink: 0;
-  min-width: 76px;
+  min-width: 38px;
   background: var(--warm-light);
   border-color: #f2eee6;
   border-bottom-color: #817d74;
   color: #070706;
   box-shadow: 0 2px 0 #504d47, inset 0 1px 0 #fff;
   font-weight: 700;
+}
+.icon-action {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
 }
 .send-btn:hover:not(:disabled) {
   background: #f2eee6;
@@ -1092,47 +1024,116 @@ watch(() => genTask.phase, (p) => {
   cursor: not-allowed;
 }
 
-/* ── Reasoner 思考流 ── */
-.reasoning-wrap {
+/* ── FileGen 前置双流 ── */
+.live-process {
   display: flex;
   flex-direction: column;
-  padding: 12px 16px;
-  gap: 8px;
+  padding: 14px 16px 16px;
+  gap: 10px;
   height: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-raised);
+  background: rgba(18, 18, 16, 0.92);
+  box-shadow: inset 0 1px 0 rgba(244, 241, 236, 0.035);
 }
-.reasoning-head {
+.live-process-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  cursor: pointer;
-  user-select: none;
+  min-height: 32px;
+  gap: 12px;
 }
-.reasoning-title {
-  font-family: "MinecrafterReg", "Monaco", monospace;
-  color: var(--muted);
+.live-process-body {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 10px;
+  height: 190px;
+  min-height: 190px;
+  overflow: hidden;
+}
+.live-process-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: rgba(232, 227, 217, 0.72);
   font-size: 13px;
-  letter-spacing: 0;
+  line-height: 1.4;
 }
-.reasoning-toggle {
-  color: #d6d9dc;
+.live-spinner {
+  flex: 0 0 auto;
+  color: var(--accent);
+  animation: liveSpin 1.1s linear infinite;
+}
+@keyframes liveSpin { to { transform: rotate(360deg); } }
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid rgba(232, 227, 217, 0.14);
+  border-radius: 6px;
+  background: rgba(232, 227, 217, 0.035);
+  color: rgba(232, 227, 217, 0.68);
   font-size: 12px;
+  cursor: pointer;
 }
-.reasoning-body {
-  color: #c6c9cc;
+.thinking-toggle:hover { color: #f4f1ec; border-color: rgba(232, 227, 217, 0.3); }
+.thinking-toggle:focus-visible { outline: 2px solid rgba(213, 201, 172, 0.72); outline-offset: 2px; }
+.live-thinking {
+  grid-column: 1;
+  height: 100%;
+  min-height: 0;
+  color: rgba(198, 201, 204, 0.82);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-family: "Monaco", monospace;
-  max-height: 240px;
   overflow-y: auto;
-  padding: 8px;
-  background: #08090a;
-  border: 1px solid var(--line);
+  padding: 10px 12px;
+  background: rgba(5, 5, 4, 0.72);
+  border: 1px solid rgba(232, 227, 217, 0.1);
   border-radius: 6px;
 }
+.live-output {
+  grid-column: 2;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+  border-left: 2px solid var(--accent);
+  background: rgba(215, 122, 82, 0.035);
+}
+.live-output.is-full { grid-column: 1 / -1; }
+.live-output-label {
+  color: rgba(232, 227, 217, 0.48);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.live-output pre {
+  margin: 0;
+  color: #ece8df;
+  font: 13px/1.62 "Monaco", "Noto Sans SC", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.live-waiting {
+  grid-column: 2;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.live-waiting.is-full { grid-column: 1 / -1; }
 
 /* ── 补充需求 ── */
 .more-input-wrap {
@@ -1242,39 +1243,47 @@ watch(() => genTask.phase, (p) => {
 
 @media (max-height: 760px) {
   .chat-page.is-focus { padding-top: 88px; }
-  .composer-stage:not(.is-working) { height: 112px; flex-basis: 112px; }
+  .focus-welcome { margin-bottom: 16px; }
 }
 
 @media (max-width: 700px) {
-  .wedge-pixel:nth-child(n + 83) { display: none; }
-  .pixel-wedge { opacity: 0.82; }
+  .live-process-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 150px) minmax(0, 190px);
+    height: 350px;
+    min-height: 350px;
+  }
+  .live-thinking { grid-column: 1; grid-row: 1; }
+  .live-output { grid-column: 1; grid-row: 2; }
+  .live-output.is-full { grid-column: 1; grid-row: 1 / -1; }
+  .live-waiting { grid-column: 1; grid-row: 2; }
+  .live-waiting.is-full { grid-column: 1; grid-row: 1 / -1; }
 }
 
 @media (max-width: 520px) {
   .chat-page.is-focus { padding: 96px 12px 32px; }
-  .composer-stage:not(.is-working) { height: 110px; flex-basis: 110px; }
-  .focus-marquee { padding-inline: 32px; }
+  .focus-welcome { gap: 10px; margin-bottom: 16px; }
+  .focus-welcome h1 { font-size: 34px; }
+  .composer-stage { height: 176px; flex-basis: 176px; }
   .composer { gap: 8px; }
-  .composer-input-shell { padding: 10px 11px 8px; }
+  .composer-input-shell { padding: 14px 12px 10px; }
   .composer-input { font-size: 14px; }
+  .composer-actions { gap: 4px; }
   .action-btn { width: 32px; padding: 0; }
   .send-btn { width: 36px; min-width: 36px; padding: 0; }
   .action-btn > span:not(.skill-toggle-badge),
   .send-btn > span { display: none; }
+  .composer-mode { display: none; }
   .more-input-row { align-items: stretch; flex-direction: column; }
   .more-input-row .floor-btn { width: 100%; margin-top: 0; }
-  .wedge-pixel:nth-child(n + 61) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ambient-field-enter-active,
-  .ambient-field-leave-active,
-  .wedge-swap-enter-active,
-  .wedge-swap-leave-active { transition: none; }
-  .wedge-pixel,
   .qa-item,
-  .voice-btn.recording,
+  .live-spinner,
   .reset-overlay,
   .reset-modal { animation: none; }
+  .welcome-collapse-enter-active,
+  .welcome-collapse-leave-active { transition: none; }
 }
 </style>

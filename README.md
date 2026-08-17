@@ -275,8 +275,7 @@ src/
 │   ├── chatHandler.ts         # precheck → getInfo → getTodoList 编排
 │   ├── generateState.ts       # GenTask 响应式状态 + Clarify/ExtraPrompt Promise resolver
 │   ├── generateHandler.ts     # 桶遍历 + SSE 路由 + replan / fix 回路
-│   ├── sessionPersist.ts      # localStorage 持久化 + 中断态恢复
-│   └── voiceInput.ts          # WebSpeech 语音输入
+│   └── sessionPersist.ts      # localStorage 持久化 + 中断态恢复
 ├── components/
 │   ├── ClarifyPanel.vue       # 多轮 TodoList 卡片，回车跳下一题
 │   ├── CurveChart.vue         # 纯 SVG 5 种曲线对比图
@@ -293,7 +292,6 @@ functions/
 └── api/
     ├── chat.ts                # 非流式 LLM 代理
     ├── stream.ts              # SSE LLM 代理
-    ├── voice-auth.ts          # 语音服务鉴权
     └── generate/
         ├── plan.ts            # Planner（双模式：建 task + 出蓝图）
         ├── clarify.ts         # Clarifier (reasoner SSE)
@@ -358,7 +356,7 @@ CF 端需要的环境变量与绑定：
 - `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
 - `EDGE_RATE_LIMITING=true` —— 使用域名级 WAF Rate Limiting 时设置；关闭代码内 KV 限流兜底
 
-`DEEPSEEK_RESPONSES_WEB_SEARCH` 接受 `1`、`true`、`yes`（忽略大小写）。开启后，Planner、Generator、Reviewer、Reworker 和 Fixer 会收到原生 `learn_public_api` function tool，由 DS 在确实缺少版本敏感的公开 API 事实时主动调用；Learning 运行时继续负责范围校验、联网查证、证据验证、缓存、额度和恢复。GLM BYOK 始终只读取已有公共知识，不会收到该工具。Cloudflare 环境变量变更后需要重新部署对应环境的 Pages Functions。
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 接受 `1`、`true`、`yes`（忽略大小写）。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 和 Fixer 会收到原生 `learn_public_api` function tool，并可在缺少版本敏感的公开 API 事实时主动调用；只有 Grader 确认这是未被静态契约或已有公共知识覆盖的原子技术缺口后，Learning 运行时才会继续执行范围校验、联网查证、证据验证、缓存、额度和恢复。用户自带的 DeepSeek Key 在服务端编排阶段遵循同一开关，浏览器直连请求不参与该流程；GLM BYOK 始终只读取已有公共知识，不会收到该工具。Cloudflare 环境变量变更后需要重新部署对应环境的 Pages Functions。
 
 ---
 

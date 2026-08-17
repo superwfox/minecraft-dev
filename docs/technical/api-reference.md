@@ -5,7 +5,6 @@
 ```
 functions/api/chat.ts              → POST /api/chat
 functions/api/stream.ts            → POST /api/stream
-functions/api/voice-auth.ts        → GET  /api/voice-auth
 functions/api/maven/jar.ts         → GET  /api/maven/jar        (IDE 补全：Maven 仓库代理)
 functions/api/generate/plan.ts     → POST /api/generate/plan    (双模式：建任务 / 出蓝图+文件树+深度桶)
 functions/api/generate/clarify.ts  → POST /api/generate/clarify (SSE，多轮澄清)
@@ -62,17 +61,6 @@ data: {"choices":[{"delta":{"content":"文本片段"}}]}
 
 data: [DONE]
 ```
-
-## 语音识别 API
-
-### GET /api/voice-auth
-
-获取讯飞 WebSocket 连接的签名 URL。
-
-**响应**：`{ "url": "wss://iat-api.xfyun.cn/v2/iat?authorization=...&date=...&host=...", "appId": "讯飞应用 ID" }`
-
-- URL 含 HMAC-SHA256 签名，有效期约 5 分钟
-- 响应头 `Cache-Control: no-store` 防止缓存过期签名
 
 ## Maven 代理 API（IDE 补全）
 
@@ -289,10 +277,9 @@ data: [DONE]
 | `DEEPSEEK_API_KEY` | DeepSeek API 认证 | https://platform.deepseek.com |
 | `DEEPSEEK_RESPONSES_WEB_SEARCH` | DeepSeek Responses 自动联网学习开关；默认关闭，接受 `1`、`true`、`yes` | 设置为 `true` |
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
-| `XFYUN_APP_ID` / `XFYUN_API_KEY` / `XFYUN_API_SECRET` | 讯飞语音 | https://console.xfyun.cn |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，平台 DeepSeek 的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。GLM BYOK 只读取已有公共知识，不会收到该工具。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。用户自带的 DeepSeek Key 在服务端编排阶段遵循同一开关，浏览器直连请求不参与该服务端学习流程；GLM BYOK 只读取已有公共知识，不会收到该工具。
 
 ## KV 绑定
 

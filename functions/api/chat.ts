@@ -3,7 +3,13 @@
 // 流式逐 chunk 解析会超 CPU 被硬杀，故所有 LLM 调用统一走非流式。
 
 import { accumulateCost } from "../_lib/quota";
-import { resolveLLM, tierFromModel } from "../_lib/llm";
+import {
+    deepSeekKeyRequiredResponse,
+    resolveLLM,
+    resolveTaskLLM,
+    tierFromModel,
+    type LLMProvider,
+} from "../_lib/llm";
 import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
 
 interface Env {
@@ -13,27 +19,31 @@ interface Env {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
-    const llm = await resolveLLM(context);
-    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
-
-    const tier = tierFromModel(body.model);
-    const model = llm.modelFor(tier);
     const taskId: string | undefined = body.taskId;
     const uid: string = (context.data as any)?.uid || "";
+    let llm: LLMProvider;
 
     // 带 taskId 的调用必须命中当前用户的任务，避免越权读取状态或错误归集费用。
     if (taskId) {
         const stateRaw = await getOwnedTask(context.env, taskId, uid);
         if (!stateRaw) return new Response("Task not found", { status: 404 });
-        try {
-            const st = JSON.parse(stateRaw);
-            if (st.quotaExhausted) {
-                return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
-                    status: 402, headers: { "Content-Type": "application/json" },
-                });
-            }
-        } catch { /* ignore */ }
+        let st: any;
+        try { st = JSON.parse(stateRaw); } catch { return new Response("Task state unavailable", { status: 503 }); }
+        const resolved = await resolveTaskLLM(context, st);
+        if (!resolved) return deepSeekKeyRequiredResponse();
+        llm = resolved;
+        if (st.quotaExhausted && !llm.byok) {
+            return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+                status: 402, headers: { "Content-Type": "application/json" },
+            });
+        }
+    } else {
+        llm = await resolveLLM(context);
     }
+    if (!llm.apiKey) return new Response("API key not configured", {status: 500});
+
+    const tier = tierFromModel(body.model);
+    const model = llm.modelFor(tier);
 
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse 会超 CPU 被硬杀。
     // 只做 1 次 resp.json()——precheck/getInfo 等本就要完整 JSON，非流式最省 CPU。
@@ -70,10 +80,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const content = data.choices?.[0]?.message?.content ?? "";
     const usage = data.usage;
 
-    if (!llm.byok && uid && taskId && usage) {
+    if (!llm.byok && uid && usage) {
+        const billingTaskId = taskId || `adhoc:${uid}`;
         // 不阻塞响应：waitUntil 后台累积
-        context.waitUntil(accumulateCost(context.env, uid, taskId, model, usage).then(async (cost) => {
-            if (cost.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+        context.waitUntil(accumulateCost(context.env, uid, billingTaskId, model, usage, !!taskId).then(async (cost) => {
+            if (cost.outOfQuota && taskId) await markTaskQuotaExhausted(context.env, taskId, uid);
         }).catch((error) => console.warn("chat cost accumulation failed", error)));
     }
     return new Response(JSON.stringify({content}), {

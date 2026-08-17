@@ -1,6 +1,13 @@
 import {reactive, ref} from "vue";
 import {useIDEStore} from "./useIDEStore";
-import {fetchWithByokFallback} from "../../logic/byok";
+import {
+    deepSeekRequest,
+    fetchWithByokFallback,
+    handleDeepSeekAccessFailure,
+    handleDeepSeekAccessResponse,
+    hasDeepSeekKey,
+    openDeepSeekKeyModal,
+} from "../../logic/byok";
 import {responseError} from "../../api/apiError";
 
 export type IDEFileAction = { path: string; action: "create" | "edit"; content: string };
@@ -56,6 +63,111 @@ FILE edit src/main/resources/plugin.yml
 `;
 
 const TRUNCATE_CHARS = 6000;
+const DEEPSEEK_CHAT_MODEL = "deepseek-chat";
+
+async function requestIDEStream(
+    messages: Array<{ role: string; content: string }>,
+    taskId?: string,
+    signal?: AbortSignal,
+): Promise<{ response: Response; usedKey: boolean }> {
+    const usedKey = hasDeepSeekKey();
+    const direct = usedKey;
+    const init: RequestInit = {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            model: direct ? DEEPSEEK_CHAT_MODEL : "deepseek-v4-flash",
+            taskId: direct ? undefined : (taskId || undefined),
+            messages,
+            stream: true,
+        }),
+        signal,
+    };
+
+    const response = direct
+        ? await deepSeekRequest(init)
+        : await fetchWithByokFallback("/api/stream", init);
+    return {response, usedKey};
+}
+
+async function throwIDERequestError(response: Response, usedKey: boolean): Promise<never> {
+    const accessFailure = await handleDeepSeekAccessResponse(response, {allowBare401: usedKey});
+    const raw = await response.clone().text().catch(() => "");
+    let message = raw;
+    try {
+        const parsed = JSON.parse(raw);
+        message = parsed?.error?.message ?? parsed?.message ?? raw;
+    } catch { /* use the response body as-is */ }
+
+    if (accessFailure) {
+        const error = new Error(accessFailure.message);
+        (error as any).code = accessFailure.code;
+        (error as any).status = accessFailure.status;
+        (error as any).noRetry = true;
+        (error as any).terminal = true;
+        throw error;
+    }
+    if (response.status === 402) {
+        if (usedKey) {
+            openDeepSeekKeyModal(
+                "billing",
+                "当前 DeepSeek 账户余额不足。请前往 DeepSeek 平台充值，或清除 Key 后改用踏海充值额度。",
+            );
+            throw new Error("DeepSeek 账户余额不足，请前往 DeepSeek 平台充值");
+        }
+        openDeepSeekKeyModal("missing", "充值额度已用尽，请填写 DeepSeek API Key 后重试。");
+        throw new Error("可用额度不足，请充值或填写 DeepSeek API Key");
+    }
+    if (response.status === 401) {
+        const sessionExpired = /AUTH_REQUIRED|请先登录/.test(raw);
+        throw new Error(usedKey && !sessionExpired
+            ? "DeepSeek API Key 无效，请重新填写"
+            : "登录已过期，请重新登录");
+    }
+    throw await responseError(response, message || `AI 请求失败（${response.status}）`);
+}
+
+function throwIDEStreamFailure(payload: any, usedKey: boolean): void {
+    const resultError = payload?.type === "result" ? payload?.error : undefined;
+    const rawError = payload?.type === "error"
+        ? (payload?.error ?? payload?.message)
+        : (resultError ?? payload?.error);
+    if (!rawError) return;
+
+    const code = payload?.code ?? (typeof rawError === "object" ? rawError?.code : "");
+    const status = Number(payload?.status ?? (typeof rawError === "object" ? rawError?.status : 0)) || 0;
+    const accessFailure = handleDeepSeekAccessFailure(status, code, {allowBare401: usedKey});
+    const message = typeof rawError === "string"
+        ? rawError
+        : (rawError?.message || payload?.message || "流式请求失败");
+
+    if (accessFailure) {
+        const error = new Error(accessFailure.message);
+        (error as any).code = accessFailure.code;
+        (error as any).status = accessFailure.status;
+        (error as any).noRetry = true;
+        (error as any).terminal = true;
+        throw error;
+    }
+    if (status === 402) {
+        if (usedKey) {
+            openDeepSeekKeyModal(
+                "billing",
+                "当前 DeepSeek 账户余额不足。请前往 DeepSeek 平台充值，或清除 Key 后改用踏海充值额度。",
+            );
+        } else {
+            openDeepSeekKeyModal("missing", "充值额度已用尽，请填写 DeepSeek API Key 后重试。");
+        }
+        throw new Error(usedKey
+            ? "DeepSeek 账户余额不足，请前往 DeepSeek 平台充值"
+            : "可用额度不足，请充值或填写 DeepSeek API Key");
+    }
+
+    const error = new Error(message);
+    (error as any).code = code;
+    (error as any).status = status;
+    throw error;
+}
 
 function truncate(s: string, max = TRUNCATE_CHARS): string {
     if (s.length <= max) return s;
@@ -145,22 +257,13 @@ async function send(userText: string) {
     state.streamingText = "";
 
     try {
-        const resp = await fetchWithByokFallback("/api/stream", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({
-                model: "deepseek-v4-flash",
-                taskId: store.state.taskId || undefined,
-                messages: [
-                    {role: "system", content: SYSTEM_PROMPT},
-                    {role: "user", content: buildPrompt(userText)},
-                ],
-                stream: true,
-            }),
-        });
-        if (resp.status === 402) throw new Error("本月额度已用尽，请登录后兑换或等下月");
-        if (resp.status === 401) throw new Error("登录已过期，请重新登录");
-        if (!resp.ok) throw await responseError(resp, "AI 调用失败");
+        const taskId = store.state.taskId || undefined;
+        const request = await requestIDEStream([
+            {role: "system", content: SYSTEM_PROMPT},
+            {role: "user", content: buildPrompt(userText)},
+        ], taskId);
+        const resp = request.response;
+        if (!resp.ok) await throwIDERequestError(resp, request.usedKey);
         if (!resp.body) throw new Error("无响应流");
 
         const reader = resp.body.getReader();
@@ -179,14 +282,16 @@ async function send(userText: string) {
                 if (!t.startsWith("data:")) continue;
                 const payload = t.slice(5).trim();
                 if (payload === "[DONE]") break outer;
+                let event: any;
                 try {
-                    const j = JSON.parse(payload);
-                    const chunk = j?.choices?.[0]?.delta?.content ?? "";
-                    if (chunk) {
-                        full += chunk;
-                        state.streamingText = full;
-                    }
-                } catch { /* skip */ }
+                    event = JSON.parse(payload);
+                } catch { continue; }
+                throwIDEStreamFailure(event, request.usedKey);
+                const chunk = event?.choices?.[0]?.delta?.content ?? "";
+                if (chunk) {
+                    full += chunk;
+                    state.streamingText = full;
+                }
             }
         }
 
@@ -259,23 +364,13 @@ ${truncate(opts.snippet, 3000)}
 【任务】${opts.taskHint}${opts.customQuestion ? `\n【追加说明】${opts.customQuestion}` : ""}`;
 
     const store = useIDEStore();
-    const resp = await fetchWithByokFallback("/api/stream", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-            model: "deepseek-v4-flash",
-            taskId: store.state.taskId || undefined,
-            messages: [
-                {role: "system", content: sys},
-                {role: "user", content: user},
-            ],
-            stream: true,
-        }),
-        signal: opts.signal,
-    });
-    if (resp.status === 402) throw new Error("本月额度已用尽");
-    if (resp.status === 401) throw new Error("登录已过期");
-    if (!resp.ok) throw await responseError(resp, "AI 调用失败");
+    const taskId = store.state.taskId || undefined;
+    const request = await requestIDEStream([
+        {role: "system", content: sys},
+        {role: "user", content: user},
+    ], taskId, opts.signal);
+    const resp = request.response;
+    if (!resp.ok) await throwIDERequestError(resp, request.usedKey);
     if (!resp.body) throw new Error("无响应流");
 
     const reader = resp.body.getReader();
@@ -293,14 +388,16 @@ ${truncate(opts.snippet, 3000)}
             if (!t.startsWith("data:")) continue;
             const payload = t.slice(5).trim();
             if (payload === "[DONE]") break outer;
+            let event: any;
             try {
-                const j = JSON.parse(payload);
-                const chunk = j?.choices?.[0]?.delta?.content ?? "";
-                if (chunk) {
-                    full += chunk;
-                    opts.onDelta(chunk);
-                }
-            } catch { /* skip */ }
+                event = JSON.parse(payload);
+            } catch { continue; }
+            throwIDEStreamFailure(event, request.usedKey);
+            const chunk = event?.choices?.[0]?.delta?.content ?? "";
+            if (chunk) {
+                full += chunk;
+                opts.onDelta(chunk);
+            }
         }
     }
     return full;

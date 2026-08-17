@@ -17,6 +17,7 @@ function provider(overrides: Partial<LLMProvider> = {}): LLMProvider {
         url: "https://api.deepseek.com/v1/chat/completions",
         apiKey: "test",
         byok: false,
+        credentialId: "",
         learningCacheRead: true,
         canAutoLearn: true,
         modelFor: () => "deepseek-v4-pro",

@@ -1,7 +1,7 @@
 import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
-import { resolveLLM, type LLMProvider } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
@@ -11,6 +11,7 @@ import {
 } from "../../_lib/learning/plannerAuthorization";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
+import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
@@ -46,7 +47,7 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
-        if (!resp.ok) throw new Error(await resp.text());
+        await assertOpenAIResponse(resp);
         const data = await resp.json() as any;
         return {
             content: data.choices?.[0]?.message?.content ?? "",
@@ -87,7 +88,7 @@ async function callAIStream(
             body: JSON.stringify(body),
             signal: ctrl.signal,
         });
-        if (!resp.ok) throw new Error(await resp.text());
+        await assertOpenAIResponse(resp);
 
         const reader = resp.body!.getReader();
         const decoder = new TextDecoder();
@@ -139,6 +140,28 @@ function extractSummaries(generatedFiles: any[]): FileSummary[] {
 
 function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function fileStreamError(error: unknown): {
+    message: string;
+    code: string;
+    status: number;
+    retryable: boolean;
+} {
+    if (error instanceof OpenAIUpstreamHttpError) {
+        return {
+            message: error.message,
+            code: error.code,
+            status: error.status,
+            retryable: error.status !== 401,
+        };
+    }
+    return {
+        message: error instanceof Error ? error.message : String(error),
+        code: "FILE_GENERATION_FAILED",
+        status: 500,
+        retryable: true,
+    };
 }
 
 type ChargeFn = (r: AICallResult) => Promise<void>;
@@ -240,9 +263,21 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    const llm = await resolveTaskLLM(context, state);
+    if (!llm) return deepSeekKeyRequiredResponse();
 
-    if (state.quotaExhausted) {
-        return new Response(JSON.stringify({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }), {
+    if (state.plannerBillingSettled === false || state.plannerAttemptBillingPending) {
+        return new Response(JSON.stringify({
+            error: "Planner 额度结算尚未完成，请先重试 Planner",
+            code: "PLANNER_SETTLEMENT_PENDING",
+        }), {
+            status: 503,
+            headers: { "Content-Type": "application/json", "Retry-After": "2" },
+        });
+    }
+
+    if (state.quotaExhausted && !llm.byok) {
+        return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
             status: 402, headers: { "Content-Type": "application/json" },
         });
     }
@@ -270,7 +305,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const llm = await resolveLLM(context);
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
@@ -463,7 +497,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
-            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${e.message}` }));
+            const mapped = fileStreamError(e);
+            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${mapped.message}` }));
+            await writer.write(sseEvent(encoder, {
+                type: "error",
+                stage: "file",
+                error: mapped.message,
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
+            }));
+            await writer.write(sseEvent(encoder, {
+                type: "result",
+                stage: "file",
+                done: false,
+                error: mapped.message,
+                code: mapped.code,
+                status: mapped.status,
+                retryable: mapped.retryable,
+            }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } finally {
             clearInterval(heartbeat);

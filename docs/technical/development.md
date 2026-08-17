@@ -31,12 +31,9 @@ npm install
 DEEPSEEK_API_KEY=sk-...
 DEEPSEEK_RESPONSES_WEB_SEARCH=true
 GITHUB_PAT=ghp_...
-XFYUN_APP_ID=...
-XFYUN_API_KEY=...
-XFYUN_API_SECRET=...
 ```
 
-`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后也只在 Grader 识别到未被静态契约或已有公共知识覆盖的原子技术缺口时联网。GLM BYOK 始终只读取已有公共知识，不触发 DeepSeek 自动联网。
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后也只在 Grader 识别到未被静态契约或已有公共知识覆盖的原子技术缺口时联网。用户自带的 DeepSeek Key 仅在服务端编排阶段按同一开关参与联网学习。
 
 **获取密钥**：
 
@@ -44,9 +41,6 @@ XFYUN_API_SECRET=...
 |------|---------|
 | `DEEPSEEK_API_KEY` | 访问 [DeepSeek 平台](https://platform.deepseek.com)，注册并创建 API Key |
 | `GITHUB_PAT` | GitHub Settings → Developer settings → Personal access tokens → Generate new token，勾选 `repo` 权限 |
-| `XFYUN_APP_ID` | 访问[讯飞开放平台](https://console.xfyun.cn)，创建语音听写应用 |
-| `XFYUN_API_KEY` | 同上，在应用详情中查看 |
-| `XFYUN_API_SECRET` | 同上 |
 
 ### 4. 启动开发服务器
 
@@ -77,12 +71,12 @@ minecraft-dev/
 ├── src/                      # 前端源码
 │   ├── pages/                # 页面组件（HomePage / ChatPage）
 │   ├── components/           # 通用组件
-│   ├── logic/                # 业务逻辑（chat / generate / session / voice）
+│   ├── logic/                # 业务逻辑（chat / generate / session）
 │   ├── ide/                  # 浏览器内 IDE 模块
 │   ├── api/deepseek.ts       # 前端 LLM 调用封装
 │   └── router.ts             # 路由配置（/ /chat /ide/:taskId?）
 ├── functions/                # Cloudflare Functions
-│   ├── api/                  # API 端点（generate / chat / stream / voice-auth / maven）
+│   ├── api/                  # API 端点（generate / chat / stream / maven）
 │   └── _lib/                 # 共享库（prompts / github）
 ├── public/                   # 静态资源
 ├── docs/                     # 文档（VitePress）
@@ -123,9 +117,6 @@ git push -u origin master
    DEEPSEEK_API_KEY=sk-...
    DEEPSEEK_RESPONSES_WEB_SEARCH=true
    GITHUB_PAT=ghp_...
-   XFYUN_APP_ID=...
-   XFYUN_API_KEY=...
-   XFYUN_API_SECRET=...
 
    # GitHub 登录（OAuth）—— 缺这三个会导致点登录后 500 / 登录失败
    GITHUB_OAUTH_CLIENT_ID=...           # OAuth App 的 Client ID
@@ -141,7 +132,7 @@ git push -u origin master
    > 注：OAuth App 对任意 GitHub 用户开箱即用，无需安装、无 public/private 开关；
    > 这也是登录场景比 GitHub App 更合适的原因（GitHub App 会强制「先安装再授权」）。
    >
-   > `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭。Production 和需要验证联网学习的 Preview 环境必须分别配置；保存环境变量后重新部署对应环境的 Pages Functions 才会生效。GLM BYOK 不受该开关影响，始终不会触发 DeepSeek 自动联网。
+   > `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭。Production 和需要验证联网学习的 Preview 环境必须分别配置；保存环境变量后重新部署对应环境的 Pages Functions 才会生效。用户自带的 DeepSeek Key 在服务端编排阶段也遵循该开关。
 
 ### 4. 创建 KV 命名空间
 
@@ -266,16 +257,6 @@ const REPO_NAME = "minecraft-dev-workflow";
 1. 检查 `pom.xml` 中的依赖版本是否正确
 2. 确认 Maven 仓库 URL 可访问
 3. 查看 Actions 日志中的详细错误信息
-
-### 语音识别无法使用
-
-**问题**：点击麦克风按钮无反应
-
-**解决**：
-1. 确认浏览器支持 `getUserMedia`（需 HTTPS 或 localhost）
-2. 检查麦克风权限是否授予
-3. 查看浏览器控制台是否有错误信息
-4. 确认讯飞 API 密钥配置正确
 
 ## 性能优化
 

@@ -19,6 +19,9 @@ export type ChatBlock = {
     steps?: TodoStep[];
     streamText: string;
     rawMsg: string;
+    thinkingText: string;
+    outputText: string;
+    streamStage: "" | "precheck" | "analysis" | "chat";
     error?: string;
 };
 
@@ -42,6 +45,9 @@ export function createDraftBlock(input: string): ChatBlock {
         phase: "analyzing",
         streamText: "",
         rawMsg: "",
+        thinkingText: "",
+        outputText: "",
+        streamStage: "",
     };
     chatBlocks.push(block);
     return chatBlocks[chatBlocks.length - 1];
@@ -53,6 +59,9 @@ export function appendToDraft(input: string): ChatBlock | null {
     d.userMessages.push(input);
     d.streamText = "";
     d.rawMsg = "";
+    d.thinkingText = "";
+    d.outputText = "";
+    d.streamStage = "";
     d.error = undefined;
     return d;
 }

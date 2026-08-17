@@ -25,7 +25,7 @@
 | `deepseek-v4-flash` | Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | 速度快，承担批量生成 |
 | `deepseek-v4-pro` | precheck / clarify / **grade** / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
 
-> **自带 GLM Key（银牌+赞助）**：累计赞助满 ¥25 的用户可在前端填入自己的智谱 GLM API Key，后端 `resolveLLM` 校验档位后把全部 LLM 调用切到 **GLM-5.2**（BYOK），且**不计平台额度**。未配置时统一走共享的 DeepSeek。
+> **自带 DeepSeek Key（所有用户）**：Key 保存在用户浏览器。预检、普通对话及无任务 IDE 问答可由浏览器直连 DeepSeek；clarify / grade / plan / bucket / file / fix 等需要任务状态的阶段仍由服务端编排，Key 仅随请求临时传递，`resolveLLM` 不落库且跳过平台计费。未配置时使用已有充值余额走共享 DeepSeek。
 
 `functions/api/chat.ts` 与 `stream.ts` 在 `model` 包含 `pro` 时自动注入上述两个字段，调用方只传模型名即可。
 

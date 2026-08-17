@@ -1,5 +1,5 @@
 import { partitionKnowledgeNeedsByApiContracts } from "../../_lib/apiContracts";
-import { resolveLLM } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM } from "../../_lib/llm";
 import { createLearningDeadlineAt, LEARNING_JOB_BUDGET_MS } from "../../_lib/learning/deadline";
 import {
     assessKnowledgeNeeds,
@@ -21,6 +21,7 @@ import {
     type PlannerLearningAuthorization,
 } from "../../_lib/learning/plannerAuthorization";
 import { learningSnapshot } from "../../_lib/learning/public";
+import { normalizeLearningTelemetry } from "../../_lib/learning/debug";
 import {
     currentModelLearningAuthorization,
     getModelLearningRequest,
@@ -57,6 +58,18 @@ function storageUnavailable(): Response {
         error: "Learning storage is temporarily unavailable",
         reasonCode: "storage_unavailable",
     }, 503);
+}
+
+function isRetryableByokTerminal(job: Awaited<ReturnType<typeof createOrGetLearningJob>>): boolean {
+    if (job.status !== "deferred" && job.status !== "failed") return false;
+    if (job.error === "quota_exhausted") return true;
+    const telemetry = normalizeLearningTelemetry(job.work.telemetry);
+    return (job.error === "discovery_http" && telemetry.discoveryLastHttpStatus === 401)
+        || (job.error === "verification_http" && (
+            telemetry.verificationLastHttpStatus === 401
+            // 兼容尚未记录精确 verifier HTTP 状态的旧终态。
+            || (!telemetry.verificationLastHttpStatus && telemetry.verificationHttp4xx > 0)
+        ));
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -281,7 +294,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return json(snapshot);
         }
 
-        if (state.quotaExhausted) {
+        const llm = await resolveTaskLLM(context, state);
+        if (!llm) return deepSeekKeyRequiredResponse();
+
+        if (state.quotaExhausted && !llm.byok) {
             if (stage === "tool") {
                 state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, active);
                 setModelLearningRequestResult(state, toolRequestId, {
@@ -298,7 +314,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
         }
 
-        const llm = await resolveLLM(context);
         if (!llm.canAutoLearn) {
             const reasonCode = llm.providerId === "glm"
                 ? "glm_auto_learning_disabled" as const
@@ -336,7 +351,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             authorizationLookupHash,
             taskStateFence,
         );
-        const job = await createOrGetLearningJob(context.env, {
+        const jobInput = {
             ownerUid: uid,
             generationTaskId: taskId,
             stage,
@@ -354,7 +369,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 } : {}),
             },
             now,
-        });
+        };
+        let job = await createOrGetLearningJob(context.env, jobInput);
+        // 旧任务可能已因平台额度耗尽进入终态。DeepSeek BYOK 改用独立重试键，
+        // 让用户换成自己的 key 后继续，同时保留旧任务的审计记录。
+        if (llm.byok && isRetryableByokTerminal(job)) {
+            const retryLookupHash = llm.credentialId
+                ? `${jobLookupHash}.deepseek_byok.${llm.credentialId}`
+                : `${jobLookupHash}.deepseek_byok`;
+            job = await createOrGetLearningJob(context.env, {
+                ...jobInput,
+                lookupHash: retryLookupHash,
+            });
+        }
         return json(learningSnapshot(job, active, 0, active.length ? {
             message: `已复用 ${active.length} 条公共知识，继续查证 ${pendingNeeds.length} 个缺口`,
         } : undefined));

@@ -23,14 +23,14 @@ features:
     linkText: 【TAHAI | 踏海善后群 - DevRelated】
 
   - title: 🚀 使用教程 · 快速开始
-    details: 五分钟跑通：登录领免费额度 → 描述需求 → 选核心版本 → 等生成 → 下载 JAR 丢进服务器。
+    details: 五分钟跑通：登录并配置 DeepSeek Key → 描述需求 → 选核心版本 → 等生成 → 下载 JAR 丢进服务器。
     link: /guide/quick-start
     linkText: 阅读快速开始 →
 ---
 
 ## 三步上手
 
-1. **登录领额度** — 打开 [踏海平台](https://minecraft-dev-platform.pages.dev/)，右上角用 GitHub 登录，每月白送 **5 件** 免费生成额度。
+1. **登录并配置 Key** — 打开 [踏海平台](https://minecraft-dev-platform.pages.dev/)，用 GitHub 登录后填写自己的 DeepSeek API Key；已有充值余额仍可继续使用。
 2. **说需求** — 进对话页，用大白话把插件要干什么写清楚（按提示选核心和 MC 版本）。
 3. **拿 JAR** — AI 自动写代码并云端构建，几分钟后点「下载 JAR」，丢进服务器 `plugins/` 重启即可。
 

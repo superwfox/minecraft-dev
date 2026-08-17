@@ -9,6 +9,8 @@ import {
     superConcurrency,
     normalizeLearningDebugMeta,
     normalizeLearningProgress,
+    normalizeClarifyRequestId,
+    normalizeGradeRequestId,
     isUnconfirmedLearningProgress,
     shouldResumeLearningProgress,
     recordLearningDebugEvent,
@@ -22,10 +24,17 @@ import type {
     LearningStatus,
 } from "./generateState";
 import { showSponsorModal, login, fetchMe } from "./auth";
-import { fetchWithByokFallback } from "./byok";
+import {
+    fetchWithByokFallback,
+    handleDeepSeekAccessFailure,
+    handleDeepSeekAccessResponse,
+    hasDeepSeekKey,
+    openDeepSeekKeyModal,
+} from "./byok";
+import type { DeepSeekAccessFailure } from "./byok";
 import { selected } from "./skills";
 import { parseResponse } from "../ide/composables/useIDEChat";
-import { readApiError, responseError } from "../api/apiError";
+import { readApiError as readBaseApiError, responseError } from "../api/apiError";
 
 const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -55,13 +64,94 @@ function noRetry(msg: string): Error {
     return e;
 }
 
+function deepSeekAccessError(failure: DeepSeekAccessFailure): Error {
+    const error = noRetry(failure.message);
+    (error as any).code = failure.code;
+    (error as any).status = failure.status;
+    (error as any).retryable = false;
+    (error as any).terminal = true;
+    return error;
+}
+
+function quotaAccessError(): Error {
+    const usingKey = hasDeepSeekKey();
+    if (usingKey) {
+        openDeepSeekKeyModal(
+            "billing",
+            "当前 DeepSeek 账户余额不足。请前往 DeepSeek 平台充值，或清除 Key 后改用踏海充值额度。",
+        );
+    } else {
+        showSponsorModal.value = true;
+        fetchMe();
+    }
+
+    const error = noRetry(usingKey
+        ? "DeepSeek 账户余额不足，请充值后重试"
+        : "充值额度已用尽，请充值或填写 DeepSeek API Key");
+    (error as any).status = 402;
+    (error as any).retryable = false;
+    (error as any).terminal = true;
+    return error;
+}
+
+function rejectAccessEvent(payload: any): void {
+    const rawError = payload?.error;
+    const code = payload?.code ?? (typeof rawError === "object" ? rawError?.code : "");
+    const status = payload?.status ?? (typeof rawError === "object" ? rawError?.status : 0);
+    const failure = handleDeepSeekAccessFailure(status, code, {
+        allowBare401: hasDeepSeekKey(),
+    });
+    if (failure) throw deepSeekAccessError(failure);
+    if (Number(status) === 402) throw quotaAccessError();
+}
+
+async function rejectAccessResponse(response: Response): Promise<void> {
+    const deepSeekFailure = await handleDeepSeekAccessResponse(response, {
+        allowBare401: hasDeepSeekKey(),
+    });
+    if (deepSeekFailure) throw deepSeekAccessError(deepSeekFailure);
+
+    if (response.status === 401) {
+        login();
+        throw noRetry("请先登录后再使用");
+    }
+
+    if (response.status === 402) {
+        throw quotaAccessError();
+    }
+}
+
+async function readApiError(
+    response: Response,
+    fallback = `请求失败（HTTP ${response.status}）`,
+): Promise<{ message: string; code: string; activeRequestId: string }> {
+    const raw = await response.clone().text().catch(() => "");
+    let activeRequestId = "";
+    try {
+        const payload = JSON.parse(raw) as { activeRequestId?: unknown };
+        activeRequestId = typeof payload.activeRequestId === "string" ? payload.activeRequestId : "";
+    } catch { /* apiError handles non-JSON and Cloudflare responses */ }
+    const info = await readBaseApiError(response, fallback);
+    return { ...info, activeRequestId };
+}
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
+    let preflightStage: PreflightStage | "" = "";
+    if (phase === "clarifying" || phase === "awaiting_input") preflightStage = "clarify";
+    else if (phase === "grading" || phase === "confirming") preflightStage = "grade";
+    else if (phase === "planning" && genTask.taskId) preflightStage = "plan";
+    if (preflightStage) {
+        if (genTask.preflightStage !== preflightStage) {
+            genTask.preflightThinking = "";
+            genTask.preflightOutput = "";
+        }
+        genTask.preflightStage = preflightStage;
+    }
     if (log) genTask.logs.push(log);
 }
 
 function isGeneratingPhase(phase: GenPhase) {
-    return ["planning", "clarifying", "awaiting_input", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
+    return ["planning", "clarifying", "grading", "confirming", "awaiting_input", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -72,8 +162,7 @@ async function post(url: string, body: any, maxRetries = 3) {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
-            if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
-            if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+            await rejectAccessResponse(resp);
             if (!resp.ok) {
                 const apiError = await readApiError(resp);
                 if (apiError.code === "POM_BLOCKED") {
@@ -104,6 +193,14 @@ function createPlannerRequestId(): string {
     return `plan_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+function createClarifyRequestId(): string {
+    return `clarify_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function createGradeRequestId(): string {
+    return `grade_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
 function createBuildRequestId(): string {
     return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
@@ -128,8 +225,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
             continue;
         }
 
-        if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
-        if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
+        await rejectAccessResponse(resp);
         if (resp.status === 429) {
             const payload = await resp.json().catch(() => ({})) as { error?: string };
             throw noRetry(payload?.error || "请求过于频繁");
@@ -167,12 +263,61 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
             await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
             continue;
         }
+        const contentType = resp.headers.get("Content-Type") || "";
+        if (contentType.includes("text/event-stream")) {
+            let streamed: any;
+            try {
+                streamed = await readSSE(resp, { preflightStage: "plan", requireDone: true });
+            } catch (error: any) {
+                if (error?.noRetry || error?.terminal) throw error;
+                if (Date.now() >= deadline || failures++ >= 3) throw error;
+                const delay = 2000 * Math.pow(2, failures - 1);
+                genTask.logs.push(`! Planner 连接中断，${delay / 1000}s 后继续等待 (${failures}/3)...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            if (!streamed) {
+                if (Date.now() >= deadline || failures++ >= 3) {
+                    throw new Error("Planner 流已结束，但未返回结果");
+                }
+                await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+                continue;
+            }
+            if (streamed.error) {
+                const status = Number(streamed.status) || 0;
+                const code = typeof streamed.code === "string" ? streamed.code : "";
+                if (code === "PLANNER_IN_PROGRESS" && Date.now() < deadline) {
+                    if (!announcedWait) {
+                        genTask.logs.push("· Planner 已在服务端执行，等待现有结果...");
+                        announcedWait = true;
+                    }
+                    const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
+                    await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+                    continue;
+                }
+
+                const plannerError = new Error(String(streamed.error));
+                (plannerError as any).code = code;
+                (plannerError as any).status = status;
+                if (status >= 400 && status < 500) {
+                    (plannerError as any).noRetry = true;
+                    throw plannerError;
+                }
+                if (Date.now() >= deadline || failures++ >= 3) throw plannerError;
+                const delay = 2000 * Math.pow(2, failures - 1);
+                genTask.logs.push(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/3)...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            return streamed;
+        }
         return await resp.json();
     }
 }
 
 async function get(url: string) {
-    const resp = await fetch(url);
+    const resp = await fetchWithByokFallback(url);
+    await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
     return resp.json() as any;
 }
@@ -300,6 +445,7 @@ async function learningRequest(input: {
             body: input.method === "POST" ? JSON.stringify(input.body ?? {}) : undefined,
             signal: input.signal,
         });
+        await rejectAccessResponse(resp);
         let payload: any;
         try {
             payload = await resp.json();
@@ -354,8 +500,6 @@ async function learningRequest(input: {
             telemetry: debugMeta?.telemetry,
         });
         httpEventRecorded = true;
-        if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
-        if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
         if (!progress && resp.status !== 429) {
             const message = resp.ok
                 ? "联网查证响应缺少状态"
@@ -522,6 +666,7 @@ async function runLearning(
         lastFailureReason = failure.reasonCode;
         lastFailureHttpStatus = Number(error?.learningHttpStatus) || 0;
         if (!failure.retryable) stopRetrying = true;
+        if (error?.terminal === true) throw error;
         return failure.retryable;
     };
     const announce = (snapshot: any) => {
@@ -897,13 +1042,50 @@ function syncCurrentIndex() {
     genTask.currentIndex = genTask.files.filter(f => f.status === "done").length;
 }
 
-/** Read an SSE stream, dispatch events to genTask, return the result event */
-async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => void }): Promise<any> {
+type PreflightStage = "clarify" | "grade" | "plan";
+
+function normalizePreflightStage(value: unknown): PreflightStage | "" {
+    if (value === "clarify" || value === "clarifying") return "clarify";
+    if (value === "grade" || value === "grading") return "grade";
+    if (value === "plan" || value === "planning") return "plan";
+    return "";
+}
+
+type SSEReadOptions = {
+    idleMs?: number;
+    onIdle?: () => void;
+    preflightStage?: PreflightStage;
+    requireDone?: boolean;
+};
+
+/** Read an SSE stream, dispatch events to genTask, return the result event. */
+async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let result: any = null;
     let streamedTodoCount = 0;
+    let receivedDone = false;
+    let streamError: any = null;
+
+    const activatePreflight = (rawStage?: unknown) => {
+        const stage = normalizePreflightStage(rawStage) || opts?.preflightStage || "";
+        if (!stage) return "";
+        if (genTask.preflightStage !== stage) {
+            genTask.preflightThinking = "";
+            genTask.preflightOutput = "";
+        }
+        genTask.preflightStage = stage;
+        genTask.preflightActive = true;
+        return stage;
+    };
+
+    if (opts?.preflightStage) {
+        genTask.preflightStage = opts.preflightStage;
+        genTask.preflightThinking = "";
+        genTask.preflightOutput = "";
+        genTask.preflightActive = true;
+    }
 
     // 空闲超时:每收到一块数据(含后端心跳)就重置;连续 idleMs 收不到任何字节才判定后端已死 → onIdle()。
     // 只在调用方传入 idleMs 时启用(桶生成),避免误杀健康但耗时很长的流。
@@ -915,56 +1097,85 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
     };
     armIdle();
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        armIdle();
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop()!;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            armIdle();
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === "[DONE]") {
+                    receivedDone = true;
+                    continue;
+                }
 
-            try {
-                const evt = JSON.parse(payload);
-                switch (evt.type) {
-                    case "phase":
-                        // 桶模式：path 字段表示具体文件；非桶模式：file 字段表示当前文件
-                        if (evt.path) {
-                            const f = findFile(evt.path);
-                            if (f) {
-                                f.streamingPhase = evt.phase;
-                                if (evt.phase === "generating" || evt.phase === "reworking") {
-                                    f.streamingContent = "";
-                                    f.status = "generating";
+                let evt: any;
+                try {
+                    evt = JSON.parse(payload);
+                } catch {
+                    if (opts?.requireDone) throw new Error("流式响应包含无效数据，请重试");
+                    continue;
+                }
+
+                if (evt?.type === "error" || (evt?.type === "result" && evt?.error)) {
+                    rejectAccessEvent(evt);
+                }
+
+                try {
+                    switch (evt.type) {
+                        case "phase":
+                            if (opts?.preflightStage || evt.stage) activatePreflight(evt.stage || evt.phase);
+                            // 桶模式：path 字段表示具体文件；非桶模式：file 字段表示当前文件
+                            if (evt.path) {
+                                const f = findFile(evt.path);
+                                if (f) {
+                                    f.streamingPhase = evt.phase;
+                                    if (evt.phase === "generating" || evt.phase === "reworking") {
+                                        f.streamingContent = "";
+                                        f.status = "generating";
+                                    }
                                 }
+                            } else {
+                                genTask.streamingPhase = evt.phase;
+                                genTask.streamingFile = evt.file || "";
+                                genTask.streamingContent = "";
+                                streamedTodoCount = 0;
+                                if (evt.phase === "clarifying") genTask.clarifyTodos = [];
+                                if (evt.round) genTask.clarifyRound = evt.round;
                             }
-                        } else {
-                            genTask.streamingPhase = evt.phase;
-                            genTask.streamingFile = evt.file || "";
-                            genTask.streamingContent = "";
-                            streamedTodoCount = 0;
-                            if (evt.phase === "clarifying") genTask.clarifyTodos = [];
-                            if (evt.round) genTask.clarifyRound = evt.round;
+                            break;
+                        case "thinking":
+                        case "reasoning": {
+                            const content = typeof evt.content === "string" ? evt.content : "";
+                            genTask.reasoningContent += content;
+                            if (activatePreflight(evt.stage)) genTask.preflightThinking += content;
+                            break;
                         }
-                        break;
-                    case "reasoning":
-                        genTask.reasoningContent += evt.content;
-                        break;
-                    case "delta":
-                        if (evt.path) {
-                            const f = findFile(evt.path);
-                            if (f) {
-                                f.streamingContent = (f.streamingContent || "") + evt.content;
+                        case "output":
+                        case "delta": {
+                            const content = typeof evt.content === "string" ? evt.content : "";
+                            if (evt.path) {
+                                const f = findFile(evt.path);
+                                if (f) {
+                                    f.streamingContent = (f.streamingContent || "") + content;
+                                }
+                                break;
                             }
-                        } else {
-                            genTask.streamingContent += evt.content;
-                            if (genTask.streamingPhase === "clarifying") {
-                                const todos = extractCompletedTodos(genTask.streamingContent);
+
+                            genTask.streamingContent += content;
+                            const stage = activatePreflight(evt.stage);
+                            if (stage) genTask.preflightOutput += content;
+                            if (stage === "clarify" || genTask.streamingPhase === "clarifying") {
+                                const todoSource = stage === "clarify"
+                                    ? genTask.preflightOutput
+                                    : genTask.streamingContent;
+                                const todos = extractCompletedTodos(todoSource);
                                 if (todos.length > streamedTodoCount) {
                                     for (let k = streamedTodoCount; k < todos.length; k++) {
                                         genTask.clarifyTodos.push(todos[k]);
@@ -972,86 +1183,110 @@ async function readSSE(resp: Response, opts?: { idleMs?: number; onIdle?: () => 
                                     streamedTodoCount = todos.length;
                                 }
                             }
+                            break;
                         }
-                        break;
-                    case "log":
-                        genTask.logs.push(evt.msg);
-                        break;
-                    case "file_done": {
-                        const f = findFile(evt.path);
-                        if (f) {
-                            f.content = evt.content;
-                            f.status = "done";
-                            f.streamingPhase = "";
-                            f.streamingContent = "";
-                            syncCurrentIndex();
-                        }
-                        break;
-                    }
-                    case "file_error": {
-                        const f = findFile(evt.path);
-                        if (f) {
-                            f.status = "error";
-                            f.streamingPhase = "";
-                        }
-                        break;
-                    }
-                    case "new_file":
-                        // 动态生成的缺失类：插入或更新
-                        {
-                            const existing = findFile(evt.path);
-                            if (existing) {
-                                existing.role = evt.role || existing.role;
-                                existing.content = evt.content;
-                                existing.status = "done";
-                                existing.streamingPhase = "";
-                                existing.streamingContent = "";
-                            } else {
-                                genTask.files.push({
-                                    path: evt.path, role: evt.role,
-                                    content: evt.content, status: "done",
-                                });
+                        case "log":
+                            genTask.logs.push(evt.msg);
+                            break;
+                        case "error":
+                            streamError = evt;
+                            genTask.logs.push(`× ${evt.error || evt.message || "流式阶段出错"}`);
+                            break;
+                        case "file_done": {
+                            const f = findFile(evt.path);
+                            if (f) {
+                                f.content = evt.content;
+                                f.status = "done";
+                                f.streamingPhase = "";
+                                f.streamingContent = "";
+                                syncCurrentIndex();
                             }
-                            syncCurrentIndex();
+                            break;
                         }
-                        break;
-                    case "bucket_start":
-                        for (const p of evt.paths || []) {
-                            const f = findFile(p);
-                            if (f && f.status !== "done") f.status = "generating";
+                        case "file_error": {
+                            const f = findFile(evt.path);
+                            if (f) {
+                                f.status = "error";
+                                f.streamingPhase = "";
+                            }
+                            break;
                         }
-                        break;
-                    case "result":
-                        result = evt;
-                        break;
-                    case "debug":
-                        genTask.debugLog.push(evt);
-                        if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
-                        if (evt.scope === "build-fix" && evt.msg === "fix:diagnostics") {
-                            genTask.buildDiagnostics = Array.isArray(evt.diagnostics) ? evt.diagnostics : [];
-                            const entry = {
-                                runId: evt.runId,
-                                mode: evt.mode,
-                                fingerprint: evt.fingerprint,
-                                diagnostics: genTask.buildDiagnostics,
-                                progress: evt.progress ?? null,
-                                rolledBackFiles: evt.rolledBackFiles ?? [],
-                            };
-                            const index = genTask.buildHistory.findIndex(item => item.runId === evt.runId);
-                            if (index >= 0) genTask.buildHistory[index] = entry;
-                            else genTask.buildHistory.push(entry);
-                            if (genTask.buildHistory.length > 6) genTask.buildHistory.shift();
-                        }
-                        break;
+                        case "new_file":
+                            // 动态生成的缺失类：插入或更新
+                            {
+                                const existing = findFile(evt.path);
+                                if (existing) {
+                                    existing.role = evt.role || existing.role;
+                                    existing.content = evt.content;
+                                    existing.status = "done";
+                                    existing.streamingPhase = "";
+                                    existing.streamingContent = "";
+                                } else {
+                                    genTask.files.push({
+                                        path: evt.path, role: evt.role,
+                                        content: evt.content, status: "done",
+                                    });
+                                }
+                                syncCurrentIndex();
+                            }
+                            break;
+                        case "bucket_start":
+                            for (const p of evt.paths || []) {
+                                const f = findFile(p);
+                                if (f && f.status !== "done") f.status = "generating";
+                            }
+                            break;
+                        case "result":
+                            result = evt;
+                            break;
+                        case "debug":
+                            genTask.debugLog.push(evt);
+                            if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
+                            if (evt.scope === "build-fix" && evt.msg === "fix:diagnostics") {
+                                genTask.buildDiagnostics = Array.isArray(evt.diagnostics) ? evt.diagnostics : [];
+                                const entry = {
+                                    runId: evt.runId,
+                                    mode: evt.mode,
+                                    fingerprint: evt.fingerprint,
+                                    diagnostics: genTask.buildDiagnostics,
+                                    progress: evt.progress ?? null,
+                                    rolledBackFiles: evt.rolledBackFiles ?? [],
+                                };
+                                const index = genTask.buildHistory.findIndex(item => item.runId === evt.runId);
+                                if (index >= 0) genTask.buildHistory[index] = entry;
+                                else genTask.buildHistory.push(entry);
+                                if (genTask.buildHistory.length > 6) genTask.buildHistory.shift();
+                            }
+                            break;
+                    }
+                } catch (error) {
+                    if (opts?.requireDone) throw error;
                 }
-            } catch { /* skip */ }
+            }
         }
+    } finally {
+        clearTimeout(idleTimer);
+        try { await reader.cancel(); } catch { /* stream already closed */ }
+        try { reader.releaseLock(); } catch { /* lock already released */ }
+        if (opts?.preflightStage) genTask.preflightActive = false;
+        genTask.streamingPhase = "";
+        genTask.streamingFile = "";
+        genTask.streamingContent = "";
     }
 
-    clearTimeout(idleTimer);
-    genTask.streamingPhase = "";
-    genTask.streamingFile = "";
-    genTask.streamingContent = "";
+    if (opts?.requireDone && !receivedDone) {
+        throw new Error("流式连接提前结束，请重试");
+    }
+    if (!result && streamError) {
+        const error = new Error(streamError.error || streamError.message || "流式阶段出错");
+        (error as any).code = typeof streamError.code === "string" ? streamError.code : "";
+        (error as any).status = Number(streamError.status) || 0;
+        (error as any).retryAfter = Number(streamError.retryAfter) || 0;
+        (error as any).retryable = streamError.retryable !== false;
+        (error as any).terminal = streamError.retryable === false;
+        throw error;
+    }
+
     return result;
 }
 
@@ -1062,6 +1297,7 @@ async function streamFileGeneration(taskId: string): Promise<any> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId }),
     });
+    await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
 
     const contentType = resp.headers.get("Content-Type") || "";
@@ -1094,49 +1330,274 @@ async function streamBucketGeneration(
         }),
         signal: ctrl.signal,
     });
+    await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
     return await readSSE(resp, { idleMs: BUCKET_IDLE_MS, onIdle: () => ctrl.abort() });
 }
 
-/** SSE streaming clarify round */
+const PREFLIGHT_WAIT_MS = 390_000;
+const PREFLIGHT_RETRIES = 3;
+
+type PreflightRequestConfig = {
+    endpoint: string;
+    stage: "clarify" | "grade";
+    label: string;
+    requestIdField: "clarifyRequestId" | "gradeRequestId";
+    requestId: string;
+    taskId: string;
+    payload: Record<string, unknown>;
+    inProgressCode: "CLARIFY_IN_PROGRESS" | "GRADE_IN_PROGRESS";
+    recoveryCode: "CLARIFY_RECOVERY_REQUIRED" | "GRADE_RECOVERY_REQUIRED";
+    normalizeRequestId: (value: unknown) => string;
+    onRecoverRequestId: (requestId: string) => void;
+    setController: (controller: AbortController | null) => void;
+};
+
+function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+        const error = new Error("interrupted");
+        error.name = "AbortError";
+        return Promise.reject(error);
+    }
+    return new Promise((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const onAbort = () => {
+            clearTimeout(timer);
+            const error = new Error("interrupted");
+            error.name = "AbortError";
+            reject(error);
+        };
+        timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+function attachApiError(
+    message: string,
+    details: {
+        code?: unknown;
+        status?: unknown;
+        retryAfter?: unknown;
+        activeRequestId?: unknown;
+        terminal?: boolean;
+    },
+): Error {
+    const error = new Error(message);
+    (error as any).code = typeof details.code === "string" ? details.code : "";
+    (error as any).status = Number(details.status) || 0;
+    (error as any).retryAfter = Number(details.retryAfter) || 0;
+    (error as any).activeRequestId = typeof details.activeRequestId === "string"
+        ? details.activeRequestId
+        : "";
+    (error as any).terminal = details.terminal === true;
+    return error;
+}
+
+async function streamPreflightRequest(config: PreflightRequestConfig): Promise<any> {
+    const deadline = Date.now() + PREFLIGHT_WAIT_MS;
+    let failures = 0;
+    let announcedWait = false;
+    let requestId = config.requestId;
+    let payload: Record<string, unknown> | null = config.payload;
+
+    while (true) {
+        const controller = new AbortController();
+        config.setController(controller);
+
+        const retry = async (error: any, reason: string) => {
+            if (Date.now() >= deadline || failures >= PREFLIGHT_RETRIES) throw error;
+            failures++;
+            const delay = 2000 * Math.pow(2, failures - 1);
+            genTask.logs.push(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
+            await waitWithAbort(delay, controller.signal);
+        };
+
+        try {
+            let response: Response;
+            try {
+                response = await fetchWithByokFallback(config.endpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        taskId: config.taskId,
+                        ...(payload || {}),
+                        [config.requestIdField]: requestId,
+                    }),
+                    signal: controller.signal,
+                });
+            } catch (error: any) {
+                if (controller.signal.aborted) {
+                    const aborted = new Error("interrupted");
+                    aborted.name = "AbortError";
+                    throw aborted;
+                }
+                if (isInterrupt(error)) throw error;
+                await retry(error, "连接中断");
+                continue;
+            }
+
+            await rejectAccessResponse(response);
+
+            if (response.status === 409) {
+                const apiError = await readApiError(response, `${config.label}状态冲突`);
+                if (apiError.code === config.recoveryCode) {
+                    const activeRequestId = config.normalizeRequestId(apiError.activeRequestId);
+                    if (activeRequestId && (activeRequestId !== requestId || payload !== null)) {
+                        requestId = activeRequestId;
+                        payload = null;
+                        config.onRecoverRequestId(activeRequestId);
+                        genTask.logs.push(`↻ ${config.label}已切换到服务端现有 requestId，继续恢复原操作`);
+                        continue;
+                    }
+                }
+                if ((apiError.code === config.inProgressCode || apiError.code === "TASK_OPERATION_IN_PROGRESS")
+                    && Date.now() < deadline) {
+                    if (!announcedWait) {
+                        genTask.logs.push(`· ${config.label}已在服务端执行，等待现有结果...`);
+                        announcedWait = true;
+                    }
+                    const retrySeconds = Math.max(1, Number(response.headers.get("Retry-After")) || 2);
+                    await waitWithAbort(retrySeconds * 1000, controller.signal);
+                    continue;
+                }
+                const conflict = attachApiError(apiError.message, {
+                    code: apiError.code,
+                    status: response.status,
+                    activeRequestId: apiError.activeRequestId,
+                });
+                (conflict as any).noRetry = true;
+                throw conflict;
+            }
+
+            if (!response.ok) {
+                const apiError = await readApiError(response, `${config.label}请求失败`);
+                const error = attachApiError(apiError.message, {
+                    code: apiError.code,
+                    status: response.status,
+                    activeRequestId: apiError.activeRequestId,
+                });
+                if (response.status === 400 || response.status === 404 || response.status === 429
+                    || apiError.code.endsWith("_REQUEST_CONFLICT")
+                    || apiError.code.endsWith("_RECOVERY_REQUIRED")) {
+                    (error as any).noRetry = true;
+                    throw error;
+                }
+                await retry(error, "请求失败");
+                continue;
+            }
+
+            let result: any;
+            try {
+                result = await readSSE(response, {
+                    preflightStage: config.stage,
+                    requireDone: true,
+                });
+            } catch (error: any) {
+                if (controller.signal.aborted) {
+                    const aborted = new Error("interrupted");
+                    aborted.name = "AbortError";
+                    throw aborted;
+                }
+                if (isInterrupt(error) || error?.terminal) throw error;
+                await retry(error, "连接中断");
+                continue;
+            }
+
+            if (!result) {
+                const error = new Error(`${config.label}流已结束，但未返回结果`);
+                await retry(error, "未返回结果");
+                continue;
+            }
+            if (result.error) {
+                const code = typeof result.code === "string" ? result.code : "";
+                if ((code === config.inProgressCode || code === "TASK_OPERATION_IN_PROGRESS")
+                    && Date.now() < deadline) {
+                    if (!announcedWait) {
+                        genTask.logs.push(`· ${config.label}已在服务端执行，等待现有结果...`);
+                        announcedWait = true;
+                    }
+                    const retrySeconds = Math.max(1, Number(result.retryAfter) || 2);
+                    await waitWithAbort(retrySeconds * 1000, controller.signal);
+                    continue;
+                }
+                const error = attachApiError(String(result.error), {
+                    code,
+                    status: result.status,
+                    retryAfter: result.retryAfter,
+                    activeRequestId: result.activeRequestId,
+                    terminal: result.retryable === false,
+                });
+                (error as any).retryable = result.retryable !== false;
+                if (((error as any).status >= 400 && (error as any).status < 500)
+                    || code.endsWith("_REQUEST_CONFLICT")
+                    || code.endsWith("_RECOVERY_REQUIRED")) {
+                    (error as any).noRetry = true;
+                    throw error;
+                }
+                if (result.retryable !== false) {
+                    await retry(error, "执行失败");
+                    continue;
+                }
+                throw error;
+            }
+            return result;
+        } finally {
+            config.setController(null);
+        }
+    }
+}
+
+/** SSE streaming clarify round. Network retries and 409 polling reuse the same semantic request ID. */
 async function streamClarify(
     taskId: string,
+    clarifyRequestId: string,
     answers?: Record<string, string | string[]>,
     extraPrompt?: string,
 ): Promise<any> {
-    clarifyAbort = new AbortController();
-    const resp = await fetchWithByokFallback("/api/generate/clarify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId, answers, extraPrompt }),
-        signal: clarifyAbort.signal,
+    return streamPreflightRequest({
+        endpoint: "/api/generate/clarify",
+        stage: "clarify",
+        label: "澄清",
+        requestIdField: "clarifyRequestId",
+        requestId: clarifyRequestId,
+        taskId,
+        payload: { answers, extraPrompt },
+        inProgressCode: "CLARIFY_IN_PROGRESS",
+        recoveryCode: "CLARIFY_RECOVERY_REQUIRED",
+        normalizeRequestId: normalizeClarifyRequestId,
+        onRecoverRequestId: requestId => {
+            genTask.clarifyRequestId = requestId;
+            genTask.clarifyRequestAnswers = null;
+            genTask.clarifyRequestExtraPrompt = "";
+            persistGenTaskNow();
+        },
+        setController: controller => { clarifyAbort = controller; },
     });
-    if (resp.status === 401) { login(); throw noRetry("请先登录后再使用"); }
-    if (resp.status === 402) { showSponsorModal.value = true; fetchMe(); throw noRetry("本月额度已用尽"); }
-    if (!resp.ok) {
-        const apiError = await readApiError(resp, "澄清请求失败");
-        if (resp.status === 404) {
-            throw noRetry("任务状态不存在，请重新开始生成");
-        }
-        if (resp.status === 400 || resp.status === 429) {
-            throw noRetry(apiError.message);
-        }
-        throw new Error(apiError.message);
-    }
-    return readSSE(resp);
 }
 
-/** SSE streaming 复杂度分级（可带 correction 重画） */
-async function streamGrade(taskId: string, correction?: string): Promise<any> {
-    gradeAbort = new AbortController();
-    const resp = await fetchWithByokFallback("/api/generate/grade", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId, correction }),
-        signal: gradeAbort.signal,
+/** SSE streaming complexity grading. Correction redraws use a new semantic request ID. */
+async function streamGrade(taskId: string, gradeRequestId: string, correction?: string): Promise<any> {
+    return streamPreflightRequest({
+        endpoint: "/api/generate/grade",
+        stage: "grade",
+        label: "分级",
+        requestIdField: "gradeRequestId",
+        requestId: gradeRequestId,
+        taskId,
+        payload: { correction },
+        inProgressCode: "GRADE_IN_PROGRESS",
+        recoveryCode: "GRADE_RECOVERY_REQUIRED",
+        normalizeRequestId: normalizeGradeRequestId,
+        onRecoverRequestId: requestId => {
+            genTask.gradeRequestId = requestId;
+            genTask.gradeRequestCorrection = "";
+            persistGenTaskNow();
+        },
+        setController: controller => { gradeAbort = controller; },
     });
-    if (!resp.ok) throw await responseError(resp);
-    return readSSE(resp);
 }
 
 /** SSE streaming build fix */
@@ -1156,6 +1617,7 @@ async function streamBuildFix(
             ...(mode === "repair" ? { learningToolJobs } : {}),
         }),
     });
+    await rejectAccessResponse(resp);
     if (!resp.ok) {
         const apiError = await readApiError(resp, "自动修复请求失败");
         const error = new Error(apiError.message);
@@ -1197,7 +1659,8 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
         let status: any;
         try {
             status = await get(`/api/generate/status?taskId=${taskId}`);
-        } catch (error) {
+        } catch (error: any) {
+            if (error?.noRetry || error?.terminal) throw error;
             if (Date.now() >= statusDeadline) throw error;
             await new Promise(resolve => setTimeout(resolve, 2_000));
             continue;
@@ -1285,16 +1748,229 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
     await buildWithRetry();
 }
 
+async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
+    let answers: Record<string, string | string[]> | undefined = resumePhase
+        ? genTask.clarifyRequestAnswers || undefined
+        : undefined;
+    let extraPrompt: string | undefined = resumePhase
+        ? genTask.clarifyRequestExtraPrompt || undefined
+        : undefined;
+
+    if (resumePhase === "awaiting_input") {
+        const extra = await waitForExtraPrompt();
+        genTask.moreInputHint = "";
+        extraPrompt = extra;
+        setPhase("clarifying", "已收到补充，继续分析...");
+    } else if (resumePhase === "clarifying"
+        && !genTask.clarifyRequestId
+        && genTask.clarifyTodos.length > 0) {
+        const todos = [...genTask.clarifyTodos];
+        const userAnswers = await waitForClarifyAnswers();
+        genTask.clarifyHistory.push({ todos, answers: userAnswers });
+        genTask.clarifyTodos = [];
+        answers = userAnswers;
+    }
+
+    while (true) {
+        genTask.reasoningContent = "";
+        setPhase("clarifying");
+
+        const clarifyRequestId = genTask.clarifyRequestId || createClarifyRequestId();
+        genTask.clarifyRequestId = clarifyRequestId;
+        genTask.clarifyRequestAnswers = answers || null;
+        genTask.clarifyRequestExtraPrompt = extraPrompt || "";
+        genTask.clarifyTodos = [];
+        // 请求发出前同步保存 ID 与原始 payload；断流、刷新和手动重试都必须复用它们。
+        persistGenTaskNow();
+
+        let clarifyResult: any;
+        try {
+            clarifyResult = await streamClarify(
+                genTask.taskId,
+                clarifyRequestId,
+                answers,
+                extraPrompt,
+            );
+        } catch (error: any) {
+            if (error?.terminal) {
+                genTask.clarifyRequestId = "";
+                persistGenTaskNow();
+            }
+            throw error;
+        }
+
+        // 收到带 [DONE] 的 terminal result 后才能释放该 ID。payload 一并清理，下一轮会创建新 ID。
+        genTask.clarifyRequestId = "";
+        genTask.clarifyRequestAnswers = null;
+        genTask.clarifyRequestExtraPrompt = "";
+        answers = undefined;
+        extraPrompt = undefined;
+
+        if (clarifyResult.needMoreInput) {
+            genTask.moreInputHint = clarifyResult.hint || "请补充更多需求描述";
+            setPhase("awaiting_input", "! 需求过于模糊，请补充描述");
+            persistGenTaskNow();
+            const extra = await waitForExtraPrompt();
+            genTask.moreInputHint = "";
+            extraPrompt = extra;
+            setPhase("clarifying", "已收到补充，继续分析...");
+            continue;
+        }
+
+        if (clarifyResult.done) {
+            genTask.logs.push("● 澄清阶段完成");
+            genTask.clarifyTodos = [];
+            setPhase("grading");
+            persistGenTaskNow();
+            return;
+        }
+
+        const todos = Array.isArray(clarifyResult.todos) ? clarifyResult.todos : [];
+        if (!todos.length) throw new Error("澄清阶段返回了无效的待确认项");
+        genTask.clarifyTodos = todos;
+        persistGenTaskNow();
+        const userAnswers = await waitForClarifyAnswers();
+
+        genTask.clarifyHistory.push({ todos, answers: userAnswers });
+        genTask.clarifyTodos = [];
+        answers = userAnswers;
+    }
+}
+
+async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | undefined> {
+    let correction: string | undefined = resumePhase === "grading"
+        ? genTask.gradeRequestCorrection || undefined
+        : undefined;
+
+    if (resumePhase === "confirming") {
+        if (!genTask.grade) throw new Error("实现路径确认状态已失效，请重试分级");
+        const choice = await waitForPathChoice();
+        if (choice.correction) {
+            correction = choice.correction;
+            genTask.grade = null;
+        } else {
+            genTask.chosenPathId = choice.pathId || "";
+            genTask.grade = null;
+            setPhase("planning");
+            persistGenTaskNow();
+            return choice.pathId;
+        }
+    }
+
+    while (true) {
+        genTask.reasoningContent = "";
+        setPhase("grading", "正在分析需求复杂度...");
+
+        const gradeRequestId = genTask.gradeRequestId || createGradeRequestId();
+        genTask.gradeRequestId = gradeRequestId;
+        genTask.gradeRequestCorrection = correction || "";
+        persistGenTaskNow();
+
+        let gradeResult: any;
+        try {
+            gradeResult = await streamGrade(genTask.taskId, gradeRequestId, correction);
+        } catch (error: any) {
+            if (error?.code === "CLARIFY_RECOVERY_REQUIRED") {
+                const activeClarifyRequestId = normalizeClarifyRequestId(error.activeRequestId);
+                if (!activeClarifyRequestId) {
+                    throw new Error("服务端要求恢复需求确认，但未返回有效的 requestId");
+                }
+                genTask.clarifyRequestId = activeClarifyRequestId;
+                genTask.clarifyRequestAnswers = null;
+                genTask.clarifyRequestExtraPrompt = "";
+                genTask.gradeRequestId = "";
+                genTask.gradeRequestCorrection = "";
+                genTask.grade = null;
+                setPhase("clarifying", "↻ 分级前先恢复尚未结算的需求确认请求");
+                persistGenTaskNow();
+                await runClarifyStage("clarifying");
+                correction = undefined;
+                continue;
+            }
+            if (error?.terminal) {
+                genTask.gradeRequestId = "";
+            }
+            throw error;
+        }
+
+        genTask.plannerLearningRequired = gradeResult.learningRequired === true;
+        genTask.plannerLearningNeedCount = genTask.plannerLearningRequired
+            ? Math.max(0, Number(gradeResult.learningNeedCount) || 0)
+            : 0;
+        correction = undefined;
+
+        if (gradeResult.direct) {
+            genTask.grade = null;
+            setPhase("planning");
+            genTask.gradeRequestId = "";
+            genTask.gradeRequestCorrection = "";
+            persistGenTaskNow();
+            return undefined;
+        }
+
+        genTask.grade = { level: gradeResult.level, paths: gradeResult.paths || [] };
+        setPhase("confirming", "请确认实现路径");
+        genTask.gradeRequestId = "";
+        genTask.gradeRequestCorrection = "";
+        persistGenTaskNow();
+        const choice = await waitForPathChoice();
+        if (choice.correction) {
+            correction = choice.correction;
+            genTask.grade = null;
+            continue;
+        }
+        genTask.chosenPathId = choice.pathId || "";
+        genTask.grade = null;
+        setPhase("planning");
+        persistGenTaskNow();
+        return choice.pathId;
+    }
+}
+
 // 记住上次生成的入参，供失败后「重试」手动重跑。刷新后内存丢失时，改用 genTask 上还原的入参。
 let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
 export function canRetryGenerate(): boolean {
     const has = !!lastGenParams || !!genTask.userPrompt || !!genTask.taskId;
     return has && (genTask.phase === "error" || genTask.phase === "idle");
 }
-/** 手动重试：优先用内存入参重跑；刷新后内存丢了则用还原的入参重跑，或从 KV 续跑。 */
+
+function getPreFileResumePhase(): GenPhase | "" {
+    if (genTask.clarifyRequestId) return "clarifying";
+    if (genTask.gradeRequestId) return "grading";
+    if (genTask.plannerRequestId
+        || genTask.preflightStage === "plan"
+        || (genTask.learningProgress.stage === "planner" && genTask.learningProgress.status !== "idle")) {
+        return "planning";
+    }
+    if (genTask.grade) return "confirming";
+    if (genTask.preflightStage === "clarify") {
+        return genTask.moreInputHint ? "awaiting_input" : "clarifying";
+    }
+    if (genTask.preflightStage === "grade") return "grading";
+    return "";
+}
+
+/** 手动重试：FileGen 前优先用原 taskId + stage requestId 对账，不重复执行 mode1。 */
 export function retryGenerate() {
     const params = lastGenParams
         || (genTask.userPrompt ? { userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version } : null);
+    const resumePhase = genTask.taskId && genTask.files.length === 0
+        ? getPreFileResumePhase()
+        : "";
+    if (params && genTask.taskId && genTask.files.length === 0) {
+        if (resumePhase) {
+            genTask.phase = resumePhase;
+            genTask.error = "";
+            genTask.logs.push("↻ 使用现有任务恢复 FileGen 前置阶段，不重复创建任务");
+            persistGenTaskNow();
+            startGenerate(params.userPrompt, params.coreType, params.version, { resumePrepared: true }).catch(() => { });
+        } else {
+            genTask.phase = "error";
+            genTask.error = "当前任务缺少可恢复的 requestId；为避免重复计费，未自动新建任务。";
+            persistGenTaskNow();
+        }
+        return;
+    }
     if (params) {
         startGenerate(params.userPrompt, params.coreType, params.version).catch(() => { });
     } else if (genTask.taskId) {
@@ -1346,6 +2022,14 @@ export async function resumeGenerate() {
         return;
     }
 
+    if (!genTask.files.length
+        && ["clarifying", "awaiting_input", "grading", "confirming"].includes(p)
+        && genTask.userPrompt) {
+        genTask.logs.push("↻ 页面恢复：使用原 taskId 与前置 requestId 继续对账");
+        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
+        return;
+    }
+
     // Planner 学习/规划阶段已有 taskId 和路径选择，可直接沿用服务端状态恢复。
     if (!genTask.files.length && p === "planning" && genTask.userPrompt) {
         genTask.logs.push("↻ 页面恢复：继续联网查证与项目规划");
@@ -1353,10 +2037,10 @@ export async function resumeGenerate() {
         return;
     }
 
-    // 澄清/分级/确认依赖尚未恢复的交互 Promise，只能转为可重试状态。
+    // 无法识别的旧快照不自动重跑 mode1，避免重复创建并计费。
     if (!genTask.files.length) {
         genTask.phase = "error";
-        genTask.error = "页面刷新中断了需求确认，点「重试」用上次需求继续。";
+        genTask.error = "当前任务缺少可恢复的前置阶段信息，请重新开始生成。";
         return;
     }
 
@@ -1379,8 +2063,13 @@ export async function resumeGenerate() {
                 const doneBefore = doneCount();
                 let bucketResult: any = null;
                 for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
-                    try { bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs); }
-                    catch { bucketResult = null; }
+                    try {
+                        bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
+                    }
+                    catch (error: any) {
+                        if (error?.noRetry || error?.terminal) throw error;
+                        bucketResult = null;
+                    }
                 }
                 if (!bucketResult) {
                     if (doneCount() > doneBefore) { noProgress = 0; continue; }
@@ -1445,6 +2134,7 @@ export async function startGenerate(
     options?: { resumePrepared?: boolean },
 ) {
     const resumePrepared = options?.resumePrepared === true;
+    const resumePhase: GenPhase | "" = resumePrepared ? genTask.phase : "";
     if (!resumePrepared && isGeneratingPhase(genTask.phase)) {
         throw new Error("当前已有构建任务正在进行");
     }
@@ -1458,130 +2148,60 @@ export async function startGenerate(
         genTask.coreType = coreType;
         genTask.version = version;
 
-    // ── Phase 1: create taskId (no plan yet) ──
-    try {
-        setPhase("planning", "正在创建任务...");
-        const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds: [...selected] });
-        genTask.taskId = initResult.taskId;
-        fetchMe(); // 扣费后刷新顶栏剩余额度
-    } catch (e: any) {
-        genTask.phase = "error";
-        genTask.error = e.message || String(e);
-        genTask.logs.push("× " + genTask.error);
-        return;
-    }
-
-    // ── Phase 2: multi-round clarify loop ──
-    try {
-        setPhase("clarifying", "进入澄清阶段，请回答问题...");
-        let answers: Record<string, string | string[]> | undefined = undefined;
-        let extraPrompt: string | undefined = undefined;
-
-        while (true) {
-            genTask.reasoningContent = "";
-            // 澄清调用可能因 CF→模型服务链路慢/抖动拿不到 result(超时/被切/连接失败)。
-            // 这不一定是真失败:重试几次(保留已填 answers/补充说明),都不行才硬失败。
-            let clarifyResult: any = null;
-            let lastClarifyError = "";
-            for (let attempt = 0; attempt < 3 && !clarifyResult; attempt++) {
-                try {
-                    const r = await streamClarify(genTask.taskId, answers, extraPrompt);
-                    if (r && !r.error) { clarifyResult = r; break; }
-                    lastClarifyError = r?.error ? String(r.error) : "服务端未返回澄清结果";
-                    genTask.logs.push(`· 澄清出错（${lastClarifyError}），重试 (${attempt + 1}/3)...`);
-                } catch (ce: any) {
-                    if (isInterrupt(ce) || ce?.noRetry) throw ce;
-                    lastClarifyError = ce?.message || String(ce);
-                    genTask.logs.push(`· 澄清中断（${lastClarifyError}），重试 (${attempt + 1}/3)...`);
-                }
-            }
-            extraPrompt = undefined;
-            if (!clarifyResult) {
-                throw new Error(lastClarifyError
-                    ? `澄清阶段失败：${lastClarifyError}`
-                    : "澄清阶段多次无响应，请稍后重试");
-            }
-
-            if (clarifyResult.needMoreInput) {
-                genTask.moreInputHint = clarifyResult.hint || "请补充更多需求描述";
-                setPhase("awaiting_input", "! 需求过于模糊，请补充描述");
-                const extra = await waitForExtraPrompt();
-                genTask.moreInputHint = "";
-                extraPrompt = extra;
-                setPhase("clarifying", "已收到补充，继续分析...");
-                continue;
-            }
-
-            if (clarifyResult.done) {
-                genTask.logs.push("● 澄清阶段完成");
-                genTask.clarifyTodos = [];
-                break;
-            }
-
-            // 推入历史（todos，answers 稍后填）
-            genTask.clarifyTodos = clarifyResult.todos;
-            const userAnswers = await waitForClarifyAnswers();
-
-            genTask.clarifyHistory.push({ todos: clarifyResult.todos, answers: userAnswers });
-            genTask.clarifyTodos = [];
-            answers = userAnswers;
-        }
-    } catch (e: any) {
-        if (isInterrupt(e)) {
-            // ESC 撤回：安静复位回 idle（消耗已由后端结算）
-            resetGenTask();
-            fetchMe(); // 刷新顶栏剩余额度，反映已结算的扣费
+        // ── Phase 1: create taskId (mode1, only for a genuinely new task) ──
+        try {
+            setPhase("planning", "正在创建任务...");
+            const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds: [...selected] });
+            genTask.taskId = initResult.taskId;
+            fetchMe(); // 扣费后刷新顶栏剩余额度
+        } catch (e: any) {
+            genTask.phase = "error";
+            genTask.error = e.message || String(e);
+            genTask.logs.push("× " + genTask.error);
             return;
         }
-        genTask.phase = "error";
-        genTask.error = e.message || String(e);
-        genTask.logs.push("× " + genTask.error);
-        return;
     }
 
-    // ── Phase 2.5: 复杂度分级 +（非直接级）实现路径确认门 ──
-    try {
-        let correction: string | undefined;
-        while (true) {
-            genTask.reasoningContent = "";
-            setPhase("grading", "正在分析需求复杂度...");
-            const gradeRes = await streamGrade(genTask.taskId, correction);
-            genTask.plannerLearningRequired = gradeRes?.learningRequired === true;
-            genTask.plannerLearningNeedCount = genTask.plannerLearningRequired
-                ? Math.max(0, Number(gradeRes?.learningNeedCount) || 0)
-                : 0;
+    const resumeFromClarify = resumePhase === "clarifying" || resumePhase === "awaiting_input";
+    if (!resumePrepared || resumeFromClarify) {
+        try {
+            if (!resumePrepared) setPhase("clarifying", "进入澄清阶段，请回答问题...");
+            await runClarifyStage(resumeFromClarify ? resumePhase : "");
+        } catch (e: any) {
+            if (isInterrupt(e)) {
+                resetGenTask();
+                fetchMe();
+                return;
+            }
+            genTask.phase = "error";
+            genTask.error = e.message || String(e);
+            genTask.logs.push("× " + genTask.error);
             persistGenTaskNow();
-            correction = undefined;
-            // 直接级 / 兜底 → 走原路径，不出确认门
-            if (!gradeRes || gradeRes.direct) break;
-
-            // 非直接级：展示手牌路径门，等用户选路径或打回
-            genTask.grade = { level: gradeRes.level, paths: gradeRes.paths || [] };
-            setPhase("confirming", "请确认实现路径");
-            const choice = await waitForPathChoice();
-            if (choice.correction) {
-                correction = choice.correction;
-                genTask.grade = null;
-                continue; // 带修正重新分级
-            }
-            chosenPathId = choice.pathId;
-            genTask.chosenPathId = choice.pathId || "";
-            genTask.grade = null;
-            break;
-        }
-    } catch (e: any) {
-        if (isInterrupt(e)) {
-            resetGenTask();
-            fetchMe();
             return;
         }
-        // 分级异常不阻断生成：按原路径继续（plan 仍会按 vector 注入轴要求）
-        genTask.grade = null;
-        genTask.plannerLearningRequired = false;
-        genTask.plannerLearningNeedCount = 0;
-        genTask.logs.push("! 分级阶段异常，按原路径继续: " + (e.message || e));
     }
+
+    const resumeFromGrade = resumePhase === "grading" || resumePhase === "confirming";
+    if (!resumePrepared || resumeFromClarify || resumeFromGrade) {
+        try {
+            const selectedPathId = await runGradeStage(resumeFromGrade ? resumePhase : "");
+            if (selectedPathId !== undefined) chosenPathId = selectedPathId;
+        } catch (e: any) {
+            if (isInterrupt(e)) {
+                resetGenTask();
+                fetchMe();
+                return;
+            }
+            // 未收到明确 terminal result 时禁止静默跳过分级进入 Planner。
+            genTask.phase = "error";
+            genTask.error = e.message || String(e);
+            genTask.logs.push("× " + genTask.error);
+            persistGenTaskNow();
+            return;
+        }
     }
+
+    chosenPathId = genTask.chosenPathId || chosenPathId;
 
     // Learning 的触发权交给后续 DS coding agent；这里仅进入规划，不再根据 Grader 结果抢跑。
     setPhase("planning", "开始规划；DS 可在需要精确外部 API 证据时主动调用 Learning...");
@@ -1690,6 +2310,7 @@ export async function startGenerate(
                         try {
                             bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
                         } catch (be: any) {
+                            if (be?.noRetry || be?.terminal) throw be;
                             const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
                             genTask.logs.push(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
                             bucketResult = null;
@@ -2007,8 +2628,7 @@ export async function appendFeature(appendText: string) {
                 stream: true,
             }),
         });
-        if (resp.status === 402) { showSponsorModal.value = true; throw new Error("本月额度已用尽"); }
-        if (resp.status === 401) { login(); throw new Error("请先登录后再使用"); }
+        await rejectAccessResponse(resp);
         if (!resp.ok) throw await responseError(resp);
         if (!resp.body) throw new Error("无响应流");
 
@@ -2028,11 +2648,19 @@ export async function appendFeature(appendText: string) {
                 if (!t.startsWith("data:")) continue;
                 const payload = t.slice(5).trim();
                 if (payload === "[DONE]") break outer;
+                let event: any;
                 try {
-                    const j = JSON.parse(payload);
-                    const chunk = j?.choices?.[0]?.delta?.content ?? "";
-                    if (chunk) { full += chunk; genTask.streamingContent = full; }
-                } catch { /* skip */ }
+                    event = JSON.parse(payload);
+                } catch { continue; }
+                if (event?.type === "error" || (event?.type === "result" && event?.error)) {
+                    rejectAccessEvent(event);
+                    const message = typeof event?.error === "string"
+                        ? event.error
+                        : (event?.error?.message || event?.message || "流式请求失败");
+                    throw new Error(message);
+                }
+                const chunk = event?.choices?.[0]?.delta?.content ?? "";
+                if (chunk) { full += chunk; genTask.streamingContent = full; }
             }
         }
         genTask.streamingPhase = "";

@@ -1,16 +1,20 @@
 // 统一闸门（作用于所有 /api/* 请求）：
 //   1) IP 限流（贵端点）
 //   2) 强制登录（生成 / 聊天 / 流式）
-//   3) 新建任务（plan mode-1）时校验并扣 1 件额度
+//   3) 无 taskId 的平台聊天校验充值余额
+//   4) 新建任务（plan mode-1）时校验并扣 1 件充值额度
 //
 // 注意：仅在「新建任务」扣费，同一 taskId 的后续生成/修复/重建不重复扣。
 
 import { verifySession, getSessionCookie } from "../_lib/session";
 import { getQuota, consume, ipAllow } from "../_lib/quota";
-import { TaskStoreUnavailableError } from "../_lib/taskStore";
+import { isDeepSeekByokRequest, resolveLLM } from "../_lib/llm";
+import { deleteTask, TaskStoreUnavailableError } from "../_lib/taskStore";
 
 interface Env {
     SESSION_SECRET: string;
+    DEEPSEEK_API_KEY: string;
+    DEEPSEEK_RESPONSES_WEB_SEARCH?: string;
     TASKS: KVNamespace;
     /** 可选的 Cloudflare Rate Limiting binding；未配置时仅昂贵写端点回退 KV。 */
     API_RATE_LIMITER?: {
@@ -100,19 +104,46 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         if (!allowed) return json({ error: "请求过于频繁，请稍后再试" }, 429);
     }
 
-    // 3) 新建任务额度：仅在 task 创建成功后扣 1 件。
+    // 无 taskId 的平台聊天不会进入任务成本结算，因此至少要求存在充值余额。
+    // BYOK（包括现有 GLM BYOK）直接使用用户 key，不受平台余额限制。
+    if (session && (path === "/api/chat" || path === "/api/stream")) {
+        let body: any = {};
+        try { body = await request.clone().json(); } catch { /* handler validates the body */ }
+        if (!body.taskId) {
+            const llm = await resolveLLM({ request, env, data: context.data });
+            if (!llm.byok) {
+                const q = await getQuota(env.TASKS, session.uid);
+                if (q.remaining <= 0) {
+                    return json({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
+                }
+            }
+        }
+    }
+
+    // 4) 共享 DeepSeek 新建任务额度：仅在 task 创建成功后扣 1 件；DeepSeek BYOK 不检查或预扣。
     if (session && path === "/api/generate/plan") {
         // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
         let body: any = {};
         try { body = await request.clone().json(); } catch { /* ignore */ }
-        if (!body.taskId) {
+        if (!body.taskId && !isDeepSeekByokRequest(request)) {
             const q = await getQuota(env.TASKS, session.uid);
             if (q.remaining <= 0) {
-                return json({ error: "本月额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
+                return json({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
             }
             // 先校验额度，仅在任务创建成功后才扣费（避免瞬时失败 + 前端重试重复扣）
             const res = await next();
-            if (res.ok) await consume(env.TASKS, session.uid);
+            if (res.ok) {
+                const charged = await consume(env.TASKS, session.uid);
+                if (!charged) {
+                    const payload = await res.clone().json().catch(() => null) as { taskId?: unknown } | null;
+                    const taskId = typeof payload?.taskId === "string" ? payload.taskId : "";
+                    if (taskId) {
+                        await deleteTask(env, taskId, session.uid).catch(error =>
+                            console.warn("unpaid task cleanup failed", error));
+                    }
+                    return json({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);
+                }
+            }
             return res;
         }
     }

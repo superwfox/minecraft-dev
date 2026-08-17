@@ -123,6 +123,7 @@ export function emptyLearningTelemetry(): LearningJobTelemetry {
         verificationTimeouts: 0,
         verificationHttp4xx: 0,
         verificationHttp5xx: 0,
+        verificationLastHttpStatus: 0,
         verificationInvalidResponses: 0,
         verificationElapsedMs: 0,
     };
@@ -167,6 +168,7 @@ export function normalizeLearningTelemetry(value: unknown): LearningJobTelemetry
         verificationTimeouts: count(raw.verificationTimeouts),
         verificationHttp4xx: count(raw.verificationHttp4xx),
         verificationHttp5xx: count(raw.verificationHttp5xx),
+        verificationLastHttpStatus: count(raw.verificationLastHttpStatus),
         verificationInvalidResponses: count(raw.verificationInvalidResponses),
         verificationElapsedMs: count(raw.verificationElapsedMs),
     };

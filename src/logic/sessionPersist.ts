@@ -4,6 +4,22 @@ import type { ChatBlock } from "./chatState";
 const STORAGE_KEY = "tahai-session-v1";
 
 let saveTimer: any = null;
+const INTERRUPTED_PHASES = new Set<ChatBlock["phase"]>(["analyzing", "streaming"]);
+const RESTORE_INTERRUPTED_MESSAGE = "上次响应因页面刷新中断，请重新发送";
+
+function normalizeRestoredBlock(block: ChatBlock): ChatBlock {
+    if (!INTERRUPTED_PHASES.has(block.phase)) return block;
+    return {
+        ...block,
+        phase: "error",
+        streamText: "",
+        rawMsg: "",
+        thinkingText: "",
+        outputText: "",
+        streamStage: "",
+        error: RESTORE_INTERRUPTED_MESSAGE,
+    };
+}
 
 function snapshot() {
     return {
@@ -41,10 +57,16 @@ export function restoreSession() {
     }
 
     if (Array.isArray(data.chatBlocks)) {
-        const validated = (data.chatBlocks as any[]).filter(
-            b => b && Array.isArray(b.userMessages) && typeof b.id === "number",
-        ) as ChatBlock[];
+        let normalizedInterrupted = false;
+        const validated = (data.chatBlocks as any[])
+            .filter(b => b && Array.isArray(b.userMessages) && typeof b.id === "number")
+            .map((block) => {
+                const normalized = normalizeRestoredBlock(block as ChatBlock);
+                if (normalized !== block) normalizedInterrupted = true;
+                return normalized;
+            });
         rehydrateBlocks(validated);
+        if (normalizedInterrupted) persistSession();
     }
 }
 
