@@ -48,8 +48,8 @@ Minecraft 插件开发是一个充满创意的领域，但对于新手和非专�
 
 **4. 多核心支持**
 - 支持 Paper、Bukkit、Spigot、Forge、Fabric
-- 覆盖 MC 1.7 到 1.21 版本
-- 自动选择合适的 Java 版本（8/17/21）
+- 覆盖 MC 1.7 到 26.2 版本
+- 自动选择合适的 Java 版本（8/11/17/21/25）
 
 **5. 登录即用，自带 DeepSeek Key**
 - GitHub 一键登录，所有用户均可填写自己的 DeepSeek API Key

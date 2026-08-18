@@ -18,7 +18,7 @@ export type IDEMessage = {
     files?: IDEFileAction[];
 };
 
-const SYSTEM_PROMPT = `你是 Minecraft Paper 1.21 插件项目的 IDE 内置 AI 助手。
+const SYSTEM_PROMPT = `你是 Minecraft Paper 插件项目的 IDE 内置 AI 助手，具体 MC 版本以当前项目文件和构建元数据为准。
 
 【意图判断】
 - chat：用户在询问、解释、讨论、技术答疑，不修改任何文件

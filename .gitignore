@@ -55,4 +55,5 @@ scripts
 !scripts/
 scripts/*
 !scripts/build-minecraft-fonts.mjs
+!scripts/update-minecraft-versions.mjs
 planReference

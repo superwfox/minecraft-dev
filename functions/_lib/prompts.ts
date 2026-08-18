@@ -458,7 +458,7 @@ export function plannerPrompt(
         system: `你是一个 Minecraft ${coreType} 插件项目规划器。根据用户需求输出一个 JSON 对象（不要输出其他内容），格式如下：
 {
   "projectName": "插件名（英文，驼峰）",
-  "javaVersion": "8|11|17|21",
+  "javaVersion": "8|11|17|21|25",
   "packageName": "com.tahai.pluginname",
   "mainBlueprint": {
     "events":   [ { "event": "PlayerJoinEvent", "listenerClass": "JoinListener", "priority": "NORMAL" } ],
@@ -496,7 +496,7 @@ files[].generatorType 必须从下列枚举中精确选择：
 - "MainGen"           — 主类（extends JavaPlugin），有且仅有一个
 
 规则：
-- 根据 MC 版本推导 Java 版本：1.20+ 用 21，1.17-1.19 用 17，1.13-1.16 用 11，1.12 及以下用 8
+- 根据 MC 版本推导 Java 版本：26.1+ 用 25，1.20-1.21 用 21，1.17-1.19 用 17，1.13-1.16 用 11，1.12 及以下用 8
 - 核心类型为 ${coreType}，MC 版本 ${version}
 - pom.xml 的 order 必须为 1
 - depends 数组填写该文件依赖的其他文件的文件名（不含路径前缀），例如 ["DataManager.java"]

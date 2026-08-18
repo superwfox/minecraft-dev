@@ -11,6 +11,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist",
+    "versions:update": "node scripts/update-minecraft-versions.mjs",
     "font:subset": "node scripts/build-font-subset.mjs",
     "img:compress": "node scripts/compress-images.mjs",
     "gen:secret": "node scripts/gen-secret.mjs"

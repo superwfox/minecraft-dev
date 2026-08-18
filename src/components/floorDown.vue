@@ -36,7 +36,7 @@ const sections = [
   },
   {
     title: "全版本覆盖",
-    desc: "支持 Paper / Bukkit / Spigot / Forge / Fabric，从 1.8 到 1.21 全版本适配",
+    desc: "支持 Paper / Bukkit / Spigot / Forge / Fabric，从 1.8 到 26.2 全版本适配",
     img: "/pageC.png",
     action: null,
   },

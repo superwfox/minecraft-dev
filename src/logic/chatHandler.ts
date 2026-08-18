@@ -11,11 +11,10 @@ import { streamGetInfo, consistChat, precheckPrompt } from "../api/deepseek";
 import type { ChatMsg, StreamCallbacks, StreamHandle } from "../api/deepseek";
 import { authState, fetchMe } from "./auth";
 import { startGenerate } from "./generateHandler";
+import { MINECRAFT_VERSIONS } from "./minecraftVersions";
 
 const CORE_TYPES = ["PAPER", "BUKKIT", "SPIGOT", "FORGE", "FABRIC"];
-const VERSIONS = [
-    "1.21", "1.20", "1.19", "1.18", "1.17", "1.16", "1.15", "1.14", "1.13", "1.12", "1.11", "1.10", "1.9", "1.8", "1.7"
-];
+const VERSIONS = MINECRAFT_VERSIONS;
 
 export { CORE_TYPES, VERSIONS };
 

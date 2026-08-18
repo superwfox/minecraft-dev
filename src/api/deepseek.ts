@@ -7,6 +7,7 @@ import {
     openDeepSeekKeyModal,
 } from "../logic/byok";
 import { responseError } from "./apiError";
+import { MINECRAFT_VERSION_ENUM } from "../logic/minecraftVersions";
 
 export type ChatMsg = {
     role: string;
@@ -28,7 +29,7 @@ type StreamListener = StreamCallbacks | ((chunk: string) => void);
 const INFO_PRESET =
     "请根据用户输入判断需求返回json，若内容无关则plainText。 键值对如下： " +
     "\"coreType\" : {\"PAPER\",\"BUKKIT\",\"SPIGOT\",\"FORGE\",\"FABRIC\",\"其他\",\"null\"} ," +
-    "\"version\" : {\"1.21\",\"1.20\",\"1.19\",\"1.18\",\"1.17\",\"1.16\",\"1.15\",\"1.14\",\"1.13\",\"1.12\",\"1.11\",\"1.10\",\"1.9\",\"1.8\",\"1.7\",\"null\"} ," +
+    `\"version\" : {${MINECRAFT_VERSION_ENUM}} ,` +
     "\"title\" : String ," +
     "\"rawPrompt\" : String ";
 
