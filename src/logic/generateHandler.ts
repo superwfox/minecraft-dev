@@ -1052,8 +1052,6 @@ function normalizePreflightStage(value: unknown): PreflightStage | "" {
 }
 
 type SSEReadOptions = {
-    idleMs?: number;
-    onIdle?: () => void;
     preflightStage?: PreflightStage;
     requireDone?: boolean;
 };
@@ -1087,21 +1085,10 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
         genTask.preflightActive = true;
     }
 
-    // 空闲超时:每收到一块数据(含后端心跳)就重置;连续 idleMs 收不到任何字节才判定后端已死 → onIdle()。
-    // 只在调用方传入 idleMs 时启用(桶生成),避免误杀健康但耗时很长的流。
-    let idleTimer: any;
-    const armIdle = () => {
-        if (!opts?.idleMs) return;
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => opts.onIdle?.(), opts.idleMs);
-    };
-    armIdle();
-
     try {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            armIdle();
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop()!;
@@ -1265,7 +1252,6 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
             }
         }
     } finally {
-        clearTimeout(idleTimer);
         try { await reader.cancel(); } catch { /* stream already closed */ }
         try { reader.releaseLock(); } catch { /* lock already released */ }
         if (opts?.preflightStage) genTask.preflightActive = false;
@@ -1309,16 +1295,12 @@ async function streamFileGeneration(taskId: string): Promise<any> {
 }
 
 /** SSE streaming bucket generation — 一次推进一批文件的单个持久化阶段。
- *  空闲超时(非总时长!):后端每 12s 发 heartbeat,只要还在流就一直续命;连续 BUCKET_IDLE_MS
- *  收不到任何字节(CF 强杀 / 上游彻底断死)才 abort → 前端重试同一桶。
- *  服务端在每个阶段后落盘，重试不会重做整份文件。 */
-const BUCKET_IDLE_MS = 45000; // 心跳 12s 一次,45s 无任何字节才判死
+ *  服务端通过 heartbeat 保持连接，客户端不再因静默时长主动中止。 */
 async function streamBucketGeneration(
     taskId: string,
     bucketIndex: number,
     learningToolJobs: Record<string, string> = {},
 ): Promise<any> {
-    const ctrl = new AbortController();
     const resp = await fetchWithByokFallback("/api/generate/bucket", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1328,11 +1310,10 @@ async function streamBucketGeneration(
             superConcurrency: superConcurrency.value,
             learningToolJobs,
         }),
-        signal: ctrl.signal,
     });
     await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
-    return await readSSE(resp, { idleMs: BUCKET_IDLE_MS, onIdle: () => ctrl.abort() });
+    return await readSSE(resp);
 }
 
 const PREFLIGHT_WAIT_MS = 390_000;

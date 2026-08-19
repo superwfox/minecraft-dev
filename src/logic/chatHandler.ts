@@ -218,18 +218,23 @@ function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>
     block.outputText = "";
     block.streamStage = "chat";
     analyzeAbort = null;
-    const handle = consistChat(fallbackHistory, input, (chunk) => {
-        block.streamText = block.streamText + chunk;
-        streamTick.value++;
-    }, () => {
-        fallbackHistory.push({ role: "user", content: input });
-        fallbackHistory.push({ role: "assistant", content: block.streamText || "" });
+    const complete = (commitHistory = true) => {
+        if (block.phase !== "streaming") return;
+        if (commitHistory) {
+            fallbackHistory.push({ role: "user", content: input });
+            fallbackHistory.push({ role: "assistant", content: block.streamText || "" });
+        }
         block.phase = "done";
+        block.error = undefined;
         block.thinkingText = "";
         block.outputText = "";
         block.streamStage = "";
-        centerText.value = "就绪";
-    }, (chunk) => {
+        centerText.value = commitHistory ? "就绪" : "已保留当前回复";
+    };
+    const handle = consistChat(fallbackHistory, input, (chunk) => {
+        block.streamText = block.streamText + chunk;
+        streamTick.value++;
+    }, complete, (chunk) => {
         block.thinkingText += chunk;
         streamTick.value++;
     });
@@ -238,6 +243,10 @@ function fallbackStream(block: ChatBlock, input: string, centerText: Ref<string>
     void handle.done.catch((error: any) => {
         if (error?.name === "AbortError") return;
         if (block.phase === "streaming") {
+            if (error?.code === "STREAM_TRUNCATED" && block.streamText.trim()) {
+                complete(false);
+                return;
+            }
             block.phase = "error";
             block.error = "回复中断: " + (error?.message || error);
             block.thinkingText = "";

@@ -238,7 +238,12 @@ async function consumeSSE(
                 }
             }
         }
-        if (!finished) throw new Error("流式连接提前结束，请重试");
+        if (!finished) {
+            const error = new Error("流式连接提前结束，请重试");
+            (error as any).code = "STREAM_TRUNCATED";
+            (error as any).retryable = true;
+            throw error;
+        }
     } finally {
         await reader.cancel().catch(() => {});
         reader.releaseLock();

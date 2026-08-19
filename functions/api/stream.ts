@@ -1,6 +1,6 @@
 // Cloudflare Pages Function: POST /api/stream
-// 流式请求，SSE 透传 DeepSeek 的 stream 响应。
-// 改造点：在透传的同时解析末尾 chunk 的 usage 字段，累积到 D1 任务成本。
+// 流式请求，按完整 SSE 事件转发 DeepSeek 的 stream 响应。
+// 转发期间解析末尾 chunk 的 usage 字段，并累积到 D1 任务成本。
 
 import { accumulateCost, type UsageBreakdown } from "../_lib/quota";
 import {
@@ -79,13 +79,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         payload.thinking = {type: "enabled"};
     }
 
-    // 空闲超时:连续 IDLE_MS 无字节才 abort（掐真正断死的连接；长思考只要还在流就不误杀）。
-    const IDLE_MS = 120000;
-    const ctrl = new AbortController();
-    let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE_MS); };
-    arm();
-
     let resp: Response;
     try {
         resp = await fetch(llm.url, {
@@ -95,19 +88,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 "Authorization": "Bearer " + llm.apiKey,
             },
             body: JSON.stringify(payload),
-            signal: ctrl.signal,
         });
     } catch {
-        clearTimeout(idle);
-        return new Response(JSON.stringify({ error: "与模型服务连接失败或超时" }), {
-            status: 504, headers: { "Content-Type": "application/json" },
+        return new Response(JSON.stringify({ error: "与模型服务连接失败" }), {
+            status: 502, headers: { "Content-Type": "application/json" },
         });
     }
 
-    if (!resp.ok) { clearTimeout(idle); return new Response(await resp.text(), {status: resp.status}); }
-    if (!resp.body) { clearTimeout(idle); return new Response("Empty response", {status: 502}); }
+    if (!resp.ok) return new Response(await resp.text(), {status: resp.status});
+    if (!resp.body) return new Response("Empty response", {status: 502});
 
-    // 用 TransformStream 包一层：原样 forward 给前端，同时本端解析 usage
+    // 用 TransformStream 包一层：事件级转发给前端，同时本端解析 usage。
     const upstream = resp.body;
     const { readable, writable } = new TransformStream<Uint8Array>();
     const writer = writable.getWriter();
@@ -118,31 +109,78 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const reader = upstream.getReader();
         let buffer = "";
         let usage: UsageBreakdown | undefined;
-        try {
+        let upstreamDone = false;
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        const maxPendingEventChars = 1_000_000;
+
+        const inspectEvent = (eventText: string) => {
+            const payloadStr = eventText
+                .split(/\r?\n/)
+                .map(line => line.trimStart())
+                .filter(line => line.startsWith("data:"))
+                .map(line => line.slice(5).trimStart())
+                .join("\n")
+                .trim();
+            if (!payloadStr) return;
+            if (payloadStr === "[DONE]") {
+                upstreamDone = true;
+                if (heartbeat) {
+                    clearInterval(heartbeat);
+                    heartbeat = undefined;
+                }
+                return;
+            }
+            try {
+                const chunk = JSON.parse(payloadStr);
+                if (chunk.usage) usage = chunk.usage;
+            } catch { /* skip non-JSON events */ }
+        };
+
+        const forwardCompleteEvents = async () => {
             while (true) {
+                const boundary = /\r?\n\r?\n/.exec(buffer);
+                if (!boundary) return;
+                const eventText = buffer.slice(0, boundary.index);
+                buffer = buffer.slice(boundary.index + boundary[0].length);
+                inspectEvent(eventText);
+                await writer.write(encoder.encode(eventText + boundary[0]));
+            }
+        };
+
+        // 只在完整 SSE 事件之间插入注释心跳，避免破坏被网络分块截开的 JSON 事件。
+        heartbeat = setInterval(() => {
+            writer.write(encoder.encode(": heartbeat\n\n")).catch(() => { });
+        }, 12_000);
+        try {
+            while (!upstreamDone) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                arm(); // 收到上游字节就续命
-                // 原样转发给前端
-                await writer.write(value);
-                // 本端解析 SSE 找 usage
                 buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop() ?? "";
-                for (const line of lines) {
-                    const t = line.trim();
-                    if (!t.startsWith("data:")) continue;
-                    const payloadStr = t.slice(5).trim();
-                    if (payloadStr === "[DONE]") continue;
-                    try {
-                        const chunk = JSON.parse(payloadStr);
-                        if (chunk.usage) usage = chunk.usage;
-                    } catch { /* skip */ }
+                await forwardCompleteEvents();
+                if (buffer.length > maxPendingEventChars) {
+                    throw new Error("upstream SSE event exceeded the size limit");
                 }
             }
-        } catch { /* upstream broken, end anyway */ }
-        finally {
-            clearTimeout(idle);
+            buffer += decoder.decode();
+            await forwardCompleteEvents();
+            if (!upstreamDone) throw new Error("upstream stream ended before [DONE]");
+        } catch {
+            if (!upstreamDone) {
+                try {
+                    await writer.write(encoder.encode(`data: ${JSON.stringify({
+                        type: "error",
+                        error: "模型流连接异常，请重试",
+                        code: "STREAM_TRUNCATED",
+                        status: 502,
+                        retryable: true,
+                    })}\n\n`));
+                    await writer.write(encoder.encode("data: [DONE]\n\n"));
+                } catch { /* client disconnected */ }
+            }
+        } finally {
+            if (heartbeat) clearInterval(heartbeat);
+            try { await reader.cancel(); } catch { /* already closed */ }
+            try { reader.releaseLock(); } catch { /* already released */ }
             try { await writer.close(); } catch { /* already closed */ }
         }
 
@@ -162,6 +200,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
         },
     });
 };
