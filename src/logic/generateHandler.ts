@@ -1194,6 +1194,7 @@ type SSEReadOptions = {
     preflightStage?: PreflightStage;
     requireDone?: boolean;
     runId?: number;
+    onActivity?: () => void;
 };
 
 /** Read an SSE stream, dispatch events to genTask, return the result event. */
@@ -1228,9 +1229,10 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
     }
 
     try {
-        while (true) {
+        readLoop: while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            if (value.byteLength > 0) opts?.onActivity?.();
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop()!;
@@ -1241,7 +1243,7 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                 const payload = trimmed.slice(5).trim();
                 if (payload === "[DONE]") {
                     receivedDone = true;
-                    continue;
+                    break readLoop;
                 }
 
                 let evt: any;
@@ -1369,6 +1371,9 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                         case "result":
                             result = evt;
                             break;
+                        case "heartbeat":
+                            // Transport activity is recorded before parsing the event.
+                            break;
                         case "debug":
                             genTask.debugLog.push(evt);
                             if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
@@ -1472,8 +1477,43 @@ async function streamBucketGeneration(
     return await readSSE(resp, { runId });
 }
 
-const PREFLIGHT_WAIT_MS = 390_000;
+// The server allows up to 360s of work plus bounded finalization. A 400s client
+// attempt leaves network margin for terminal events while the server renews its 120s lease.
+const PREFLIGHT_WAIT_MS = 900_000;
+const PREFLIGHT_ATTEMPT_MS = 400_000;
+const PREFLIGHT_TRANSPORT_IDLE_MS = 45_000;
 const PREFLIGHT_RETRIES = 3;
+
+type PreflightTimeoutKind = "transport_idle" | "attempt_deadline" | "overall_deadline";
+
+class PreflightTimeoutError extends Error {
+    readonly code: string;
+    readonly retryable = true;
+    readonly timeoutKind: PreflightTimeoutKind;
+
+    constructor(label: string, kind: PreflightTimeoutKind) {
+        const message = kind === "transport_idle"
+            ? `${label}连接长时间未收到数据`
+            : kind === "attempt_deadline"
+                ? `${label}单次请求超过前端等待上限`
+                : `${label}超过前端总等待上限，请重试`;
+        super(message);
+        this.name = "PreflightTimeoutError";
+        this.code = kind === "transport_idle"
+            ? "PREFLIGHT_TRANSPORT_TIMEOUT"
+            : kind === "attempt_deadline"
+                ? "PREFLIGHT_ATTEMPT_TIMEOUT"
+                : "PREFLIGHT_OVERALL_TIMEOUT";
+        this.timeoutKind = kind;
+    }
+}
+
+function preflightAbortError(controller: AbortController): Error | null {
+    if (!controller.signal.aborted) return null;
+    const reason = controller.signal.reason;
+    if (reason instanceof PreflightTimeoutError) return reason;
+    return generationAbortError();
+}
 
 type PreflightRequestConfig = {
     endpoint: string;
@@ -1535,25 +1575,77 @@ function attachApiError(
 }
 
 async function streamPreflightRequest(config: PreflightRequestConfig): Promise<any> {
-    generationSignal();
+    const rootSignal = generationSignal();
     const runId = generationRunId;
     const deadline = Date.now() + PREFLIGHT_WAIT_MS;
+    const leaseLostCode = config.stage === "clarify" ? "CLARIFY_LEASE_LOST" : "GRADE_LEASE_LOST";
     let failures = 0;
     let announcedWait = false;
     let requestId = config.requestId;
     let payload: Record<string, unknown> | null = config.payload;
 
     while (true) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+            throw new PreflightTimeoutError(config.label, "overall_deadline");
+        }
         const controller = new AbortController();
         const unlinkRootAbort = linkGenerationAbort(controller);
         config.setController(controller);
+        let attemptTimer: ReturnType<typeof setTimeout> | undefined;
+        let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const clearAttemptTimers = () => {
+            if (attemptTimer) clearTimeout(attemptTimer);
+            if (transportIdleTimer) clearTimeout(transportIdleTimer);
+            attemptTimer = undefined;
+            transportIdleTimer = undefined;
+        };
+        const abortForTimeout = (kind: PreflightTimeoutKind) => {
+            if (!controller.signal.aborted) {
+                controller.abort(new PreflightTimeoutError(config.label, kind));
+            }
+        };
+        const attemptBudgetMs = Math.min(PREFLIGHT_ATTEMPT_MS, remainingMs);
+        const attemptTimeoutKind: PreflightTimeoutKind = attemptBudgetMs >= remainingMs
+            ? "overall_deadline"
+            : "attempt_deadline";
+        attemptTimer = setTimeout(() => abortForTimeout(attemptTimeoutKind), attemptBudgetMs);
+        const recordTransportActivity = () => {
+            if (controller.signal.aborted) return;
+            if (transportIdleTimer) clearTimeout(transportIdleTimer);
+            transportIdleTimer = setTimeout(
+                () => abortForTimeout("transport_idle"),
+                PREFLIGHT_TRANSPORT_IDLE_MS,
+            );
+        };
+        recordTransportActivity();
+
+        const waitForNextAttempt = async (delayMs: number) => {
+            clearAttemptTimers();
+            const waitRemainingMs = deadline - Date.now();
+            if (waitRemainingMs <= 0) {
+                throw new PreflightTimeoutError(config.label, "overall_deadline");
+            }
+            await waitWithAbort(Math.min(delayMs, waitRemainingMs), rootSignal);
+        };
 
         const retry = async (error: any, reason: string) => {
-            if (Date.now() >= deadline || failures >= PREFLIGHT_RETRIES) throw error;
+            if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
+            if (error instanceof PreflightTimeoutError && error.timeoutKind === "overall_deadline") {
+                throw error;
+            }
+            const retryRemainingMs = deadline - Date.now();
+            if (retryRemainingMs <= 0 || failures >= PREFLIGHT_RETRIES) {
+                if (retryRemainingMs <= 0) {
+                    throw new PreflightTimeoutError(config.label, "overall_deadline");
+                }
+                throw error;
+            }
             failures++;
             const delay = 2000 * Math.pow(2, failures - 1);
             genTask.logs.push(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
-            await waitWithAbort(delay, controller.signal);
+            await waitForNextAttempt(Math.min(delay, retryRemainingMs));
         };
 
         try {
@@ -1569,12 +1661,17 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     }),
                     signal: controller.signal,
                 });
+                recordTransportActivity();
                 assertGenerationRun(runId);
             } catch (error: any) {
-                if (controller.signal.aborted) {
-                    const aborted = new Error("interrupted");
-                    aborted.name = "AbortError";
-                    throw aborted;
+                if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
+                const abortError = preflightAbortError(controller);
+                if (abortError) {
+                    if (abortError instanceof PreflightTimeoutError) {
+                        await retry(abortError, abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时");
+                        continue;
+                    }
+                    throw abortError;
                 }
                 if (isInterrupt(error)) throw error;
                 await retry(error, "连接中断");
@@ -1603,7 +1700,15 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(response.headers.get("Retry-After")) || 2);
-                    await waitWithAbort(retrySeconds * 1000, controller.signal);
+                    await waitForNextAttempt(retrySeconds * 1000);
+                    continue;
+                }
+                if (apiError.code === leaseLostCode && Date.now() < deadline) {
+                    const leaseError = attachApiError(apiError.message, {
+                        code: apiError.code,
+                        status: response.status,
+                    });
+                    await retry(leaseError, "执行权失效");
                     continue;
                 }
                 const conflict = attachApiError(apiError.message, {
@@ -1638,12 +1743,17 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     preflightStage: config.stage,
                     requireDone: true,
                     runId,
+                    onActivity: recordTransportActivity,
                 });
             } catch (error: any) {
-                if (controller.signal.aborted) {
-                    const aborted = new Error("interrupted");
-                    aborted.name = "AbortError";
-                    throw aborted;
+                if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
+                const abortError = preflightAbortError(controller);
+                if (abortError) {
+                    if (abortError instanceof PreflightTimeoutError) {
+                        await retry(abortError, abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时");
+                        continue;
+                    }
+                    throw abortError;
                 }
                 if (isInterrupt(error) || error?.terminal) throw error;
                 await retry(error, "连接中断");
@@ -1664,7 +1774,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(result.retryAfter) || 2);
-                    await waitWithAbort(retrySeconds * 1000, controller.signal);
+                    await waitForNextAttempt(retrySeconds * 1000);
                     continue;
                 }
                 const error = attachApiError(String(result.error), {
@@ -1675,9 +1785,10 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     terminal: result.retryable === false,
                 });
                 (error as any).retryable = result.retryable !== false;
-                if (((error as any).status >= 400 && (error as any).status < 500)
+                const retryableLeaseLoss = code === leaseLostCode && result.retryable !== false;
+                if (!retryableLeaseLoss && (((error as any).status >= 400 && (error as any).status < 500)
                     || code.endsWith("_REQUEST_CONFLICT")
-                    || code.endsWith("_RECOVERY_REQUIRED")) {
+                    || code.endsWith("_RECOVERY_REQUIRED"))) {
                     (error as any).noRetry = true;
                     throw error;
                 }
@@ -1688,7 +1799,20 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 throw error;
             }
             return result;
+        } catch (error: any) {
+            if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
+            const abortError = preflightAbortError(controller);
+            if (abortError instanceof PreflightTimeoutError) {
+                await retry(
+                    abortError,
+                    abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时",
+                );
+                continue;
+            }
+            if (abortError) throw abortError;
+            throw error;
         } finally {
+            clearAttemptTimers();
             unlinkRootAbort();
             config.clearController(controller);
         }

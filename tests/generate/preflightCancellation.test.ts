@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const getOwnedTaskMock = vi.hoisted(() => vi.fn());
 const acquireTaskOperationLeaseMock = vi.hoisted(() => vi.fn());
+const renewTaskOperationLeaseMock = vi.hoisted(() => vi.fn());
 const putTaskWithOperationLeaseMock = vi.hoisted(() => vi.fn());
 const putTaskWithOperationLeaseAndCostMock = vi.hoisted(() => vi.fn());
 const releaseTaskOperationLeaseMock = vi.hoisted(() => vi.fn());
@@ -14,6 +15,7 @@ vi.mock("../../functions/_lib/taskStore", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     getOwnedTask: getOwnedTaskMock,
     acquireTaskOperationLease: acquireTaskOperationLeaseMock,
+    renewTaskOperationLease: renewTaskOperationLeaseMock,
     putTaskWithOperationLease: putTaskWithOperationLeaseMock,
     putTaskWithOperationLeaseAndCost: putTaskWithOperationLeaseAndCostMock,
     releaseTaskOperationLease: releaseTaskOperationLeaseMock,
@@ -100,6 +102,7 @@ function prepareState(stage: Stage): { readState: () => any } {
     let raw = JSON.stringify(baseState(stage));
     getOwnedTaskMock.mockImplementation(async () => raw);
     acquireTaskOperationLeaseMock.mockResolvedValue("d1");
+    renewTaskOperationLeaseMock.mockResolvedValue(true);
     putTaskWithOperationLeaseMock.mockImplementation(async (
         _env: unknown,
         _taskId: string,
@@ -132,7 +135,7 @@ function prepareState(stage: Stage): { readState: () => any } {
     return { readState: () => JSON.parse(raw) };
 }
 
-async function expectCancellation(stage: Stage): Promise<void> {
+async function expectRecoverableDisconnect(stage: Stage): Promise<void> {
     const { readState } = prepareState(stage);
     const clientAbort = new AbortController();
     const waitUntilPromises: Promise<unknown>[] = [];
@@ -173,15 +176,17 @@ async function expectCancellation(stage: Stage): Promise<void> {
     const record = operations.at(-1);
     expect(record).toMatchObject({
         requestId: stage === "clarify" ? CLARIFY_REQUEST_ID : GRADE_REQUEST_ID,
-        status: "cancelled",
+        status: "retryable",
         billingSettled: true,
-        lastError: "客户端已取消",
+        lastError: "传输连接已中断，可恢复当前请求",
     });
+    expect(record).not.toHaveProperty("completedAt");
     expect(record).not.toHaveProperty("result");
     expect(putTaskWithOperationLeaseAndCostMock).toHaveBeenCalledOnce();
     const costCommit = putTaskWithOperationLeaseAndCostMock.mock.calls[0];
     expect(costCommit[5]).toBe(0);
-    expect(costCommit[8]).toBe(true);
+    expect(costCommit[8]).toBe(false);
+    expect(releaseTaskOperationLeaseMock).toHaveBeenCalledOnce();
     expect(settleTaskCostQuotaMock).not.toHaveBeenCalled();
     expect(usageCostMock).not.toHaveBeenCalled();
 }
@@ -210,12 +215,12 @@ describe("preflight cancelled operations", () => {
     });
 });
 
-describe("preflight client cancellation", () => {
-    it("cancels Clarify upstream work without retry output or fabricated usage", async () => {
-        await expectCancellation("clarify");
+describe("preflight client disconnect recovery", () => {
+    it("stops Clarify upstream work and preserves a recoverable request without fabricated usage", async () => {
+        await expectRecoverableDisconnect("clarify");
     });
 
-    it("cancels Grade upstream work without retry output or fabricated usage", async () => {
-        await expectCancellation("grade");
+    it("stops Grade upstream work and preserves a recoverable request without fabricated usage", async () => {
+        await expectRecoverableDisconnect("grade");
     });
 });

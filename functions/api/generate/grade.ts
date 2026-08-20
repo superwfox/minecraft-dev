@@ -10,6 +10,7 @@ import {
     putTaskWithOperationLease,
     putTaskWithOperationLeaseAndCost,
     releaseTaskOperationLease,
+    renewTaskOperationLease,
     type TaskOperationLeaseMode,
 } from "../../_lib/taskStore";
 import {
@@ -34,10 +35,22 @@ import {
     linkAbortSignal,
     linkClientAbortSignal,
 } from "../../_lib/clientAbort";
+import {
+    assertPreflightActive,
+    createPreflightDeadline,
+    createPreflightIdleDeadline,
+    isPreflightTimeout,
+    PREFLIGHT_LEASE_MS,
+    PREFLIGHT_LEASE_RENEW_MS,
+    PREFLIGHT_OPERATION_MS,
+    PREFLIGHT_STATE_FINALIZE_MS,
+    PREFLIGHT_TERMINAL_WRITE_MS,
+    PREFLIGHT_UPSTREAM_IDLE_MS,
+    type PreflightDeadline,
+    withPreflightDeadline,
+} from "../../_lib/preflightDeadline";
 
-const GRADE_IDLE_MS = 120_000;
-const GRADE_OPERATION_MS = 350_000;
-const GRADE_LEASE_MS = 360_000;
+const GRADE_TIMEOUT_MESSAGE = "复杂度分级处理超时";
 
 interface Env {
     DB?: D1Database;
@@ -65,10 +78,17 @@ async function writeSSE(
     encoder: TextEncoder,
     data: any,
     operationAbort: AbortController,
+    signal: AbortSignal,
 ): Promise<void> {
     try {
-        await writer.write(sseEvent(encoder, data));
+        await withPreflightDeadline(
+            () => writer.write(sseEvent(encoder, data)),
+            signal,
+            "复杂度分级响应写入超时",
+        );
     } catch (error) {
+        if (isClientCancelled(error)) throw error;
+        if (signal.aborted) assertPreflightActive(signal, "复杂度分级响应写入超时");
         abortOnWriteFailure(operationAbort, error, "Grade client disconnected");
     }
 }
@@ -98,14 +118,13 @@ async function callReasoner(
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
     const unlinkParent = linkAbortSignal(ctrl, parentSignal);
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    const armIdle = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => ctrl.abort(), GRADE_IDLE_MS);
-    };
-    armIdle();
+    const idleDeadline = createPreflightIdleDeadline(
+        PREFLIGHT_UPSTREAM_IDLE_MS,
+        "复杂度分级模型长时间无有效输出",
+        ctrl.signal,
+    );
     try {
-        const resp = await fetch(url, {
+        const resp = await withPreflightDeadline(() => fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
             body: JSON.stringify({
@@ -116,19 +135,28 @@ async function callReasoner(
                 stream_options: { include_usage: true },
                 messages: [{ role: "system", content: system }, { role: "user", content: user }],
             }),
-            signal: ctrl.signal,
-        });
-        await assertOpenAIResponse(resp);
-        armIdle();
-        const streamed = await consumeOpenAIChatStream(resp, {
-            onActivity: armIdle,
+            signal: idleDeadline.signal,
+        }), idleDeadline.signal, "复杂度分级模型连接超时");
+        await withPreflightDeadline(
+            () => assertOpenAIResponse(resp),
+            idleDeadline.signal,
+            "读取复杂度分级模型错误响应超时",
+        );
+        idleDeadline.arm();
+        const streamed = await withPreflightDeadline(() => consumeOpenAIChatStream(resp, {
             requireUsage,
-            onThinking,
-            onOutput,
-        });
+            onThinking: async content => {
+                idleDeadline.arm();
+                await onThinking(content);
+            },
+            onOutput: async content => {
+                idleDeadline.arm();
+                await onOutput(content);
+            },
+        }), idleDeadline.signal, "复杂度分级模型长时间无有效输出");
         return { content: streamed.content, usage: streamed.usage };
     } finally {
-        if (idleTimer) clearTimeout(idleTimer);
+        idleDeadline.dispose();
         unlinkParent();
     }
 }
@@ -169,9 +197,9 @@ function gradeError(error: unknown): {
             retryAfter: 2,
         };
     }
-    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+    if (isPreflightTimeout(error)) {
         return {
-            message: "复杂度分级模型响应超时",
+            message: GRADE_TIMEOUT_MESSAGE,
             code: "GRADE_TIMEOUT",
             status: 504,
             retryable: true,
@@ -188,16 +216,24 @@ function gradeError(error: unknown): {
 }
 
 function assertGradeOperationActive(signal: AbortSignal): void {
-    if (!signal.aborted) return;
-    if (signal.reason instanceof Error) throw signal.reason;
-    const error = new Error("Grade operation timed out");
-    error.name = "AbortError";
-    throw error;
+    assertPreflightActive(signal, GRADE_TIMEOUT_MESSAGE);
 }
 
-export const onRequestPost: PagesFunction<Env> = async (context) => {
+type GradeContext = Parameters<PagesFunction<Env>>[0];
+
+async function handleGradeRequest(
+    context: GradeContext,
+    operationAbort: AbortController,
+    operationDeadline: PreflightDeadline,
+    handoffOperation: () => void,
+    disposeOperation: () => void,
+): Promise<Response> {
     const uid: string = (context.data as any)?.uid || "";
-    const body = await context.request.json() as any;
+    const body = await withPreflightDeadline(
+        () => context.request.json() as Promise<any>,
+        operationDeadline.signal,
+        "读取复杂度分级请求超时",
+    );
     const taskId = typeof body.taskId === "string" ? body.taskId : "";
     const requestId = parsePreflightRequestId("grade", body.gradeRequestId);
     if (!requestId) {
@@ -205,12 +241,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const suppliedInput = normalizedGradeInput(body);
-    const suppliedInputHash = await preflightInputHash(suppliedInput);
+    const suppliedInputHash = await withPreflightDeadline(
+        () => preflightInputHash(suppliedInput),
+        operationDeadline.signal,
+        "计算复杂度分级请求标识超时",
+    );
     const hasExplicitInput = hasExplicitGradeInput(body);
-    let raw = await getOwnedTask(context.env, taskId, uid);
+    let raw = await withPreflightDeadline(
+        () => getOwnedTask(context.env, taskId, uid),
+        operationDeadline.signal,
+        "读取复杂度分级任务状态超时",
+    );
     if (!raw) return preflightJsonError("Task not found", "TASK_NOT_FOUND", 404);
     let state = JSON.parse(raw);
-    const llm = await resolveTaskLLM(context, state);
+    const llm = await withPreflightDeadline(
+        () => resolveTaskLLM(context, state),
+        operationDeadline.signal,
+        "解析复杂度分级模型配置超时",
+    );
     if (!llm) return deepSeekKeyRequiredResponse();
 
     const immediateRecord = findPreflightOperation(state, "grade", requestId);
@@ -229,21 +277,145 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const leaseToken = `grade:${requestId}:${crypto.randomUUID().replace(/-/g, "")}`;
     let leaseMode: TaskOperationLeaseMode | null = null;
     let leaseReleased = false;
+    let leaseReleasePromise: Promise<void> | null = null;
+    let leaseRenewalStopped = true;
+    let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+    let leaseRenewalPromise: Promise<void> | null = null;
+    const renewLease = (): Promise<void> => {
+        if (!leaseMode
+            || leaseReleased
+            || leaseRenewalStopped
+            || operationDeadline.signal.aborted) return Promise.resolve();
+        if (leaseRenewalPromise) return leaseRenewalPromise;
+        const renewalDeadline = createPreflightDeadline(
+            PREFLIGHT_STATE_FINALIZE_MS,
+            "续订复杂度分级执行权超时",
+            operationAbort.signal,
+        );
+        const renewal = (async () => {
+            try {
+                const renewed = await withPreflightDeadline(
+                    () => renewTaskOperationLease(
+                        context.env,
+                        taskId,
+                        uid,
+                        leaseToken,
+                        PREFLIGHT_LEASE_MS,
+                    ),
+                    renewalDeadline.signal,
+                    "续订复杂度分级执行权超时",
+                );
+                if (!renewed) throw new GradeLeaseLostError();
+            } catch (error) {
+                if (leaseRenewalStopped
+                    || operationDeadline.signal.aborted
+                    || operationAbort.signal.aborted) return;
+                const leaseError = new GradeLeaseLostError();
+                console.warn("grade lease renewal failed", error);
+                operationAbort.abort(leaseError);
+                throw leaseError;
+            } finally {
+                renewalDeadline.dispose();
+            }
+        })();
+        leaseRenewalPromise = renewal;
+        renewal.then(
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+        );
+        return renewal;
+    };
+    const startLeaseRenewal = async () => {
+        if (!leaseMode || leaseReleased) return;
+        leaseRenewalStopped = false;
+        await renewLease();
+        if (leaseRenewalStopped
+            || leaseReleased
+            || operationDeadline.signal.aborted
+            || operationAbort.signal.aborted) return;
+        leaseRenewalTimer = setInterval(() => {
+            void renewLease().catch(() => { /* operation signal carries lease loss */ });
+        }, PREFLIGHT_LEASE_RENEW_MS);
+    };
+    const stopLeaseRenewal = () => {
+        leaseRenewalStopped = true;
+        if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
+        leaseRenewalTimer = null;
+    };
+    const waitForLeaseRenewal = async () => {
+        const pending = leaseRenewalPromise;
+        if (!pending) return;
+        try { await pending; } catch { /* operation signal carries lease loss */ }
+    };
+    const startLeaseRelease = (): Promise<void> => {
+        if (!leaseMode || leaseReleased) return Promise.resolve();
+        if (!leaseReleasePromise) {
+            leaseReleasePromise = releaseTaskOperationLease(
+                context.env,
+                taskId,
+                uid,
+                leaseToken,
+                leaseMode,
+            ).then(
+                released => {
+                    leaseReleased = released;
+                    if (!released) leaseReleasePromise = null;
+                },
+                error => {
+                    leaseReleasePromise = null;
+                    throw error;
+                },
+            );
+        }
+        return leaseReleasePromise;
+    };
+    const scheduleLeaseRelease = () => {
+        stopLeaseRenewal();
+        if (!leaseMode || leaseReleased) return;
+        context.waitUntil((async () => {
+            await waitForLeaseRenewal();
+            if (leaseReleased) return;
+            const cleanupDeadline = createPreflightDeadline(
+                PREFLIGHT_STATE_FINALIZE_MS,
+                "释放复杂度分级执行权超时",
+            );
+            try {
+                await withPreflightDeadline(
+                    startLeaseRelease,
+                    cleanupDeadline.signal,
+                    "释放复杂度分级执行权超时",
+                );
+            } catch (error) {
+                console.warn("grade lease release failed", error);
+            } finally {
+                cleanupDeadline.dispose();
+            }
+        })());
+    };
     try {
-        leaseMode = await acquireTaskOperationLease(
-            context.env,
-            taskId,
-            uid,
-            leaseToken,
-            GRADE_LEASE_MS,
+        leaseMode = await withPreflightDeadline(
+            () => acquireTaskOperationLease(
+                context.env,
+                taskId,
+                uid,
+                leaseToken,
+                PREFLIGHT_LEASE_MS,
+            ),
+            operationDeadline.signal,
+            "获取复杂度分级执行权超时",
         );
     } catch (error) {
+        if (isClientCancelled(error) || isPreflightTimeout(error)) throw error;
         console.warn("grade lease acquisition failed", error);
         return preflightJsonError("复杂度分级状态存储暂不可用", "GRADE_STORE_UNAVAILABLE", 503, 2);
     }
 
     if (!leaseMode) {
-        const latestRaw = await getOwnedTask(context.env, taskId, uid);
+        const latestRaw = await withPreflightDeadline(
+            () => getOwnedTask(context.env, taskId, uid),
+            operationDeadline.signal,
+            "读取复杂度分级恢复状态超时",
+        );
         const latestState = latestRaw ? JSON.parse(latestRaw) : null;
         const latestRecord = latestState ? findPreflightOperation(latestState, "grade", requestId) : undefined;
         if (latestRecord && hasExplicitInput && latestRecord.inputHash !== suppliedInputHash) {
@@ -265,76 +437,104 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         );
     }
 
-    const operationAbort = new AbortController();
-    const unlinkClientAbort = linkClientAbortSignal(
-        operationAbort,
-        context.request.signal,
-        "Grade client disconnected",
-    );
-    const operationTimer = setTimeout(() => operationAbort.abort(), GRADE_OPERATION_MS);
-    let streamOwnsDeadline = false;
-
-    const releaseLease = async () => {
-        if (!leaseMode || leaseReleased) return;
-        leaseReleased = await releaseTaskOperationLease(
-            context.env,
-            taskId,
-            uid,
-            leaseToken,
-            leaseMode,
-        );
-    };
-    const persistState = async (release = false) => {
-        const committed = await putTaskWithOperationLease(
-            context.env,
-            taskId,
-            JSON.stringify(state),
-            leaseToken,
-            leaseMode!,
-            3600,
-            uid,
-            release,
+    const persistState = async (
+        release = false,
+        signal = operationDeadline.signal,
+    ) => {
+        if (release) {
+            stopLeaseRenewal();
+            await waitForLeaseRenewal();
+        }
+        const committed = await withPreflightDeadline(
+            () => putTaskWithOperationLease(
+                context.env,
+                taskId,
+                JSON.stringify(state),
+                leaseToken,
+                leaseMode!,
+                3600,
+                uid,
+                release,
+            ),
+            signal,
+            "持久化复杂度分级状态超时",
         );
         if (!committed) throw new GradeLeaseLostError();
         if (release) leaseReleased = true;
     };
 
     try {
-        raw = await getOwnedTask(context.env, taskId, uid);
-        assertGradeOperationActive(operationAbort.signal);
+        await startLeaseRenewal();
+        assertGradeOperationActive(operationDeadline.signal);
+        raw = await withPreflightDeadline(
+            () => getOwnedTask(context.env, taskId, uid),
+            operationDeadline.signal,
+            "重新读取复杂度分级任务状态超时",
+        );
+        assertGradeOperationActive(operationDeadline.signal);
         if (!raw) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("Task state unavailable", "TASK_STATE_UNAVAILABLE", 503, 2);
         }
         state = JSON.parse(raw);
 
         let record = findPreflightOperation(state, "grade", requestId);
         if (record && hasExplicitInput && record.inputHash !== suppliedInputHash) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("同一 gradeRequestId 携带了不同输入", "GRADE_REQUEST_CONFLICT", 409);
         }
 
         if (record?.status === "completed") {
             if (!record.billingSettled) {
-                const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                assertGradeOperationActive(operationAbort.signal);
+                const settlement = await withPreflightDeadline(
+                    () => settleTaskCostQuota(context.env, uid, taskId),
+                    operationDeadline.signal,
+                    "结算复杂度分级用量超时",
+                );
+                assertGradeOperationActive(operationDeadline.signal);
                 state.totalCost = settlement.total;
                 state.consumedQuota = settlement.consumed;
                 state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
                 record.billingSettled = true;
-                if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+                if (settlement.outOfQuota) {
+                    await withPreflightDeadline(
+                        () => markTaskQuotaExhausted(context.env, taskId, uid),
+                        operationDeadline.signal,
+                        "持久化复杂度分级配额状态超时",
+                    );
+                }
                 await persistState(true);
-                assertGradeOperationActive(operationAbort.signal);
+                assertGradeOperationActive(operationDeadline.signal);
             } else {
-                await releaseLease();
+                scheduleLeaseRelease();
             }
             return replayPreflightResult("grade", record);
         }
         if (record?.status === "cancelled") {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("复杂度分级请求已取消", "GRADE_CANCELLED", 409, undefined, {
                 retryable: false,
             });
+        }
+        if (record?.status === "retryable" && !record.billingSettled) {
+            const settlement = await withPreflightDeadline(
+                () => settleTaskCostQuota(context.env, uid, taskId),
+                operationDeadline.signal,
+                "结算待恢复的复杂度分级用量超时",
+            );
+            state.totalCost = settlement.total;
+            state.consumedQuota = settlement.consumed;
+            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+            record.billingSettled = true;
+            if (settlement.outOfQuota) {
+                await withPreflightDeadline(
+                    () => markTaskQuotaExhausted(context.env, taskId, uid),
+                    operationDeadline.signal,
+                    "持久化待恢复的复杂度分级配额状态超时",
+                );
+            }
+            await persistState(false);
+            assertGradeOperationActive(operationDeadline.signal);
         }
 
         const enforcePreflightProtocol = Number(state.preflightProtocolVersion) >= 1;
@@ -345,7 +545,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (latestClarify
             && latestClarify.status !== "cancelled"
             && (latestClarify.status !== "completed" || !latestClarify.billingSettled)) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError(
                 "存在尚未完成的需求确认请求，请恢复原请求",
                 "CLARIFY_RECOVERY_REQUIRED",
@@ -356,17 +556,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         if (state.quotaExhausted && !llm.byok) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("充值额度已用尽", "QUOTA_EXHAUSTED", 402);
         }
         if (!state.clarifyDone || (enforcePreflightProtocol && !latestClarify)) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("澄清阶段尚未完成", "CLARIFY_NOT_COMPLETED", 409, 2);
         }
 
         const activeRecord = activePreflightOperation(state, "grade");
         if (activeRecord && activeRecord.requestId !== requestId) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError(
                 "存在尚未完成的复杂度分级请求，请恢复原请求",
                 "GRADE_RECOVERY_REQUIRED",
@@ -392,9 +592,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.grade = null;
         state.knowledgeNeeds = [];
         await persistState(false);
-        assertGradeOperationActive(operationAbort.signal);
+        assertGradeOperationActive(operationDeadline.signal);
 
-        assertGradeOperationActive(operationAbort.signal);
+        assertGradeOperationActive(operationDeadline.signal);
         if (!llm.apiKey) {
             record.status = "retryable";
             record.lastError = "API key not configured";
@@ -408,22 +608,104 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             );
         }
 
+        const attemptBaselineRaw = JSON.stringify(state);
         const { readable, writable } = new TransformStream<Uint8Array>();
         const encoder = new TextEncoder();
         const writer = writable.getWriter();
-        streamOwnsDeadline = true;
+        handoffOperation();
         const process = (async () => {
+            let terminalDeadline: PreflightDeadline | null = null;
+            const terminalSignal = () => {
+                if (!terminalDeadline) {
+                    terminalDeadline = createPreflightDeadline(
+                        PREFLIGHT_TERMINAL_WRITE_MS,
+                        "复杂度分级终态发送超时",
+                    );
+                }
+                return terminalDeadline.signal;
+            };
             const heartbeat = setInterval(() => {
-                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "grade", t: Date.now() }))
-                    .catch(error => {
-                        try { abortOnWriteFailure(operationAbort, error, "Grade client disconnected"); }
-                        catch { /* operation signal carries the cancellation */ }
-                    });
+                writeSSE(
+                    writer,
+                    encoder,
+                    { type: "heartbeat", stage: "grade", t: Date.now() },
+                    operationAbort,
+                    operationDeadline.signal,
+                ).catch(() => { /* operation signal carries timeout or cancellation */ });
             }, 12_000);
             let resultCommitted = false;
+            let resultCommitPending = false;
             let usage: UsageBreakdown | undefined;
+            const finalizeRetryableAttempt = async (
+                lastError: string,
+                label: "中断" | "失败",
+            ) => {
+                state = JSON.parse(attemptBaselineRaw);
+                record = findPreflightOperation(state, "grade", requestId);
+                if (!record) throw new GradeLeaseLostError();
+                record!.status = "retryable";
+                delete record!.completedAt;
+                record!.lastError = lastError;
+                delete record!.result;
+                const costDelta = !llm.byok && usage
+                    ? usageCost(llm.modelFor("pro"), usage)
+                    : 0;
+                record!.billingSettled = llm.byok || !usage;
+                const finalizeDeadline = createPreflightDeadline(
+                    PREFLIGHT_STATE_FINALIZE_MS,
+                    `收口复杂度分级${label}状态超时`,
+                );
+                try {
+                    const committed = await withPreflightDeadline(
+                        () => putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode!,
+                            costDelta,
+                            3600,
+                            uid,
+                            false,
+                        ),
+                        finalizeDeadline.signal,
+                        `提交复杂度分级${label}状态超时`,
+                    );
+                    if (!committed) throw new GradeLeaseLostError();
+                    if (!record!.billingSettled) {
+                        const settlement = await withPreflightDeadline(
+                            () => settleTaskCostQuota(context.env, uid, taskId),
+                            finalizeDeadline.signal,
+                            `结算复杂度分级${label}用量超时`,
+                        );
+                        state.totalCost = settlement.total;
+                        state.consumedQuota = settlement.consumed;
+                        state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                        record!.billingSettled = true;
+                        if (settlement.outOfQuota) {
+                            await withPreflightDeadline(
+                                () => markTaskQuotaExhausted(context.env, taskId, uid),
+                                finalizeDeadline.signal,
+                                `持久化复杂度分级${label}配额状态超时`,
+                            );
+                        }
+                        await persistState(false, finalizeDeadline.signal);
+                    }
+                } catch (finalizeError) {
+                    const kind = label === "中断" ? "interrupted" : "failure";
+                    console.warn(`grade ${kind} state finalization failed`, finalizeError);
+                } finally {
+                    finalizeDeadline.dispose();
+                }
+            };
             try {
-                await writeSSE(writer, encoder, { type: "phase", stage: "grade", phase: "grading" }, operationAbort);
+                await writeSSE(
+                    writer,
+                    encoder,
+                    { type: "phase", stage: "grade", phase: "grading" },
+                    operationAbort,
+                    operationDeadline.signal,
+                );
                 const correction = typeof record!.input.correction === "string"
                     ? record!.input.correction
                     : undefined;
@@ -442,13 +724,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     llm.modelFor("pro"),
                     prompt.system,
                     prompt.user,
-                    operationAbort.signal,
+                    operationDeadline.signal,
                     !llm.byok,
-                    content => writeSSE(writer, encoder, { type: "reasoning", stage: "grade", content }, operationAbort),
-                    content => writeSSE(writer, encoder, { type: "delta", stage: "grade", content }, operationAbort),
+                    content => writeSSE(
+                        writer,
+                        encoder,
+                        { type: "reasoning", stage: "grade", content },
+                        operationAbort,
+                        operationDeadline.signal,
+                    ),
+                    content => writeSSE(
+                        writer,
+                        encoder,
+                        { type: "delta", stage: "grade", content },
+                        operationAbort,
+                        operationDeadline.signal,
+                    ),
                 );
                 usage = callRes.usage;
-                assertGradeOperationActive(operationAbort.signal);
+                assertGradeOperationActive(operationDeadline.signal);
 
                 let parsed: any;
                 try {
@@ -524,7 +818,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         : { direct: true, level, learningRequired, learningNeedCount: knowledgeNeeds.length };
                 }
 
-                assertGradeOperationActive(operationAbort.signal);
+                assertGradeOperationActive(operationDeadline.signal);
                 record!.status = "completed";
                 record!.result = result;
                 record!.completedAt = Date.now();
@@ -533,43 +827,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const costDelta = !llm.byok && usage
                     ? usageCost(llm.modelFor("pro"), usage)
                     : 0;
-                const committed = await putTaskWithOperationLeaseAndCost(
-                    context.env,
-                    taskId,
-                    JSON.stringify(state),
-                    leaseToken,
-                    leaseMode!,
-                    costDelta,
-                    3600,
-                    uid,
-                    record!.billingSettled,
-                );
-                if (!committed) throw new GradeLeaseLostError();
-                resultCommitted = true;
-                if (record!.billingSettled) {
-                    leaseReleased = true;
-                } else {
-                    const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                    state.totalCost = settlement.total;
-                    state.consumedQuota = settlement.consumed;
-                    state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
-                    record!.billingSettled = true;
-                    if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
-                    await persistState(true);
-                }
-
-                await writeSSE(writer, encoder, { type: "result", stage: "grade", ...result }, operationAbort);
-            } catch (error) {
-                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
-                if (cancelled && !resultCommitted) {
-                    record!.status = "cancelled";
-                    record!.completedAt = Date.now();
-                    record!.lastError = "客户端已取消";
-                    delete record!.result;
-                    const costDelta = !llm.byok && usage ? usageCost(llm.modelFor("pro"), usage) : 0;
-                    record!.billingSettled = llm.byok || !usage;
-                    try {
-                        const committed = await putTaskWithOperationLeaseAndCost(
+                const committed = await withPreflightDeadline(
+                    () => {
+                        resultCommitPending = true;
+                        return putTaskWithOperationLeaseAndCost(
                             context.env,
                             taskId,
                             JSON.stringify(state),
@@ -578,49 +839,129 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             costDelta,
                             3600,
                             uid,
-                            record!.billingSettled,
+                            false,
+                        ).then(
+                            value => {
+                                resultCommitPending = false;
+                                if (value) resultCommitted = true;
+                                return value;
+                            },
+                            error => {
+                                resultCommitPending = false;
+                                throw error;
+                            },
                         );
-                        if (!committed) throw new GradeLeaseLostError();
-                        if (record!.billingSettled) {
-                            leaseReleased = true;
-                        } else {
-                            const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                            state.totalCost = settlement.total;
-                            state.consumedQuota = settlement.consumed;
-                            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
-                            record!.billingSettled = true;
-                            if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
-                            await persistState(true);
-                        }
-                    } catch { /* lease cleanup below preserves the cancellation */ }
+                    },
+                    operationDeadline.signal,
+                    "提交复杂度分级结果超时",
+                );
+                if (!committed) throw new GradeLeaseLostError();
+                if (!record!.billingSettled) {
+                    const settlement = await withPreflightDeadline(
+                        () => settleTaskCostQuota(context.env, uid, taskId),
+                        operationDeadline.signal,
+                        "结算复杂度分级用量超时",
+                    );
+                    state.totalCost = settlement.total;
+                    state.consumedQuota = settlement.consumed;
+                    state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                    record!.billingSettled = true;
+                    if (settlement.outOfQuota) {
+                        await withPreflightDeadline(
+                            () => markTaskQuotaExhausted(context.env, taskId, uid),
+                            operationDeadline.signal,
+                            "持久化复杂度分级配额状态超时",
+                        );
+                    }
+                    await persistState(false);
+                }
+
+                await writeSSE(
+                    writer,
+                    encoder,
+                    { type: "result", stage: "grade", ...result },
+                    operationAbort,
+                    terminalSignal(),
+                );
+            } catch (error) {
+                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
+                if (cancelled && !resultCommitted) {
+                    if (!resultCommitPending) {
+                        await finalizeRetryableAttempt("传输连接已中断，可恢复当前请求", "中断");
+                    }
                     return;
                 }
                 if (cancelled) return;
                 const mapped = gradeError(error);
                 if (!resultCommitted) {
-                    record!.status = "retryable";
-                    record!.lastError = mapped.message;
-                    try { await persistState(true); } catch { /* lease release below */ }
+                    if (resultCommitPending) {
+                        mapped.code = "GRADE_FINALIZATION_PENDING";
+                        mapped.status = 503;
+                        mapped.retryable = true;
+                        mapped.retryAfter = 2;
+                    } else {
+                        await finalizeRetryableAttempt(mapped.message, "失败");
+                    }
                 } else {
                     mapped.code = "GRADE_SETTLEMENT_PENDING";
                     mapped.status = 503;
                     mapped.retryable = true;
                     mapped.retryAfter = 2;
                 }
-                await writeSSE(writer, encoder, { type: "log", msg: `× 分级错误: ${mapped.message}` }, operationAbort);
-                await writeSSE(writer, encoder, {
-                    type: "error", stage: "grade", error: mapped.message, ...mapped,
-                }, operationAbort);
-                await writeSSE(writer, encoder, {
-                    type: "result", stage: "grade", error: mapped.message, ...mapped,
-                }, operationAbort);
+                const signal = terminalSignal();
+                try {
+                    await writeSSE(
+                        writer,
+                        encoder,
+                        { type: "log", msg: `× 分级错误: ${mapped.message}` },
+                        operationAbort,
+                        signal,
+                    );
+                    await writeSSE(writer, encoder, {
+                        type: "error", stage: "grade", error: mapped.message, ...mapped,
+                    }, operationAbort, signal);
+                    await writeSSE(writer, encoder, {
+                        type: "result", stage: "grade", error: mapped.message, ...mapped,
+                    }, operationAbort, signal);
+                } catch { /* bounded terminal delivery is best effort */ }
             } finally {
-                clearTimeout(operationTimer);
+                stopLeaseRenewal();
                 clearInterval(heartbeat);
-                unlinkClientAbort();
-                if (!leaseReleased) await releaseLease().catch(() => { });
-                try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
-                try { await writer.close(); } catch { /* already disconnected */ }
+                const signal = terminalSignal();
+                try {
+                    await withPreflightDeadline(
+                        () => writer.write(encoder.encode("data: [DONE]\n\n")),
+                        signal,
+                        "复杂度分级结束标记发送超时",
+                    );
+                } catch { /* disconnected or terminal budget exhausted */ }
+                let streamClosed = false;
+                try {
+                    await withPreflightDeadline(
+                        () => writer.close(),
+                        signal,
+                        "关闭复杂度分级响应流超时",
+                    );
+                    streamClosed = true;
+                } catch { /* already disconnected */ }
+                if (!streamClosed) {
+                    const abortDeadline = createPreflightDeadline(
+                        PREFLIGHT_TERMINAL_WRITE_MS,
+                        "终止复杂度分级响应流超时",
+                    );
+                    try {
+                        await withPreflightDeadline(
+                            () => writer.abort(signal.reason),
+                            abortDeadline.signal,
+                            "终止复杂度分级响应流超时",
+                        );
+                    } catch { /* stream already terminated */ }
+                    finally { abortDeadline.dispose(); }
+                }
+                await waitForLeaseRenewal();
+                terminalDeadline?.dispose();
+                disposeOperation();
+                scheduleLeaseRelease();
             }
         })();
 
@@ -633,7 +974,48 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             },
         });
     } catch (error) {
-        await releaseLease().catch(() => { });
+        scheduleLeaseRelease();
+        const mapped = gradeError(error);
+        return preflightJsonError(
+            mapped.message,
+            mapped.code,
+            mapped.status,
+            mapped.retryAfter,
+            { retryable: mapped.retryable },
+        );
+    }
+}
+
+export const onRequestPost: PagesFunction<Env> = async (context) => {
+    const operationAbort = new AbortController();
+    const unlinkClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Grade client disconnected",
+    );
+    const operationDeadline = createPreflightDeadline(
+        PREFLIGHT_OPERATION_MS,
+        GRADE_TIMEOUT_MESSAGE,
+        operationAbort.signal,
+    );
+    let operationHandedOff = false;
+    let operationDisposed = false;
+    const disposeOperation = () => {
+        if (operationDisposed) return;
+        operationDisposed = true;
+        operationDeadline.dispose();
+        unlinkClientAbort();
+    };
+
+    try {
+        return await handleGradeRequest(
+            context,
+            operationAbort,
+            operationDeadline,
+            () => { operationHandedOff = true; },
+            disposeOperation,
+        );
+    } catch (error) {
         const mapped = gradeError(error);
         return preflightJsonError(
             mapped.message,
@@ -643,9 +1025,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             { retryable: mapped.retryable },
         );
     } finally {
-        if (!streamOwnsDeadline) {
-            clearTimeout(operationTimer);
-            unlinkClientAbort();
-        }
+        if (!operationHandedOff) disposeOperation();
     }
 };

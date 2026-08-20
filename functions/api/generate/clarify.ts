@@ -8,6 +8,7 @@ import {
     putTaskWithOperationLease,
     putTaskWithOperationLeaseAndCost,
     releaseTaskOperationLease,
+    renewTaskOperationLease,
     type TaskOperationLeaseMode,
 } from "../../_lib/taskStore";
 import {
@@ -31,11 +32,23 @@ import {
     linkAbortSignal,
     linkClientAbortSignal,
 } from "../../_lib/clientAbort";
+import {
+    assertPreflightActive,
+    createPreflightDeadline,
+    createPreflightIdleDeadline,
+    isPreflightTimeout,
+    PREFLIGHT_LEASE_MS,
+    PREFLIGHT_LEASE_RENEW_MS,
+    PREFLIGHT_OPERATION_MS,
+    PREFLIGHT_STATE_FINALIZE_MS,
+    PREFLIGHT_TERMINAL_WRITE_MS,
+    PREFLIGHT_UPSTREAM_IDLE_MS,
+    type PreflightDeadline,
+    withPreflightDeadline,
+} from "../../_lib/preflightDeadline";
 
 const MAX_CLARIFY_ROUNDS = 5;
-const CLARIFY_IDLE_MS = 120_000;
-const CLARIFY_OPERATION_MS = 350_000;
-const CLARIFY_LEASE_MS = 360_000;
+const CLARIFY_TIMEOUT_MESSAGE = "需求确认处理超时";
 
 interface Env {
     DB?: D1Database;
@@ -63,10 +76,17 @@ async function writeSSE(
     encoder: TextEncoder,
     data: any,
     operationAbort: AbortController,
+    signal: AbortSignal,
 ): Promise<void> {
     try {
-        await writer.write(sseEvent(encoder, data));
+        await withPreflightDeadline(
+            () => writer.write(sseEvent(encoder, data)),
+            signal,
+            "需求确认响应写入超时",
+        );
     } catch (error) {
+        if (isClientCancelled(error)) throw error;
+        if (signal.aborted) assertPreflightActive(signal, "需求确认响应写入超时");
         abortOnWriteFailure(operationAbort, error, "Clarify client disconnected");
     }
 }
@@ -99,14 +119,13 @@ async function callReasoner(
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
     const unlinkParent = linkAbortSignal(ctrl, parentSignal);
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    const armIdle = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => ctrl.abort(), CLARIFY_IDLE_MS);
-    };
-    armIdle();
+    const idleDeadline = createPreflightIdleDeadline(
+        PREFLIGHT_UPSTREAM_IDLE_MS,
+        "需求确认模型长时间无有效输出",
+        ctrl.signal,
+    );
     try {
-        const resp = await fetch(url, {
+        const resp = await withPreflightDeadline(() => fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
             body: JSON.stringify({
@@ -117,19 +136,28 @@ async function callReasoner(
                 stream_options: { include_usage: true },
                 messages: [{ role: "system", content: system }, { role: "user", content: user }],
             }),
-            signal: ctrl.signal,
-        });
-        await assertOpenAIResponse(resp);
-        armIdle();
-        const streamed = await consumeOpenAIChatStream(resp, {
-            onActivity: armIdle,
+            signal: idleDeadline.signal,
+        }), idleDeadline.signal, "需求确认模型连接超时");
+        await withPreflightDeadline(
+            () => assertOpenAIResponse(resp),
+            idleDeadline.signal,
+            "读取需求确认模型错误响应超时",
+        );
+        idleDeadline.arm();
+        const streamed = await withPreflightDeadline(() => consumeOpenAIChatStream(resp, {
             requireUsage,
-            onThinking,
-            onOutput,
-        });
+            onThinking: async content => {
+                idleDeadline.arm();
+                await onThinking(content);
+            },
+            onOutput: async content => {
+                idleDeadline.arm();
+                await onOutput(content);
+            },
+        }), idleDeadline.signal, "需求确认模型长时间无有效输出");
         return { content: streamed.content, usage: streamed.usage };
     } finally {
-        if (idleTimer) clearTimeout(idleTimer);
+        idleDeadline.dispose();
         unlinkParent();
     }
 }
@@ -170,9 +198,9 @@ function clarifyError(error: unknown): {
             retryAfter: 2,
         };
     }
-    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+    if (isPreflightTimeout(error)) {
         return {
-            message: "需求确认模型响应超时",
+            message: CLARIFY_TIMEOUT_MESSAGE,
             code: "CLARIFY_TIMEOUT",
             status: 504,
             retryable: true,
@@ -189,16 +217,24 @@ function clarifyError(error: unknown): {
 }
 
 function assertClarifyOperationActive(signal: AbortSignal): void {
-    if (!signal.aborted) return;
-    if (signal.reason instanceof Error) throw signal.reason;
-    const error = new Error("Clarify operation timed out");
-    error.name = "AbortError";
-    throw error;
+    assertPreflightActive(signal, CLARIFY_TIMEOUT_MESSAGE);
 }
 
-export const onRequestPost: PagesFunction<Env> = async (context) => {
+type ClarifyContext = Parameters<PagesFunction<Env>>[0];
+
+async function handleClarifyRequest(
+    context: ClarifyContext,
+    operationAbort: AbortController,
+    operationDeadline: PreflightDeadline,
+    handoffOperation: () => void,
+    disposeOperation: () => void,
+): Promise<Response> {
     const uid: string = (context.data as any)?.uid || "";
-    const body = await context.request.json() as any;
+    const body = await withPreflightDeadline(
+        () => context.request.json() as Promise<any>,
+        operationDeadline.signal,
+        "读取需求确认请求超时",
+    );
     const taskId = typeof body.taskId === "string" ? body.taskId : "";
     const requestId = parsePreflightRequestId("clarify", body.clarifyRequestId);
     if (!requestId) {
@@ -206,12 +242,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const suppliedInput = normalizedClarifyInput(body);
-    const suppliedInputHash = await preflightInputHash(suppliedInput);
+    const suppliedInputHash = await withPreflightDeadline(
+        () => preflightInputHash(suppliedInput),
+        operationDeadline.signal,
+        "计算需求确认请求标识超时",
+    );
     const hasExplicitInput = hasExplicitClarifyInput(body);
-    let raw = await getOwnedTask(context.env, taskId, uid);
+    let raw = await withPreflightDeadline(
+        () => getOwnedTask(context.env, taskId, uid),
+        operationDeadline.signal,
+        "读取需求确认任务状态超时",
+    );
     if (!raw) return preflightJsonError("Task not found", "TASK_NOT_FOUND", 404);
     let state = JSON.parse(raw);
-    const llm = await resolveTaskLLM(context, state);
+    const llm = await withPreflightDeadline(
+        () => resolveTaskLLM(context, state),
+        operationDeadline.signal,
+        "解析需求确认模型配置超时",
+    );
     if (!llm) return deepSeekKeyRequiredResponse();
 
     const immediateRecord = findPreflightOperation(state, "clarify", requestId);
@@ -230,21 +278,145 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const leaseToken = `clarify:${requestId}:${crypto.randomUUID().replace(/-/g, "")}`;
     let leaseMode: TaskOperationLeaseMode | null = null;
     let leaseReleased = false;
+    let leaseReleasePromise: Promise<void> | null = null;
+    let leaseRenewalStopped = true;
+    let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+    let leaseRenewalPromise: Promise<void> | null = null;
+    const renewLease = (): Promise<void> => {
+        if (!leaseMode
+            || leaseReleased
+            || leaseRenewalStopped
+            || operationDeadline.signal.aborted) return Promise.resolve();
+        if (leaseRenewalPromise) return leaseRenewalPromise;
+        const renewalDeadline = createPreflightDeadline(
+            PREFLIGHT_STATE_FINALIZE_MS,
+            "续订需求确认执行权超时",
+            operationAbort.signal,
+        );
+        const renewal = (async () => {
+            try {
+                const renewed = await withPreflightDeadline(
+                    () => renewTaskOperationLease(
+                        context.env,
+                        taskId,
+                        uid,
+                        leaseToken,
+                        PREFLIGHT_LEASE_MS,
+                    ),
+                    renewalDeadline.signal,
+                    "续订需求确认执行权超时",
+                );
+                if (!renewed) throw new ClarifyLeaseLostError();
+            } catch (error) {
+                if (leaseRenewalStopped
+                    || operationDeadline.signal.aborted
+                    || operationAbort.signal.aborted) return;
+                const leaseError = new ClarifyLeaseLostError();
+                console.warn("clarify lease renewal failed", error);
+                operationAbort.abort(leaseError);
+                throw leaseError;
+            } finally {
+                renewalDeadline.dispose();
+            }
+        })();
+        leaseRenewalPromise = renewal;
+        renewal.then(
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+        );
+        return renewal;
+    };
+    const startLeaseRenewal = async () => {
+        if (!leaseMode || leaseReleased) return;
+        leaseRenewalStopped = false;
+        await renewLease();
+        if (leaseRenewalStopped
+            || leaseReleased
+            || operationDeadline.signal.aborted
+            || operationAbort.signal.aborted) return;
+        leaseRenewalTimer = setInterval(() => {
+            void renewLease().catch(() => { /* operation signal carries lease loss */ });
+        }, PREFLIGHT_LEASE_RENEW_MS);
+    };
+    const stopLeaseRenewal = () => {
+        leaseRenewalStopped = true;
+        if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
+        leaseRenewalTimer = null;
+    };
+    const waitForLeaseRenewal = async () => {
+        const pending = leaseRenewalPromise;
+        if (!pending) return;
+        try { await pending; } catch { /* operation signal carries lease loss */ }
+    };
+    const startLeaseRelease = (): Promise<void> => {
+        if (!leaseMode || leaseReleased) return Promise.resolve();
+        if (!leaseReleasePromise) {
+            leaseReleasePromise = releaseTaskOperationLease(
+                context.env,
+                taskId,
+                uid,
+                leaseToken,
+                leaseMode,
+            ).then(
+                released => {
+                    leaseReleased = released;
+                    if (!released) leaseReleasePromise = null;
+                },
+                error => {
+                    leaseReleasePromise = null;
+                    throw error;
+                },
+            );
+        }
+        return leaseReleasePromise;
+    };
+    const scheduleLeaseRelease = () => {
+        stopLeaseRenewal();
+        if (!leaseMode || leaseReleased) return;
+        context.waitUntil((async () => {
+            await waitForLeaseRenewal();
+            if (leaseReleased) return;
+            const cleanupDeadline = createPreflightDeadline(
+                PREFLIGHT_STATE_FINALIZE_MS,
+                "释放需求确认执行权超时",
+            );
+            try {
+                await withPreflightDeadline(
+                    startLeaseRelease,
+                    cleanupDeadline.signal,
+                    "释放需求确认执行权超时",
+                );
+            } catch (error) {
+                console.warn("clarify lease release failed", error);
+            } finally {
+                cleanupDeadline.dispose();
+            }
+        })());
+    };
     try {
-        leaseMode = await acquireTaskOperationLease(
-            context.env,
-            taskId,
-            uid,
-            leaseToken,
-            CLARIFY_LEASE_MS,
+        leaseMode = await withPreflightDeadline(
+            () => acquireTaskOperationLease(
+                context.env,
+                taskId,
+                uid,
+                leaseToken,
+                PREFLIGHT_LEASE_MS,
+            ),
+            operationDeadline.signal,
+            "获取需求确认执行权超时",
         );
     } catch (error) {
+        if (isClientCancelled(error) || isPreflightTimeout(error)) throw error;
         console.warn("clarify lease acquisition failed", error);
         return preflightJsonError("需求确认状态存储暂不可用", "CLARIFY_STORE_UNAVAILABLE", 503, 2);
     }
 
     if (!leaseMode) {
-        const latestRaw = await getOwnedTask(context.env, taskId, uid);
+        const latestRaw = await withPreflightDeadline(
+            () => getOwnedTask(context.env, taskId, uid),
+            operationDeadline.signal,
+            "读取需求确认恢复状态超时",
+        );
         const latestState = latestRaw ? JSON.parse(latestRaw) : null;
         const latestRecord = latestState
             ? findPreflightOperation(latestState, "clarify", requestId)
@@ -268,81 +440,109 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         );
     }
 
-    const operationAbort = new AbortController();
-    const unlinkClientAbort = linkClientAbortSignal(
-        operationAbort,
-        context.request.signal,
-        "Clarify client disconnected",
-    );
-    const operationTimer = setTimeout(() => operationAbort.abort(), CLARIFY_OPERATION_MS);
-    let streamOwnsDeadline = false;
-
-    const releaseLease = async () => {
-        if (!leaseMode || leaseReleased) return;
-        leaseReleased = await releaseTaskOperationLease(
-            context.env,
-            taskId,
-            uid,
-            leaseToken,
-            leaseMode,
-        );
-    };
-    const persistState = async (release = false) => {
-        const committed = await putTaskWithOperationLease(
-            context.env,
-            taskId,
-            JSON.stringify(state),
-            leaseToken,
-            leaseMode!,
-            3600,
-            uid,
-            release,
+    const persistState = async (
+        release = false,
+        signal = operationDeadline.signal,
+    ) => {
+        if (release) {
+            stopLeaseRenewal();
+            await waitForLeaseRenewal();
+        }
+        const committed = await withPreflightDeadline(
+            () => putTaskWithOperationLease(
+                context.env,
+                taskId,
+                JSON.stringify(state),
+                leaseToken,
+                leaseMode!,
+                3600,
+                uid,
+                release,
+            ),
+            signal,
+            "持久化需求确认状态超时",
         );
         if (!committed) throw new ClarifyLeaseLostError();
         if (release) leaseReleased = true;
     };
 
     try {
-        raw = await getOwnedTask(context.env, taskId, uid);
-        assertClarifyOperationActive(operationAbort.signal);
+        await startLeaseRenewal();
+        assertClarifyOperationActive(operationDeadline.signal);
+        raw = await withPreflightDeadline(
+            () => getOwnedTask(context.env, taskId, uid),
+            operationDeadline.signal,
+            "重新读取需求确认任务状态超时",
+        );
+        assertClarifyOperationActive(operationDeadline.signal);
         if (!raw) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("Task state unavailable", "TASK_STATE_UNAVAILABLE", 503, 2);
         }
         state = JSON.parse(raw);
 
         let record = findPreflightOperation(state, "clarify", requestId);
         if (record && hasExplicitInput && record.inputHash !== suppliedInputHash) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("同一 clarifyRequestId 携带了不同输入", "CLARIFY_REQUEST_CONFLICT", 409);
         }
 
         if (record?.status === "completed") {
             if (!record.billingSettled) {
-                const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                assertClarifyOperationActive(operationAbort.signal);
+                const settlement = await withPreflightDeadline(
+                    () => settleTaskCostQuota(context.env, uid, taskId),
+                    operationDeadline.signal,
+                    "结算需求确认用量超时",
+                );
+                assertClarifyOperationActive(operationDeadline.signal);
                 state.totalCost = settlement.total;
                 state.consumedQuota = settlement.consumed;
                 state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
                 record.billingSettled = true;
-                if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+                if (settlement.outOfQuota) {
+                    await withPreflightDeadline(
+                        () => markTaskQuotaExhausted(context.env, taskId, uid),
+                        operationDeadline.signal,
+                        "持久化需求确认配额状态超时",
+                    );
+                }
                 await persistState(true);
-                assertClarifyOperationActive(operationAbort.signal);
+                assertClarifyOperationActive(operationDeadline.signal);
             } else {
-                await releaseLease();
+                scheduleLeaseRelease();
             }
             return replayPreflightResult("clarify", record);
         }
         if (record?.status === "cancelled") {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("需求确认请求已取消", "CLARIFY_CANCELLED", 409, undefined, {
                 retryable: false,
             });
         }
+        if (record?.status === "retryable" && !record.billingSettled) {
+            const settlement = await withPreflightDeadline(
+                () => settleTaskCostQuota(context.env, uid, taskId),
+                operationDeadline.signal,
+                "结算待恢复的需求确认用量超时",
+            );
+            state.totalCost = settlement.total;
+            state.consumedQuota = settlement.consumed;
+            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+            record.billingSettled = true;
+            if (settlement.outOfQuota) {
+                await withPreflightDeadline(
+                    () => markTaskQuotaExhausted(context.env, taskId, uid),
+                    operationDeadline.signal,
+                    "持久化待恢复的需求确认配额状态超时",
+                );
+            }
+            await persistState(false);
+            assertClarifyOperationActive(operationDeadline.signal);
+        }
 
         const activeRecord = activePreflightOperation(state, "clarify");
         if (activeRecord && activeRecord.requestId !== requestId) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError(
                 "存在尚未完成的需求确认请求，请恢复原请求",
                 "CLARIFY_RECOVERY_REQUIRED",
@@ -353,7 +553,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         if (state.clarifyDone && !record) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError(
                 "需求确认已完成，不能以新请求重新开启",
                 "CLARIFY_ALREADY_COMPLETED",
@@ -362,7 +562,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         if (state.quotaExhausted && !llm.byok) {
-            await releaseLease();
+            scheduleLeaseRelease();
             return preflightJsonError("充值额度已用尽", "QUOTA_EXHAUSTED", 402);
         }
 
@@ -386,9 +586,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             delete record.lastError;
         }
         await persistState(false);
-        assertClarifyOperationActive(operationAbort.signal);
+        assertClarifyOperationActive(operationDeadline.signal);
 
-        assertClarifyOperationActive(operationAbort.signal);
+        assertClarifyOperationActive(operationDeadline.signal);
         if (!llm.apiKey) {
             record.status = "retryable";
             record.lastError = "API key not configured";
@@ -402,27 +602,109 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             );
         }
 
+        const attemptBaselineRaw = JSON.stringify(state);
         const { readable, writable } = new TransformStream<Uint8Array>();
         const encoder = new TextEncoder();
         const writer = writable.getWriter();
-        streamOwnsDeadline = true;
+        handoffOperation();
         const process = (async () => {
+            let terminalDeadline: PreflightDeadline | null = null;
+            const terminalSignal = () => {
+                if (!terminalDeadline) {
+                    terminalDeadline = createPreflightDeadline(
+                        PREFLIGHT_TERMINAL_WRITE_MS,
+                        "需求确认终态发送超时",
+                    );
+                }
+                return terminalDeadline.signal;
+            };
             const heartbeat = setInterval(() => {
-                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "clarify", t: Date.now() }))
-                    .catch(error => {
-                        try { abortOnWriteFailure(operationAbort, error, "Clarify client disconnected"); }
-                        catch { /* operation signal carries the cancellation */ }
-                    });
+                writeSSE(
+                    writer,
+                    encoder,
+                    { type: "heartbeat", stage: "clarify", t: Date.now() },
+                    operationAbort,
+                    operationDeadline.signal,
+                ).catch(() => { /* operation signal carries timeout or cancellation */ });
             }, 12_000);
             let resultCommitted = false;
+            let resultCommitPending = false;
             let usage: UsageBreakdown | undefined;
+            const finalizeRetryableAttempt = async (
+                lastError: string,
+                label: "中断" | "失败",
+            ) => {
+                state = JSON.parse(attemptBaselineRaw);
+                record = findPreflightOperation(state, "clarify", requestId);
+                if (!record) throw new ClarifyLeaseLostError();
+                record!.status = "retryable";
+                delete record!.completedAt;
+                record!.lastError = lastError;
+                delete record!.result;
+                const costDelta = !llm.byok && usage
+                    ? usageCost(llm.modelFor("pro"), usage)
+                    : 0;
+                record!.billingSettled = llm.byok || !usage;
+                const finalizeDeadline = createPreflightDeadline(
+                    PREFLIGHT_STATE_FINALIZE_MS,
+                    `收口需求确认${label}状态超时`,
+                );
+                try {
+                    const committed = await withPreflightDeadline(
+                        () => putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode!,
+                            costDelta,
+                            3600,
+                            uid,
+                            false,
+                        ),
+                        finalizeDeadline.signal,
+                        `提交需求确认${label}状态超时`,
+                    );
+                    if (!committed) throw new ClarifyLeaseLostError();
+                    if (!record!.billingSettled) {
+                        const settlement = await withPreflightDeadline(
+                            () => settleTaskCostQuota(context.env, uid, taskId),
+                            finalizeDeadline.signal,
+                            `结算需求确认${label}用量超时`,
+                        );
+                        state.totalCost = settlement.total;
+                        state.consumedQuota = settlement.consumed;
+                        state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                        record!.billingSettled = true;
+                        if (settlement.outOfQuota) {
+                            await withPreflightDeadline(
+                                () => markTaskQuotaExhausted(context.env, taskId, uid),
+                                finalizeDeadline.signal,
+                                `持久化需求确认${label}配额状态超时`,
+                            );
+                        }
+                        await persistState(false, finalizeDeadline.signal);
+                    }
+                } catch (finalizeError) {
+                    const kind = label === "中断" ? "interrupted" : "failure";
+                    console.warn(`clarify ${kind} state finalization failed`, finalizeError);
+                } finally {
+                    finalizeDeadline.dispose();
+                }
+            };
             try {
-                await writeSSE(writer, encoder, {
-                    type: "phase",
-                    stage: "clarify",
-                    phase: "clarifying",
-                    round: state.clarifyRounds.length + 1,
-                }, operationAbort);
+                await writeSSE(
+                    writer,
+                    encoder,
+                    {
+                        type: "phase",
+                        stage: "clarify",
+                        phase: "clarifying",
+                        round: state.clarifyRounds.length + 1,
+                    },
+                    operationAbort,
+                    operationDeadline.signal,
+                );
 
                 let result: Record<string, unknown> | undefined;
                 if (state.clarifyRounds.length >= MAX_CLARIFY_ROUNDS) {
@@ -444,13 +726,25 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         llm.modelFor("pro"),
                         prompt.system,
                         prompt.user,
-                        operationAbort.signal,
+                        operationDeadline.signal,
                         !llm.byok,
-                        content => writeSSE(writer, encoder, { type: "reasoning", stage: "clarify", content }, operationAbort),
-                        content => writeSSE(writer, encoder, { type: "delta", stage: "clarify", content }, operationAbort),
+                        content => writeSSE(
+                            writer,
+                            encoder,
+                            { type: "reasoning", stage: "clarify", content },
+                            operationAbort,
+                            operationDeadline.signal,
+                        ),
+                        content => writeSSE(
+                            writer,
+                            encoder,
+                            { type: "delta", stage: "clarify", content },
+                            operationAbort,
+                            operationDeadline.signal,
+                        ),
                     );
                     usage = callRes.usage;
-                    assertClarifyOperationActive(operationAbort.signal);
+                    assertClarifyOperationActive(operationDeadline.signal);
 
                     let parsed: { done?: boolean; todos?: any[]; needMoreInput?: boolean; hint?: string } = {};
                     try {
@@ -483,50 +777,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     }
                 }
 
-                assertClarifyOperationActive(operationAbort.signal);
+                assertClarifyOperationActive(operationDeadline.signal);
                 record!.status = "completed";
                 record!.result = result!;
                 record!.completedAt = Date.now();
                 record!.billingSettled = llm.byok || !usage;
                 delete record!.lastError;
                 const costDelta = !llm.byok && usage ? usageCost(llm.modelFor("pro"), usage) : 0;
-                const committed = await putTaskWithOperationLeaseAndCost(
-                    context.env,
-                    taskId,
-                    JSON.stringify(state),
-                    leaseToken,
-                    leaseMode!,
-                    costDelta,
-                    3600,
-                    uid,
-                    record!.billingSettled,
-                );
-                if (!committed) throw new ClarifyLeaseLostError();
-                resultCommitted = true;
-                if (record!.billingSettled) {
-                    leaseReleased = true;
-                } else {
-                    const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                    state.totalCost = settlement.total;
-                    state.consumedQuota = settlement.consumed;
-                    state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
-                    record!.billingSettled = true;
-                    if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
-                    await persistState(true);
-                }
-
-                await writeSSE(writer, encoder, { type: "result", stage: "clarify", ...result! }, operationAbort);
-            } catch (error) {
-                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
-                if (cancelled && !resultCommitted) {
-                    record!.status = "cancelled";
-                    record!.completedAt = Date.now();
-                    record!.lastError = "客户端已取消";
-                    delete record!.result;
-                    const costDelta = !llm.byok && usage ? usageCost(llm.modelFor("pro"), usage) : 0;
-                    record!.billingSettled = llm.byok || !usage;
-                    try {
-                        const committed = await putTaskWithOperationLeaseAndCost(
+                const committed = await withPreflightDeadline(
+                    () => {
+                        resultCommitPending = true;
+                        return putTaskWithOperationLeaseAndCost(
                             context.env,
                             taskId,
                             JSON.stringify(state),
@@ -535,49 +796,129 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             costDelta,
                             3600,
                             uid,
-                            record!.billingSettled,
+                            false,
+                        ).then(
+                            value => {
+                                resultCommitPending = false;
+                                if (value) resultCommitted = true;
+                                return value;
+                            },
+                            error => {
+                                resultCommitPending = false;
+                                throw error;
+                            },
                         );
-                        if (!committed) throw new ClarifyLeaseLostError();
-                        if (record!.billingSettled) {
-                            leaseReleased = true;
-                        } else {
-                            const settlement = await settleTaskCostQuota(context.env, uid, taskId);
-                            state.totalCost = settlement.total;
-                            state.consumedQuota = settlement.consumed;
-                            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
-                            record!.billingSettled = true;
-                            if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
-                            await persistState(true);
-                        }
-                    } catch { /* lease cleanup below preserves the cancellation */ }
+                    },
+                    operationDeadline.signal,
+                    "提交需求确认结果超时",
+                );
+                if (!committed) throw new ClarifyLeaseLostError();
+                if (!record!.billingSettled) {
+                    const settlement = await withPreflightDeadline(
+                        () => settleTaskCostQuota(context.env, uid, taskId),
+                        operationDeadline.signal,
+                        "结算需求确认用量超时",
+                    );
+                    state.totalCost = settlement.total;
+                    state.consumedQuota = settlement.consumed;
+                    state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                    record!.billingSettled = true;
+                    if (settlement.outOfQuota) {
+                        await withPreflightDeadline(
+                            () => markTaskQuotaExhausted(context.env, taskId, uid),
+                            operationDeadline.signal,
+                            "持久化需求确认配额状态超时",
+                        );
+                    }
+                    await persistState(false);
+                }
+
+                await writeSSE(
+                    writer,
+                    encoder,
+                    { type: "result", stage: "clarify", ...result! },
+                    operationAbort,
+                    terminalSignal(),
+                );
+            } catch (error) {
+                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
+                if (cancelled && !resultCommitted) {
+                    if (!resultCommitPending) {
+                        await finalizeRetryableAttempt("传输连接已中断，可恢复当前请求", "中断");
+                    }
                     return;
                 }
                 if (cancelled) return;
                 const mapped = clarifyError(error);
                 if (!resultCommitted) {
-                    record!.status = "retryable";
-                    record!.lastError = mapped.message;
-                    try { await persistState(true); } catch { /* lease release below */ }
+                    if (resultCommitPending) {
+                        mapped.code = "CLARIFY_FINALIZATION_PENDING";
+                        mapped.status = 503;
+                        mapped.retryable = true;
+                        mapped.retryAfter = 2;
+                    } else {
+                        await finalizeRetryableAttempt(mapped.message, "失败");
+                    }
                 } else {
                     mapped.code = "CLARIFY_SETTLEMENT_PENDING";
                     mapped.status = 503;
                     mapped.retryable = true;
                     mapped.retryAfter = 2;
                 }
-                await writeSSE(writer, encoder, { type: "log", msg: `× 澄清错误: ${mapped.message}` }, operationAbort);
-                await writeSSE(writer, encoder, {
-                    type: "error", stage: "clarify", error: mapped.message, ...mapped,
-                }, operationAbort);
-                await writeSSE(writer, encoder, {
-                    type: "result", stage: "clarify", error: mapped.message, ...mapped,
-                }, operationAbort);
+                const signal = terminalSignal();
+                try {
+                    await writeSSE(
+                        writer,
+                        encoder,
+                        { type: "log", msg: `× 澄清错误: ${mapped.message}` },
+                        operationAbort,
+                        signal,
+                    );
+                    await writeSSE(writer, encoder, {
+                        type: "error", stage: "clarify", error: mapped.message, ...mapped,
+                    }, operationAbort, signal);
+                    await writeSSE(writer, encoder, {
+                        type: "result", stage: "clarify", error: mapped.message, ...mapped,
+                    }, operationAbort, signal);
+                } catch { /* bounded terminal delivery is best effort */ }
             } finally {
-                clearTimeout(operationTimer);
+                stopLeaseRenewal();
                 clearInterval(heartbeat);
-                unlinkClientAbort();
-                if (!leaseReleased) await releaseLease().catch(() => { });
-                try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
-                try { await writer.close(); } catch { /* already disconnected */ }
+                const signal = terminalSignal();
+                try {
+                    await withPreflightDeadline(
+                        () => writer.write(encoder.encode("data: [DONE]\n\n")),
+                        signal,
+                        "需求确认结束标记发送超时",
+                    );
+                } catch { /* disconnected or terminal budget exhausted */ }
+                let streamClosed = false;
+                try {
+                    await withPreflightDeadline(
+                        () => writer.close(),
+                        signal,
+                        "关闭需求确认响应流超时",
+                    );
+                    streamClosed = true;
+                } catch { /* already disconnected */ }
+                if (!streamClosed) {
+                    const abortDeadline = createPreflightDeadline(
+                        PREFLIGHT_TERMINAL_WRITE_MS,
+                        "终止需求确认响应流超时",
+                    );
+                    try {
+                        await withPreflightDeadline(
+                            () => writer.abort(signal.reason),
+                            abortDeadline.signal,
+                            "终止需求确认响应流超时",
+                        );
+                    } catch { /* stream already terminated */ }
+                    finally { abortDeadline.dispose(); }
+                }
+                await waitForLeaseRenewal();
+                terminalDeadline?.dispose();
+                disposeOperation();
+                scheduleLeaseRelease();
             }
         })();
 
@@ -590,7 +931,48 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             },
         });
     } catch (error) {
-        await releaseLease().catch(() => { });
+        scheduleLeaseRelease();
+        const mapped = clarifyError(error);
+        return preflightJsonError(
+            mapped.message,
+            mapped.code,
+            mapped.status,
+            mapped.retryAfter,
+            { retryable: mapped.retryable },
+        );
+    }
+}
+
+export const onRequestPost: PagesFunction<Env> = async (context) => {
+    const operationAbort = new AbortController();
+    const unlinkClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Clarify client disconnected",
+    );
+    const operationDeadline = createPreflightDeadline(
+        PREFLIGHT_OPERATION_MS,
+        CLARIFY_TIMEOUT_MESSAGE,
+        operationAbort.signal,
+    );
+    let operationHandedOff = false;
+    let operationDisposed = false;
+    const disposeOperation = () => {
+        if (operationDisposed) return;
+        operationDisposed = true;
+        operationDeadline.dispose();
+        unlinkClientAbort();
+    };
+
+    try {
+        return await handleClarifyRequest(
+            context,
+            operationAbort,
+            operationDeadline,
+            () => { operationHandedOff = true; },
+            disposeOperation,
+        );
+    } catch (error) {
         const mapped = clarifyError(error);
         return preflightJsonError(
             mapped.message,
@@ -600,9 +982,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             { retryable: mapped.retryable },
         );
     } finally {
-        if (!streamOwnsDeadline) {
-            clearTimeout(operationTimer);
-            unlinkClientAbort();
-        }
+        if (!operationHandedOff) disposeOperation();
     }
 };
