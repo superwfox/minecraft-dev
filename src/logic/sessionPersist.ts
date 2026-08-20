@@ -4,20 +4,25 @@ import type { ChatBlock } from "./chatState";
 const STORAGE_KEY = "tahai-session-v1";
 
 let saveTimer: any = null;
-const INTERRUPTED_PHASES = new Set<ChatBlock["phase"]>(["analyzing", "streaming"]);
-const RESTORE_INTERRUPTED_MESSAGE = "上次响应因页面刷新中断，请重新发送";
+const INTERRUPTED_PHASES = new Set<ChatBlock["phase"]>([
+    "analyzing",
+    "fetching",
+    "rendering",
+    "streaming",
+]);
 
 function normalizeRestoredBlock(block: ChatBlock): ChatBlock {
     if (!INTERRUPTED_PHASES.has(block.phase)) return block;
     return {
         ...block,
-        phase: "error",
+        phase: "interrupted",
         streamText: "",
         rawMsg: "",
         thinkingText: "",
         outputText: "",
         streamStage: "",
-        error: RESTORE_INTERRUPTED_MESSAGE,
+        error: undefined,
+        errorMeta: undefined,
     };
 }
 

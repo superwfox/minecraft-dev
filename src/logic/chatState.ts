@@ -1,4 +1,8 @@
 import {reactive, ref} from "vue";
+import {normalizePrecheckGuidance} from "./promptFormatting";
+import type {PrecheckGuidance} from "./promptFormatting";
+import {legacyActionMessageMeta, normalizeActionMessageMeta} from "./actionMessages";
+import type {ActionMessageMeta} from "./actionMessages";
 
 export type TodoStep = {
     step: number;
@@ -12,7 +16,7 @@ export type ChatBlock = {
     id: number;
     userMessages: string[];
     draft: boolean;
-    phase: "analyzing" | "fetching" | "rendering" | "streaming" | "done" | "error";
+    phase: "analyzing" | "fetching" | "rendering" | "streaming" | "needs_input" | "interrupted" | "done" | "error";
     coreType?: string;
     version?: string;
     title?: string;
@@ -22,7 +26,9 @@ export type ChatBlock = {
     thinkingText: string;
     outputText: string;
     streamStage: "" | "precheck" | "analysis" | "chat";
+    incompleteGuidance?: PrecheckGuidance;
     error?: string;
+    errorMeta?: ActionMessageMeta;
 };
 
 let nextId = 0;
@@ -56,19 +62,33 @@ export function createDraftBlock(input: string): ChatBlock {
 export function appendToDraft(input: string): ChatBlock | null {
     const d = getActiveDraft();
     if (!d) return null;
-    d.userMessages.push(input);
+    if (d.phase === "needs_input" || d.phase === "interrupted") {
+        d.userMessages.splice(0, d.userMessages.length, input);
+    }
+    else d.userMessages.push(input);
     d.streamText = "";
     d.rawMsg = "";
     d.thinkingText = "";
     d.outputText = "";
     d.streamStage = "";
+    d.incompleteGuidance = undefined;
     d.error = undefined;
+    d.errorMeta = undefined;
     return d;
 }
 
 export function freezeDraft() {
     const d = getActiveDraft();
     if (d) d.draft = false;
+}
+
+export function removeChatBlock(block: ChatBlock) {
+    const index = chatBlocks.indexOf(block);
+    if (index >= 0) chatBlocks.splice(index, 1);
+}
+
+export function removeDraftBlock(block: ChatBlock) {
+    if (block.draft) removeChatBlock(block);
 }
 
 export function combineUserMessages(messages: string[]): string {
@@ -84,6 +104,12 @@ export function resetChat() {
 }
 
 export function rehydrateBlocks(blocks: ChatBlock[]) {
+    for (const block of blocks) {
+        if (block.incompleteGuidance) {
+            block.incompleteGuidance = normalizePrecheckGuidance(block.incompleteGuidance);
+        }
+        block.errorMeta = normalizeActionMessageMeta(block.errorMeta) || legacyActionMessageMeta(block.error);
+    }
     chatBlocks.splice(0, chatBlocks.length, ...blocks);
     let maxId = -1;
     for (const b of chatBlocks) if (b.id > maxId) maxId = b.id;

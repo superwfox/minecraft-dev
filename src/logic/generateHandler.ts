@@ -35,12 +35,73 @@ import type { DeepSeekAccessFailure } from "./byok";
 import { selected } from "./skills";
 import { parseResponse } from "../ide/composables/useIDEChat";
 import { readApiError as readBaseApiError, responseError } from "../api/apiError";
+import {actionMessageMetaForError} from "./actionMessages";
+import type {ActionMessageKind} from "./actionMessages";
 
 const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
 
-// ── ESC 撤回中断（仅思考/需求确认阶段）──
-// clarify / grade 阶段的 SSE fetch controller；ESC 时 abort 断流（后端 waitUntil 仍会读完并结算 token）
+// ── 当前生成运行域：所有请求共享一个根 signal，离页/中断/重置可一次性终止 ──
+let generationAbort: AbortController | null = null;
+let generationRunId = 0;
+
+function beginGenerationRun(): AbortSignal {
+    generationAbort?.abort(new DOMException("Superseded", "AbortError"));
+    generationAbort = new AbortController();
+    generationRunId++;
+    return generationAbort.signal;
+}
+
+function generationSignal(): AbortSignal {
+    if (!generationAbort) {
+        generationAbort = new AbortController();
+        generationRunId++;
+    }
+    return generationAbort.signal;
+}
+
+function generationAbortError(): Error {
+    const error = new Error("interrupted");
+    error.name = "AbortError";
+    return error;
+}
+
+function assertGenerationRun(runId: number) {
+    if (runId !== generationRunId || generationAbort?.signal.aborted) throw generationAbortError();
+}
+
+function isGenerationRunCurrent(runId: number): boolean {
+    return runId === generationRunId && !!generationAbort && !generationAbort.signal.aborted;
+}
+
+function linkGenerationAbort(controller: AbortController): () => void {
+    const root = generationSignal();
+    const abort = () => controller.abort(root.reason ?? new DOMException("Aborted", "AbortError"));
+    if (root.aborted) abort();
+    else root.addEventListener("abort", abort, { once: true });
+    return () => root.removeEventListener("abort", abort);
+}
+
+function interruptedPhase(): Exclude<GenPhase, "interrupted"> | "" {
+    return genTask.phase === "interrupted" ? genTask.interruptedFrom : genTask.phase;
+}
+
+function markInterrupted(from: GenPhase | "" = genTask.phase) {
+    if (genTask.phase === "interrupted") return;
+    if (!from || ["idle", "done", "error", "interrupted"].includes(from)) return;
+    genTask.interruptedFrom = from as Exclude<GenPhase, "interrupted">;
+    genTask.phase = "interrupted";
+    genTask.error = "";
+    genTask.errorMeta = null;
+    genTask.preflightActive = false;
+    genTask.streamingPhase = "";
+    genTask.streamingFile = "";
+    genTask.streamingContent = "";
+    genTask.logs.push("■ 当前任务已中断，返回后不会自动继续");
+    persistGenTaskNow();
+}
+
+// clarify / grade 保留独立 controller，供现有阶段代码清理引用。
 let clarifyAbort: AbortController | null = null;
 let gradeAbort: AbortController | null = null;
 
@@ -49,19 +110,39 @@ function isInterrupt(e: any): boolean {
     return e?.interrupted === true || e?.name === "AbortError";
 }
 
-/** ESC 撤回：中断进行中的需求确认（abort SSE + 取消等待用户输入的 Promise）。
- *  token 花费由后端 clarify.ts 的 context.waitUntil 自动结算，前端无需处理。 */
-export function interruptGenerate() {
-    clarifyAbort?.abort();
-    gradeAbort?.abort();
+/** 中断当前 Chat 生成运行域。服务端会通过断连信号同步终止上游模型。 */
+export function interruptGenerate(options: { preserve?: boolean } = {}) {
+    const from = interruptedPhase();
+    generationAbort?.abort(new DOMException("User interrupted", "AbortError"));
+    generationRunId++;
+    clarifyAbort?.abort(new DOMException("User interrupted", "AbortError"));
+    gradeAbort?.abort(new DOMException("User interrupted", "AbortError"));
     cancelPendingInput();
+    if (options.preserve !== false) markInterrupted(from);
 }
 
 /** 不可重试错误（鉴权 / 额度 / 请求状态），跳过自动重试。 */
-function noRetry(msg: string): Error {
+function noRetry(msg: string, meta: {code?: string; status?: number} = {}): Error {
     const e = new Error(msg);
     (e as any).noRetry = true;
+    if (meta.code) (e as any).code = meta.code;
+    if (meta.status) (e as any).status = meta.status;
     return e;
+}
+
+function clearGenerateError() {
+    genTask.error = "";
+    genTask.errorMeta = null;
+}
+
+function setGenerateError(
+    error: unknown,
+    kind?: ActionMessageKind,
+    message?: string,
+) {
+    genTask.phase = "error";
+    genTask.error = message || (error instanceof Error ? error.message : String(error));
+    genTask.errorMeta = actionMessageMetaForError(error, kind);
 }
 
 function deepSeekAccessError(failure: DeepSeekAccessFailure): Error {
@@ -85,10 +166,12 @@ function quotaAccessError(): Error {
         fetchMe();
     }
 
-    const error = noRetry(usingKey
-        ? "DeepSeek 账户余额不足，请充值后重试"
-        : "充值额度已用尽，请充值或填写 DeepSeek API Key");
-    (error as any).status = 402;
+    const error = noRetry(
+        usingKey
+            ? "DeepSeek 账户余额不足，请充值后重试"
+            : "充值额度已用尽，请充值或填写 DeepSeek API Key",
+        {code: usingKey ? "INSUFFICIENT_QUOTA" : "QUOTA_REQUIRED", status: 402},
+    );
     (error as any).retryable = false;
     (error as any).terminal = true;
     return error;
@@ -113,7 +196,7 @@ async function rejectAccessResponse(response: Response): Promise<void> {
 
     if (response.status === 401) {
         login();
-        throw noRetry("请先登录后再使用");
+        throw noRetry("请先登录后再使用", {code: "AUTH_REQUIRED", status: 401});
     }
 
     if (response.status === 402) {
@@ -136,6 +219,7 @@ async function readApiError(
 }
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
+    if (phase !== "interrupted") genTask.interruptedFrom = "";
     let preflightStage: PreflightStage | "" = "";
     if (phase === "clarifying" || phase === "awaiting_input") preflightStage = "clarify";
     else if (phase === "grading" || phase === "confirming") preflightStage = "grade";
@@ -155,36 +239,46 @@ function isGeneratingPhase(phase: GenPhase) {
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
+    const signal = generationSignal();
+    const runId = generationRunId;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const resp = await fetchWithByokFallback(url, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
+                signal,
             });
+            assertGenerationRun(runId);
             await rejectAccessResponse(resp);
             if (!resp.ok) {
                 const apiError = await readApiError(resp);
                 if (apiError.code === "POM_BLOCKED") {
-                    throw noRetry(`pom.xml 安全校验未通过：${apiError.message}`);
+                    throw noRetry(`pom.xml 安全校验未通过：${apiError.message}`, {
+                        code: apiError.code,
+                        status: resp.status,
+                    });
                 }
                 if (apiError.code === "BUILD_START_FAILED") {
-                    throw noRetry(apiError.message);
+                    throw noRetry(apiError.message, {code: apiError.code, status: resp.status});
                 }
                 if (resp.status === 400
                     || resp.status === 404
                     || resp.status === 429
                     || apiError.code === "TASK_STORE_MIGRATION_REQUIRED") {
-                    throw noRetry(apiError.message);
+                    throw noRetry(apiError.message, {code: apiError.code, status: resp.status});
                 }
                 throw new Error(apiError.message);
             }
-            return await resp.json() as any;
+            const result = await resp.json() as any;
+            assertGenerationRun(runId);
+            return result;
         } catch (e: any) {
+            if (isInterrupt(e) || signal.aborted || runId !== generationRunId) throw generationAbortError();
             if (e?.noRetry || attempt >= maxRetries) throw e;
             const delay = 2000 * Math.pow(2, attempt);
             genTask.logs.push(`! 请求失败，${delay / 1000}s 后重试 (${attempt + 1}/${maxRetries})...`);
-            await new Promise(r => setTimeout(r, delay));
+            await waitWithAbort(delay, signal);
         }
     }
 }
@@ -206,6 +300,8 @@ function createBuildRequestId(): string {
 }
 
 async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
+    const signal = generationSignal();
+    const runId = generationRunId;
     const deadline = Date.now() + waitMs;
     let announcedWait = false;
     let failures = 0;
@@ -218,34 +314,48 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
+                signal,
             });
         } catch (error) {
+            if (signal.aborted || runId !== generationRunId || isInterrupt(error)) throw generationAbortError();
             if (Date.now() >= deadline || failures++ >= 3) throw error;
-            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+            await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
             continue;
         }
 
+        assertGenerationRun(runId);
+
         await rejectAccessResponse(resp);
         if (resp.status === 429) {
-            const payload = await resp.json().catch(() => ({})) as { error?: string };
-            throw noRetry(payload?.error || "请求过于频繁");
+            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
+            throw noRetry(payload?.error || "请求过于频繁", {
+                code: payload?.code || "RATE_LIMITED",
+                status: resp.status,
+            });
         }
         if (resp.status === 409) {
             const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
             if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
-                throw new Error(payload?.error || "Planner 状态冲突");
+                const error = new Error(payload?.error || "Planner 状态冲突");
+                (error as any).code = payload?.code || "PLANNER_CONFLICT";
+                (error as any).status = resp.status;
+                (error as any).noRetry = true;
+                throw error;
             }
             if (!announcedWait) {
                 genTask.logs.push("· Planner 已在服务端执行，等待现有结果...");
                 announcedWait = true;
             }
             const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
-            await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+            await waitWithAbort(retrySeconds * 1000, signal);
             continue;
         }
         if (resp.status === 400) {
-            const payload = await resp.json().catch(() => ({})) as { error?: string };
-            throw noRetry(payload?.error || "Planner 请求无效");
+            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
+            throw noRetry(payload?.error || "Planner 请求无效", {
+                code: payload?.code || "PLANNER_REQUEST_INVALID",
+                status: resp.status,
+            });
         }
         if (!resp.ok) {
             const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
@@ -253,34 +363,42 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 || apiError.code === "CLOUDFLARE_TIMEOUT"
                 || resp.status === 524;
             if (plannerTimedOut) {
-                if (Date.now() >= deadline || timeoutRetries++ >= 1) throw new Error(apiError.message);
+                if (Date.now() >= deadline || timeoutRetries++ >= 1) {
+                    const error = new Error(apiError.message);
+                    (error as any).code = apiError.code;
+                    (error as any).status = resp.status;
+                    throw error;
+                }
                 const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
                 genTask.logs.push("! Planner 响应超时，使用同一请求 ID 重试一次...");
-                await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+                await waitWithAbort(retrySeconds * 1000, signal);
                 continue;
             }
             if (Date.now() >= deadline || failures++ >= 3) throw new Error(apiError.message);
-            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+            await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
             continue;
         }
         const contentType = resp.headers.get("Content-Type") || "";
         if (contentType.includes("text/event-stream")) {
             let streamed: any;
             try {
-                streamed = await readSSE(resp, { preflightStage: "plan", requireDone: true });
+                streamed = await readSSE(resp, { preflightStage: "plan", requireDone: true, runId });
             } catch (error: any) {
+                if (isInterrupt(error) || signal.aborted || runId !== generationRunId) {
+                    throw generationAbortError();
+                }
                 if (error?.noRetry || error?.terminal) throw error;
                 if (Date.now() >= deadline || failures++ >= 3) throw error;
                 const delay = 2000 * Math.pow(2, failures - 1);
                 genTask.logs.push(`! Planner 连接中断，${delay / 1000}s 后继续等待 (${failures}/3)...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
+                await waitWithAbort(delay, signal);
                 continue;
             }
             if (!streamed) {
                 if (Date.now() >= deadline || failures++ >= 3) {
                     throw new Error("Planner 流已结束，但未返回结果");
                 }
-                await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, failures - 1)));
+                await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
                 continue;
             }
             if (streamed.error) {
@@ -292,7 +410,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
-                    await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+                    await waitWithAbort(retrySeconds * 1000, signal);
                     continue;
                 }
 
@@ -306,20 +424,28 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 if (Date.now() >= deadline || failures++ >= 3) throw plannerError;
                 const delay = 2000 * Math.pow(2, failures - 1);
                 genTask.logs.push(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/3)...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
+                await waitWithAbort(delay, signal);
                 continue;
             }
+            assertGenerationRun(runId);
             return streamed;
         }
-        return await resp.json();
+        const result = await resp.json();
+        assertGenerationRun(runId);
+        return result;
     }
 }
 
 async function get(url: string) {
-    const resp = await fetchWithByokFallback(url);
+    const signal = generationSignal();
+    const runId = generationRunId;
+    const resp = await fetchWithByokFallback(url, { signal });
+    assertGenerationRun(runId);
     await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
-    return resp.json() as any;
+    const result = await resp.json() as any;
+    assertGenerationRun(runId);
+    return result;
 }
 
 const LEARNING_TERMINAL = new Set<LearningStatus>([
@@ -391,7 +517,7 @@ function learningScheduledDelay(schedule: readonly number[], attempt: number): n
 async function waitForLearningDelay(deadline: number, delayMs: number): Promise<boolean> {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) return false;
-    await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.min(delayMs, remainingMs))));
+    await waitWithAbort(Math.max(1, Math.min(delayMs, remainingMs)), generationSignal());
     return Date.now() < deadline;
 }
 
@@ -467,7 +593,7 @@ async function learningRequest(input: {
             httpEventRecorded = true;
             const message = `联网查证响应格式无效（HTTP ${resp.status}）`;
             if (resp.status >= 400 && resp.status < 500 && resp.status !== 408 && resp.status !== 429) {
-                throw noRetry(message);
+                throw noRetry(message, {code: "LEARNING_INVALID_RESPONSE", status: resp.status});
             }
             const invalidResponse = new Error(message);
             (invalidResponse as any).learningRetryable = true;
@@ -505,7 +631,10 @@ async function learningRequest(input: {
                 ? "联网查证响应缺少状态"
                 : `联网查证请求失败（HTTP ${resp.status}）`;
             if (resp.status >= 400 && resp.status < 500 && resp.status !== 408) {
-                const deterministicError = noRetry(message);
+                const deterministicError = noRetry(message, {
+                    code: typeof payload?.code === "string" ? payload.code : "LEARNING_REQUEST_FAILED",
+                    status: resp.status,
+                });
                 (deterministicError as any).learningHttpStatus = resp.status;
                 throw deterministicError;
             }
@@ -521,6 +650,7 @@ async function learningRequest(input: {
             retryAfterMs: resp.status === 429 ? learningRetryAfterMs(resp) : undefined,
         };
     } catch (error: any) {
+        if (generationAbort?.signal.aborted) throw generationAbortError();
         if (httpEventRecorded && error && typeof error === "object") {
             error.learningHttpRecorded = true;
             error.learningEventRecorded = true;
@@ -572,11 +702,13 @@ async function learningRequestBefore(input: {
     const timeoutMs = Math.max(1, Math.min(remainingMs, requestLimitMs));
     const abortReason = reachesDeadline ? deadlineReason : "client_network";
     const ctrl = new AbortController();
+    const unlinkRootAbort = linkGenerationAbort(ctrl);
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
         return await learningRequest({ ...input, signal: ctrl.signal, abortReason });
     } finally {
         clearTimeout(timer);
+        unlinkRootAbort();
     }
 }
 
@@ -604,6 +736,9 @@ async function runLearning(
     toolRequestId: string,
     options?: { resumeExisting?: boolean },
 ): Promise<void> {
+    generationSignal();
+    const generationId = generationRunId;
+    const assertActive = () => assertGenerationRun(generationId);
     const stage: LearningStage = "tool";
     const startedAt = Date.now();
     let jobDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
@@ -630,6 +765,7 @@ async function runLearning(
     );
     let jobId = canResumeExactJob ? restoredProgress.jobId : "";
 
+    assertActive();
     genTask.learningDeferred = false;
     if (canResumeExactJob) {
         genTask.learningProgress = normalizeLearningProgress({
@@ -662,6 +798,7 @@ async function runLearning(
     const outboundDeadline = () => jobDeadline - LEARNING_FINAL_RECONCILE_MS;
     const isTerminal = () => LEARNING_TERMINAL.has(genTask.learningProgress.status);
     const rememberFailure = (error: any): boolean => {
+        assertActive();
         const failure = learningFailure(error);
         lastFailureReason = failure.reasonCode;
         lastFailureHttpStatus = Number(error?.learningHttpStatus) || 0;
@@ -670,6 +807,7 @@ async function runLearning(
         return failure.retryable;
     };
     const announce = (snapshot: any) => {
+        assertActive();
         applyLearningSnapshot(snapshot);
         const deadlineAt = genTask.learningProgress.deadlineAt;
         const remainingMs = genTask.learningProgress.remainingMs;
@@ -731,6 +869,7 @@ async function runLearning(
         return { snapshot: latest, confirmed };
     };
     const markClientDeferred = (reasonCode: LearningReasonCode) => {
+        assertActive();
         const message = reasonCode === "client_network"
             ? "浏览器暂时无法确认联网查证状态，已按现有知识继续"
             : reasonCode === "client_deadline"
@@ -1054,10 +1193,13 @@ function normalizePreflightStage(value: unknown): PreflightStage | "" {
 type SSEReadOptions = {
     preflightStage?: PreflightStage;
     requireDone?: boolean;
+    runId?: number;
 };
 
 /** Read an SSE stream, dispatch events to genTask, return the result event. */
 async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
+    const runId = opts?.runId ?? generationRunId;
+    assertGenerationRun(runId);
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1109,6 +1251,7 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                     if (opts?.requireDone) throw new Error("流式响应包含无效数据，请重试");
                     continue;
                 }
+                assertGenerationRun(runId);
 
                 if (evt?.type === "error" || (evt?.type === "result" && evt?.error)) {
                     rejectAccessEvent(evt);
@@ -1254,15 +1397,18 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
     } finally {
         try { await reader.cancel(); } catch { /* stream already closed */ }
         try { reader.releaseLock(); } catch { /* lock already released */ }
-        if (opts?.preflightStage) genTask.preflightActive = false;
-        genTask.streamingPhase = "";
-        genTask.streamingFile = "";
-        genTask.streamingContent = "";
+        if (runId === generationRunId) {
+            if (opts?.preflightStage) genTask.preflightActive = false;
+            genTask.streamingPhase = "";
+            genTask.streamingFile = "";
+            genTask.streamingContent = "";
+        }
     }
 
     if (opts?.requireDone && !receivedDone) {
         throw new Error("流式连接提前结束，请重试");
     }
+    assertGenerationRun(runId);
     if (!result && streamError) {
         const error = new Error(streamError.error || streamError.message || "流式阶段出错");
         (error as any).code = typeof streamError.code === "string" ? streamError.code : "";
@@ -1278,20 +1424,26 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
 
 /** SSE streaming file generation (legacy single-file flow，仅供补缺/重新规划使用) */
 async function streamFileGeneration(taskId: string): Promise<any> {
+    const signal = generationSignal();
+    const runId = generationRunId;
     const resp = await fetchWithByokFallback("/api/generate/file", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId }),
+        signal,
     });
+    assertGenerationRun(runId);
     await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
 
     const contentType = resp.headers.get("Content-Type") || "";
     if (contentType.includes("application/json")) {
-        return await resp.json();
+        const result = await resp.json();
+        assertGenerationRun(runId);
+        return result;
     }
 
-    return readSSE(resp);
+    return readSSE(resp, { runId });
 }
 
 /** SSE streaming bucket generation — 一次推进一批文件的单个持久化阶段。
@@ -1301,6 +1453,8 @@ async function streamBucketGeneration(
     bucketIndex: number,
     learningToolJobs: Record<string, string> = {},
 ): Promise<any> {
+    const signal = generationSignal();
+    const runId = generationRunId;
     const resp = await fetchWithByokFallback("/api/generate/bucket", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1310,10 +1464,12 @@ async function streamBucketGeneration(
             superConcurrency: superConcurrency.value,
             learningToolJobs,
         }),
+        signal,
     });
+    assertGenerationRun(runId);
     await rejectAccessResponse(resp);
     if (!resp.ok) throw await responseError(resp);
-    return await readSSE(resp);
+    return await readSSE(resp, { runId });
 }
 
 const PREFLIGHT_WAIT_MS = 390_000;
@@ -1331,7 +1487,8 @@ type PreflightRequestConfig = {
     recoveryCode: "CLARIFY_RECOVERY_REQUIRED" | "GRADE_RECOVERY_REQUIRED";
     normalizeRequestId: (value: unknown) => string;
     onRecoverRequestId: (requestId: string) => void;
-    setController: (controller: AbortController | null) => void;
+    setController: (controller: AbortController) => void;
+    clearController: (controller: AbortController) => void;
 };
 
 function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
@@ -1378,6 +1535,8 @@ function attachApiError(
 }
 
 async function streamPreflightRequest(config: PreflightRequestConfig): Promise<any> {
+    generationSignal();
+    const runId = generationRunId;
     const deadline = Date.now() + PREFLIGHT_WAIT_MS;
     let failures = 0;
     let announcedWait = false;
@@ -1386,6 +1545,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
 
     while (true) {
         const controller = new AbortController();
+        const unlinkRootAbort = linkGenerationAbort(controller);
         config.setController(controller);
 
         const retry = async (error: any, reason: string) => {
@@ -1409,6 +1569,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     }),
                     signal: controller.signal,
                 });
+                assertGenerationRun(runId);
             } catch (error: any) {
                 if (controller.signal.aborted) {
                     const aborted = new Error("interrupted");
@@ -1424,6 +1585,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
 
             if (response.status === 409) {
                 const apiError = await readApiError(response, `${config.label}状态冲突`);
+                assertGenerationRun(runId);
                 if (apiError.code === config.recoveryCode) {
                     const activeRequestId = config.normalizeRequestId(apiError.activeRequestId);
                     if (activeRequestId && (activeRequestId !== requestId || payload !== null)) {
@@ -1475,6 +1637,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 result = await readSSE(response, {
                     preflightStage: config.stage,
                     requireDone: true,
+                    runId,
                 });
             } catch (error: any) {
                 if (controller.signal.aborted) {
@@ -1526,7 +1689,8 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             }
             return result;
         } finally {
-            config.setController(null);
+            unlinkRootAbort();
+            config.clearController(controller);
         }
     }
 }
@@ -1556,6 +1720,9 @@ async function streamClarify(
             persistGenTaskNow();
         },
         setController: controller => { clarifyAbort = controller; },
+        clearController: controller => {
+            if (clarifyAbort === controller) clarifyAbort = null;
+        },
     });
 }
 
@@ -1578,6 +1745,9 @@ async function streamGrade(taskId: string, gradeRequestId: string, correction?: 
             persistGenTaskNow();
         },
         setController: controller => { gradeAbort = controller; },
+        clearController: controller => {
+            if (gradeAbort === controller) gradeAbort = null;
+        },
     });
 }
 
@@ -1588,6 +1758,8 @@ async function streamBuildFix(
     repairAuthorization?: FixRepairAuthorization,
     learningToolJobs: Record<string, string> = {},
 ): Promise<any> {
+    const signal = generationSignal();
+    const runId = generationRunId;
     const resp = await fetchWithByokFallback("/api/generate/fix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1597,7 +1769,9 @@ async function streamBuildFix(
             ...(mode === "repair" ? { repairAuthorization } : {}),
             ...(mode === "repair" ? { learningToolJobs } : {}),
         }),
+        signal,
     });
+    assertGenerationRun(runId);
     await rejectAccessResponse(resp);
     if (!resp.ok) {
         const apiError = await readApiError(resp, "自动修复请求失败");
@@ -1608,10 +1782,12 @@ async function streamBuildFix(
 
     const contentType = resp.headers.get("Content-Type") || "";
     if (contentType.includes("application/json")) {
-        return await resp.json();
+        const result = await resp.json();
+        assertGenerationRun(runId);
+        return result;
     }
 
-    return readSSE(resp);
+    return readSSE(resp, { runId });
 }
 
 async function repairWithLearningTools(
@@ -1641,9 +1817,10 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
         try {
             status = await get(`/api/generate/status?taskId=${taskId}`);
         } catch (error: any) {
+            if (isInterrupt(error)) throw error;
             if (error?.noRetry || error?.terminal) throw error;
             if (Date.now() >= statusDeadline) throw error;
-            await new Promise(resolve => setTimeout(resolve, 2_000));
+            await waitWithAbort(2_000, generationSignal());
             continue;
         }
         if (status.status === "fixed") {
@@ -1658,7 +1835,7 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
                 }
                 return repairWithLearningTools(taskId, repairAuthorization);
             }
-            await new Promise(resolve => setTimeout(resolve, Math.min(2_000, remainingMs)));
+            await waitWithAbort(Math.min(2_000, remainingMs), generationSignal());
             continue;
         }
         if (status.status === "error" && status.repairStarted) {
@@ -1675,7 +1852,7 @@ async function recoverBuildRepair(taskId: string): Promise<any> {
             }
             return repairWithLearningTools(taskId, recoveredAuthorization);
         }
-        await new Promise(resolve => setTimeout(resolve, 1_000));
+        await waitWithAbort(1_000, generationSignal());
     }
     throw new Error("等待自动修复结果超时，请稍后恢复任务状态");
 }
@@ -1730,6 +1907,8 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
 }
 
 async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
+    generationSignal();
+    const stageRunId = generationRunId;
     let answers: Record<string, string | string[]> | undefined = resumePhase
         ? genTask.clarifyRequestAnswers || undefined
         : undefined;
@@ -1773,6 +1952,13 @@ async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
                 extraPrompt,
             );
         } catch (error: any) {
+            if (isInterrupt(error)) throw error;
+            assertGenerationRun(stageRunId);
+            if (error?.code === "CLARIFY_CANCELLED") {
+                genTask.clarifyRequestId = "";
+                persistGenTaskNow();
+                continue;
+            }
             if (error?.terminal) {
                 genTask.clarifyRequestId = "";
                 persistGenTaskNow();
@@ -1819,6 +2005,8 @@ async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
 }
 
 async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | undefined> {
+    generationSignal();
+    const stageRunId = generationRunId;
     let correction: string | undefined = resumePhase === "grading"
         ? genTask.gradeRequestCorrection || undefined
         : undefined;
@@ -1851,6 +2039,8 @@ async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | 
         try {
             gradeResult = await streamGrade(genTask.taskId, gradeRequestId, correction);
         } catch (error: any) {
+            if (isInterrupt(error)) throw error;
+            assertGenerationRun(stageRunId);
             if (error?.code === "CLARIFY_RECOVERY_REQUIRED") {
                 const activeClarifyRequestId = normalizeClarifyRequestId(error.activeRequestId);
                 if (!activeClarifyRequestId) {
@@ -1868,8 +2058,14 @@ async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | 
                 correction = undefined;
                 continue;
             }
+            if (error?.code === "GRADE_CANCELLED") {
+                genTask.gradeRequestId = "";
+                persistGenTaskNow();
+                continue;
+            }
             if (error?.terminal) {
                 genTask.gradeRequestId = "";
+                persistGenTaskNow();
             }
             throw error;
         }
@@ -1912,7 +2108,7 @@ async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | 
 let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
 export function canRetryGenerate(): boolean {
     const has = !!lastGenParams || !!genTask.userPrompt || !!genTask.taskId;
-    return has && (genTask.phase === "error" || genTask.phase === "idle");
+    return has && (genTask.phase === "error" || genTask.phase === "idle" || genTask.phase === "interrupted");
 }
 
 function getPreFileResumePhase(): GenPhase | "" {
@@ -1935,19 +2131,26 @@ function getPreFileResumePhase(): GenPhase | "" {
 export function retryGenerate() {
     const params = lastGenParams
         || (genTask.userPrompt ? { userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version } : null);
+    if (genTask.phase === "interrupted" && genTask.taskId) {
+        resumeGenerate().catch(() => { });
+        return;
+    }
+    const interruptedResume = genTask.phase === "interrupted" ? genTask.interruptedFrom : "";
     const resumePhase = genTask.taskId && genTask.files.length === 0
-        ? getPreFileResumePhase()
+        ? (interruptedResume || getPreFileResumePhase())
         : "";
     if (params && genTask.taskId && genTask.files.length === 0) {
         if (resumePhase) {
             genTask.phase = resumePhase;
-            genTask.error = "";
+            clearGenerateError();
             genTask.logs.push("↻ 使用现有任务恢复 FileGen 前置阶段，不重复创建任务");
             persistGenTaskNow();
             startGenerate(params.userPrompt, params.coreType, params.version, { resumePrepared: true }).catch(() => { });
         } else {
-            genTask.phase = "error";
-            genTask.error = "当前任务缺少可恢复的 requestId；为避免重复计费，未自动新建任务。";
+            setGenerateError(
+                new Error("当前任务缺少可恢复的 requestId；为避免重复计费，未自动新建任务。"),
+                "warning",
+            );
             persistGenTaskNow();
         }
         return;
@@ -1961,13 +2164,57 @@ export function retryGenerate() {
 
 /** 刷新恢复：genTask 已由 restoreGenTask 还原，据当前阶段续跑，避免刷新即失败。 */
 export async function resumeGenerate() {
+    if (genTask.phase === "interrupted" && !genTask.taskId) {
+        const params = lastGenParams
+            || (genTask.userPrompt
+                ? {userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version}
+                : null);
+        if (!params?.userPrompt || !params.coreType || !params.version) {
+            setGenerateError(
+                new Error("当前任务缺少重新创建所需的需求信息，请重新提交需求。"),
+                "warning",
+            );
+            persistGenTaskNow();
+            return;
+        }
+        await startGenerate(params.userPrompt, params.coreType, params.version);
+        return;
+    }
+    if (genTask.phase === "interrupted") {
+        if (!genTask.interruptedFrom) return;
+        genTask.phase = genTask.interruptedFrom;
+        genTask.interruptedFrom = "";
+    }
     const p = genTask.phase;
-    if (!genTask.taskId || ["idle", "done", "error"].includes(p)) return;
+    if (!genTask.taskId || ["idle", "done", "error", "interrupted"].includes(p)) return;
+
+    if (!genTask.files.length
+        && ["clarifying", "awaiting_input", "grading", "confirming", "planning"].includes(p)
+        && genTask.userPrompt) {
+        genTask.logs.push(p === "planning"
+            ? "↻ 页面恢复：继续联网查证与项目规划"
+            : "↻ 页面恢复：使用原 taskId 与前置 requestId 继续对账");
+        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
+        return;
+    }
+
+    beginGenerationRun();
+    const resumeRunId = generationRunId;
+    const recordResumeFailure = (error: any) => {
+        if (!isGenerationRunCurrent(resumeRunId)) return;
+        if (isInterrupt(error)) {
+            markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : genTask.phase);
+            return;
+        }
+        setGenerateError(error);
+        genTask.logs.push("× " + genTask.error);
+        persistGenTaskNow();
+    };
 
     // 已触发构建的阶段只恢复轮询，避免刷新后重复建分支、重复触发 workflow。
     if (["building", "polling"].includes(p)) {
         try { await buildWithRetry(undefined, undefined, true); }
-        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
+        catch (e: any) { recordResumeFailure(e); }
         return;
     }
     const hasRecoverableFixLearning = genTask.learningProgress.stage === "fix"
@@ -1983,10 +2230,8 @@ export async function resumeGenerate() {
             persistGenTaskNow();
             await resumeFixingStage(genTask.taskId, restoringFixStage);
         } catch (e: any) {
-            genTask.fixResumeStage = "";
-            genTask.phase = "error";
-            genTask.error = e?.message || String(e);
-            persistGenTaskNow();
+            if (isGenerationRunCurrent(resumeRunId)) genTask.fixResumeStage = "";
+            recordResumeFailure(e);
         }
         return;
     }
@@ -1994,34 +2239,21 @@ export async function resumeGenerate() {
     // uploading 阶段优先复用已持久化的请求 ID，继续同一次服务端启动流程。
     if (p === "uploading") {
         try { await buildWithRetry(undefined, undefined, !!genTask.buildRequestId); }
-        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
+        catch (e: any) { recordResumeFailure(e); }
         return;
     }
     if (p === "fixing") {
         try { await buildWithRetry(); }
-        catch (e: any) { genTask.phase = "error"; genTask.error = e?.message || String(e); }
-        return;
-    }
-
-    if (!genTask.files.length
-        && ["clarifying", "awaiting_input", "grading", "confirming"].includes(p)
-        && genTask.userPrompt) {
-        genTask.logs.push("↻ 页面恢复：使用原 taskId 与前置 requestId 继续对账");
-        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
-        return;
-    }
-
-    // Planner 学习/规划阶段已有 taskId 和路径选择，可直接沿用服务端状态恢复。
-    if (!genTask.files.length && p === "planning" && genTask.userPrompt) {
-        genTask.logs.push("↻ 页面恢复：继续联网查证与项目规划");
-        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
+        catch (e: any) { recordResumeFailure(e); }
         return;
     }
 
     // 无法识别的旧快照不自动重跑 mode1，避免重复创建并计费。
     if (!genTask.files.length) {
-        genTask.phase = "error";
-        genTask.error = "当前任务缺少可恢复的前置阶段信息，请重新开始生成。";
+        setGenerateError(
+            new Error("当前任务缺少可恢复的前置阶段信息，请重新开始生成。"),
+            "warning",
+        );
         return;
     }
 
@@ -2048,6 +2280,7 @@ export async function resumeGenerate() {
                         bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
                     }
                     catch (error: any) {
+                        if (isInterrupt(error)) throw error;
                         if (error?.noRetry || error?.terminal) throw error;
                         bucketResult = null;
                     }
@@ -2055,7 +2288,7 @@ export async function resumeGenerate() {
                 if (!bucketResult) {
                     if (doneCount() > doneBefore) { noProgress = 0; continue; }
                     if (++noProgress >= 5) throw new Error("续跑连续零进度，请重试");
-                    await new Promise(resolve => setTimeout(resolve, 1_500));
+                    await waitWithAbort(1_500, generationSignal());
                     continue;
                 }
                 if (bucketResult.replan) throw new Error("续跑仍未通过审查，请重试");
@@ -2077,7 +2310,7 @@ export async function resumeGenerate() {
                         throw new Error("生成服务连续未推进，阶段进度已保存，请稍后重试");
                     }
                     const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
-                    await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+                    await waitWithAbort(retryAfterMs, generationSignal());
                     continue;
                 }
                 noProgress = 0;
@@ -2102,9 +2335,7 @@ export async function resumeGenerate() {
 
         await buildWithRetry();
     } catch (e: any) {
-        genTask.phase = "error";
-        genTask.error = e?.message || String(e);
-        genTask.logs.push("× " + genTask.error);
+        recordResumeFailure(e);
     }
 }
 
@@ -2119,6 +2350,8 @@ export async function startGenerate(
     if (!resumePrepared && isGeneratingPhase(genTask.phase)) {
         throw new Error("当前已有构建任务正在进行");
     }
+    beginGenerationRun();
+    const runId = generationRunId;
     let chosenPathId: string | undefined = resumePrepared ? genTask.chosenPathId || undefined : undefined;
 
     if (!resumePrepared) {
@@ -2136,8 +2369,12 @@ export async function startGenerate(
             genTask.taskId = initResult.taskId;
             fetchMe(); // 扣费后刷新顶栏剩余额度
         } catch (e: any) {
-            genTask.phase = "error";
-            genTask.error = e.message || String(e);
+            if (!isGenerationRunCurrent(runId)) return;
+            if (isInterrupt(e)) {
+                markInterrupted("planning");
+                return;
+            }
+            setGenerateError(e);
             genTask.logs.push("× " + genTask.error);
             return;
         }
@@ -2149,13 +2386,16 @@ export async function startGenerate(
             if (!resumePrepared) setPhase("clarifying", "进入澄清阶段，请回答问题...");
             await runClarifyStage(resumeFromClarify ? resumePhase : "");
         } catch (e: any) {
+            if (!isGenerationRunCurrent(runId)) {
+                if (isInterrupt(e)) fetchMe();
+                return;
+            }
             if (isInterrupt(e)) {
-                resetGenTask();
+                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : "clarifying");
                 fetchMe();
                 return;
             }
-            genTask.phase = "error";
-            genTask.error = e.message || String(e);
+            setGenerateError(e);
             genTask.logs.push("× " + genTask.error);
             persistGenTaskNow();
             return;
@@ -2168,14 +2408,17 @@ export async function startGenerate(
             const selectedPathId = await runGradeStage(resumeFromGrade ? resumePhase : "");
             if (selectedPathId !== undefined) chosenPathId = selectedPathId;
         } catch (e: any) {
+            if (!isGenerationRunCurrent(runId)) {
+                if (isInterrupt(e)) fetchMe();
+                return;
+            }
             if (isInterrupt(e)) {
-                resetGenTask();
+                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : "grading");
                 fetchMe();
                 return;
             }
             // 未收到明确 terminal result 时禁止静默跳过分级进入 Planner。
-            genTask.phase = "error";
-            genTask.error = e.message || String(e);
+            setGenerateError(e);
             genTask.logs.push("× " + genTask.error);
             persistGenTaskNow();
             return;
@@ -2200,7 +2443,7 @@ export async function startGenerate(
                 genTask.logs.push(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
                 genTask.files = [];
                 genTask.currentIndex = 0;
-                genTask.error = "";
+                clearGenerateError();
             }
 
             setPhase("planning", replanAttempt === 0
@@ -2291,6 +2534,7 @@ export async function startGenerate(
                         try {
                             bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
                         } catch (be: any) {
+                            if (isInterrupt(be)) throw be;
                             if (be?.noRetry || be?.terminal) throw be;
                             const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
                             genTask.logs.push(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
@@ -2308,7 +2552,7 @@ export async function startGenerate(
                             throw new Error(`桶 #${bucketIndex} 连续连接中断，阶段进度已保存，请稍后重试`);
                         }
                         genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段无返回（${noProgress}/5），继续恢复...`);
-                        await new Promise(resolve => setTimeout(resolve, 1_500));
+                        await waitWithAbort(1_500, generationSignal());
                         continue;
                     }
                     if (bucketResult.replan) { needReplan = true; break; }
@@ -2332,7 +2576,7 @@ export async function startGenerate(
                         }
                         const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
                         genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段暂未推进（${noProgress}/5），稍后重试...`);
-                        await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+                        await waitWithAbort(retryAfterMs, generationSignal());
                         continue;
                     }
                     noProgress = 0;
@@ -2377,16 +2621,19 @@ export async function startGenerate(
             await buildWithRetry();
             return; // success — exit replan loop
         } catch (e: any) {
+            if (!isGenerationRunCurrent(runId)) return;
+            if (isInterrupt(e)) {
+                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : genTask.phase);
+                return;
+            }
             if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
-                genTask.phase = "error";
-                genTask.error = e.message || String(e);
+                setGenerateError(e);
                 genTask.logs.push("× " + genTask.error);
                 return;
             }
             // If error is not from replan, don't retry
             if (!e.message?.includes("重新规划")) {
-                genTask.phase = "error";
-                genTask.error = e.message || String(e);
+                setGenerateError(e);
                 genTask.logs.push("× " + genTask.error);
                 return;
             }
@@ -2505,7 +2752,7 @@ async function pollBuildStatus(): Promise<boolean> {
     while (Date.now() < deadline) {
         // 前三次快速感知启动，随后逐步退避；隐藏标签页进一步降频。
         const delay = document.hidden ? 30_000 : i < 3 ? 5_000 : i < 9 ? 10_000 : 15_000;
-        await new Promise(r => setTimeout(r, delay));
+        await waitWithAbort(delay, generationSignal());
 
         const result = await get(`/api/generate/status?taskId=${genTask.taskId}`);
 
@@ -2539,11 +2786,17 @@ export async function startBuildFromIDE(
     files: { path: string; content: string }[],
     meta?: BuildMeta,
 ) {
+    beginGenerationRun();
+    const runId = generationRunId;
     try {
         await buildWithRetry(files, meta);
     } catch (e: any) {
-        genTask.phase = "error";
-        genTask.error = e?.message || String(e);
+        if (!isGenerationRunCurrent(runId)) return;
+        if (isInterrupt(e)) {
+            markInterrupted(genTask.phase);
+            return;
+        }
+        setGenerateError(e);
         genTask.logs.push("× " + genTask.error);
     }
 }
@@ -2573,8 +2826,12 @@ export async function appendFeature(appendText: string) {
     if (!text) return;
     if (genTask.phase !== "done" || !genTask.files.length) return;
 
+    beginGenerationRun();
+    const appendRunId = generationRunId;
     try {
-        genTask.error = "";
+        const signal = generationSignal();
+        const runId = generationRunId;
+        clearGenerateError();
         setPhase("generating", `▸ 增量需求：${text.slice(0, 50)}`);
         genTask.streamingPhase = "generating";
         genTask.streamingFile = "增量分析中";
@@ -2608,7 +2865,9 @@ export async function appendFeature(appendText: string) {
                 ],
                 stream: true,
             }),
+            signal,
         });
+        assertGenerationRun(runId);
         await rejectAccessResponse(resp);
         if (!resp.ok) throw await responseError(resp);
         if (!resp.body) throw new Error("无响应流");
@@ -2633,6 +2892,7 @@ export async function appendFeature(appendText: string) {
                 try {
                     event = JSON.parse(payload);
                 } catch { continue; }
+                assertGenerationRun(runId);
                 if (event?.type === "error" || (event?.type === "result" && event?.error)) {
                     rejectAccessEvent(event);
                     const message = typeof event?.error === "string"
@@ -2685,10 +2945,14 @@ export async function appendFeature(appendText: string) {
             },
         );
     } catch (e: any) {
+        if (!isGenerationRunCurrent(appendRunId)) return;
+        if (isInterrupt(e)) {
+            markInterrupted(genTask.phase);
+            return;
+        }
         genTask.streamingPhase = "";
         genTask.streamingContent = "";
-        genTask.phase = "error";
-        genTask.error = e?.message || String(e);
+        setGenerateError(e);
         genTask.logs.push("× 追加失败：" + genTask.error);
     }
 }

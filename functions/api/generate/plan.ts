@@ -39,6 +39,7 @@ import {
     acquireTaskPlannerLease,
     assertBoundTaskStoreSchema,
     cleanupExpiredTasks,
+    deleteTask,
     getOwnedTask,
     markTaskQuotaExhausted,
     putTaskWithOperationLease,
@@ -50,6 +51,12 @@ import {
     TaskStoreUnavailableError,
 } from "../../_lib/taskStore";
 import { preflightOperations } from "../../_lib/preflightOperations";
+import {
+    abortOnWriteFailure,
+    ClientCancelledError,
+    isClientCancelled,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 export const PLANNER_PREPARATION_TIMEOUT_MS = 20_000;
 export const PLANNER_UPSTREAM_TIMEOUT_MS = 100_000;
@@ -175,14 +182,20 @@ async function writeSSE(
     writer: WritableStreamDefaultWriter<Uint8Array>,
     encoder: TextEncoder,
     data: any,
+    operationAbort: AbortController,
 ): Promise<void> {
-    try { await writer.write(sseEvent(encoder, data)); } catch { /* keep processing after disconnect */ }
+    try {
+        await writer.write(sseEvent(encoder, data));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "Planner client disconnected");
+    }
 }
 
 interface PlannerStreamCallbacks {
     onActivity?: () => void;
     onThinking?: (content: string) => void | Promise<void>;
     onOutput?: (content: string) => void | Promise<void>;
+    onUsage?: (usage: UsageBreakdown) => void | Promise<void>;
     requireUsage?: boolean;
 }
 
@@ -254,7 +267,10 @@ async function consumePlannerChatStream(
                 : chunk.error?.message || chunk.error?.code;
             throw new Error(message || "Model stream failed");
         }
-        if (chunk?.usage) usage = chunk.usage as UsageBreakdown;
+        if (chunk?.usage) {
+            usage = chunk.usage as UsageBreakdown;
+            await callbacks.onUsage?.(usage);
+        }
 
         const delta = chunk?.choices?.[0]?.delta ?? chunk?.choices?.[0]?.message ?? {};
         const thinkingDelta = plannerStreamText(
@@ -367,10 +383,11 @@ async function writePlannerError(
     code: string,
     status: number,
     details: Record<string, unknown> = {},
+    operationAbort: AbortController,
 ): Promise<void> {
     const payload = { stage: "plan", error, code, status, ...details };
-    await writeSSE(writer, encoder, { type: "error", ...payload });
-    await writeSSE(writer, encoder, { type: "result", ...payload });
+    await writeSSE(writer, encoder, { type: "error", ...payload }, operationAbort);
+    await writeSSE(writer, encoder, { type: "result", ...payload }, operationAbort);
 }
 
 function isValidBlueprint(bp: any): bp is MainBlueprint {
@@ -476,6 +493,17 @@ function plannerTimeoutResponse(): Response {
     });
 }
 
+function plannerCancelledResponse(): Response {
+    return new Response(JSON.stringify({
+        error: "Planner 请求已取消",
+        code: "CLIENT_CANCELLED",
+        retryable: false,
+    }), {
+        status: 499,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+}
+
 function plannerSettlementPendingResponse(): Response {
     return new Response(JSON.stringify({
         error: "Planner 结果已生成，额度结算暂未完成，请重试当前请求",
@@ -569,8 +597,14 @@ function withPlannerDeadline<T>(operation: () => Promise<T>, signal: AbortSignal
 }
 
 function isPlannerTimeout(error: unknown): boolean {
-    return error instanceof PlannerTimeoutError
-        || !!error && typeof error === "object" && "name" in error && error.name === "AbortError";
+    return !isClientCancelled(error) && (
+        error instanceof PlannerTimeoutError
+        || (!!error && typeof error === "object" && "name" in error && error.name === "AbortError")
+    );
+}
+
+function assertPlannerOperationActive(signal: AbortSignal): void {
+    if (signal.aborted) throw plannerAbortReason(signal, "Planner 请求已取消");
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -579,60 +613,87 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     // ─── Mode 1: initialize task, no plan yet ───
     if (!body.taskId) {
-        const llm = await resolveLLM(context);
-        if (!llm.apiKey) return new Response("API key not configured", { status: 500 });
-        try {
-            await assertBoundTaskStoreSchema(context.env);
-        } catch (error) {
-            const message = error instanceof TaskStoreUnavailableError
-                ? error.message
-                : "D1 任务数据库暂不可用，请稍后重试";
-            return new Response(JSON.stringify({
-                error: message,
-                code: "TASK_STORE_MIGRATION_REQUIRED",
-            }), {
-                status: 503,
-                headers: { "Content-Type": "application/json", "Retry-After": "30" },
-            });
-        }
-
-        const { userPrompt, coreType, version } = body;
-        // 建任务即拉取已挂载 skill，让 clarify / grade / plan / fileGen 全程都能感知能力
-        const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
-        const skills = skillIds.length ? await getSkillBundles(context.env, skillIds) : [];
-        const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const state = {
-            taskId,
-            uid,
-            billingProvider: taskBillingProviderFor(llm),
-            status: "clarifying",
-            userPrompt,
-            coreType,
-            version,
-            clarifyRounds: [],
-            clarifyDone: false,
-            preflightProtocolVersion: 1,
-            clarifyOperations: [],
-            gradeOperations: [],
-            projectName: "",
-            javaVersion: "",
-            packageName: "",
-            mainBlueprint: null,
-            plan: [],
-            buckets: [],
-            fileStatuses: {},
-            generationCheckpoints: {},
-            currentBucket: 0,
-            generatedFiles: [],
-            currentFileIndex: 0,
-            skills,
-            logs: ["任务已创建，进入澄清阶段"],
+        const signal = context.request.signal;
+        let persistedTaskId = "";
+        const assertClientActive = () => {
+            if (signal.aborted) {
+                throw new ClientCancelledError("Planner task creation client disconnected", signal.reason);
+            }
         };
-        await putTaskState(context.env, taskId, state, 3600, uid);
-        context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
-        return new Response(JSON.stringify({ taskId }), {
-            headers: { "Content-Type": "application/json" },
-        });
+        try {
+            assertClientActive();
+            const llm = await resolveLLM(context);
+            assertClientActive();
+            if (!llm.apiKey) return new Response("API key not configured", { status: 500 });
+            try {
+                await assertBoundTaskStoreSchema(context.env);
+                assertClientActive();
+            } catch (error) {
+                if (signal.aborted) throw new ClientCancelledError(
+                    "Planner task creation client disconnected",
+                    signal.reason ?? error,
+                );
+                const message = error instanceof TaskStoreUnavailableError
+                    ? error.message
+                    : "D1 任务数据库暂不可用，请稍后重试";
+                return new Response(JSON.stringify({
+                    error: message,
+                    code: "TASK_STORE_MIGRATION_REQUIRED",
+                }), {
+                    status: 503,
+                    headers: { "Content-Type": "application/json", "Retry-After": "30" },
+                });
+            }
+
+            const { userPrompt, coreType, version } = body;
+            // 建任务即拉取已挂载 skill，让 clarify / grade / plan / fileGen 全程都能感知能力
+            const skillIds: string[] = Array.isArray(body.skillIds) ? body.skillIds : [];
+            const skills = skillIds.length ? await getSkillBundles(context.env, skillIds, { signal }) : [];
+            assertClientActive();
+            const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const state = {
+                taskId,
+                uid,
+                billingProvider: taskBillingProviderFor(llm),
+                status: "clarifying",
+                userPrompt,
+                coreType,
+                version,
+                clarifyRounds: [],
+                clarifyDone: false,
+                preflightProtocolVersion: 1,
+                clarifyOperations: [],
+                gradeOperations: [],
+                projectName: "",
+                javaVersion: "",
+                packageName: "",
+                mainBlueprint: null,
+                plan: [],
+                buckets: [],
+                fileStatuses: {},
+                generationCheckpoints: {},
+                currentBucket: 0,
+                generatedFiles: [],
+                currentFileIndex: 0,
+                skills,
+                logs: ["任务已创建，进入澄清阶段"],
+            };
+            await putTaskState(context.env, taskId, state, 3600, uid);
+            persistedTaskId = taskId;
+            assertClientActive();
+            context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
+            return new Response(JSON.stringify({ taskId }), {
+                headers: { "Content-Type": "application/json" },
+            });
+        } catch (error) {
+            if (!isClientCancelled(error) && !signal.aborted) throw error;
+            if (persistedTaskId) {
+                await deleteTask(context.env, persistedTaskId, uid).catch((cleanupError) => {
+                    console.warn("cancelled planner task cleanup failed", cleanupError);
+                });
+            }
+            return plannerCancelledResponse();
+        }
     }
 
     // ─── Mode 2: finalize plan using reasoner + clarify answers ───
@@ -702,9 +763,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     if (!leaseMode) return plannerBusyResponse();
 
+    const operationAbort = new AbortController();
+    const disposeClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Planner client disconnected",
+    );
     const operationDeadline = createPlannerDeadline(
         PLANNER_OPERATION_TIMEOUT_MS,
         "Planner 整体处理超时",
+        operationAbort.signal,
     );
     const preparationDeadline = createPlannerDeadline(
         PLANNER_PREPARATION_TIMEOUT_MS,
@@ -795,6 +863,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (Number(state.preflightProtocolVersion) >= 1) {
             const clarifyOperations = preflightOperations(state, "clarify");
             const latestClarify = clarifyOperations[clarifyOperations.length - 1];
+            if (latestClarify?.status === "cancelled") {
+                return new Response(JSON.stringify({
+                    error: "需求确认请求已取消",
+                    code: "CLARIFY_CANCELLED",
+                    retryable: false,
+                    ...(latestClarify.requestId ? { requestId: latestClarify.requestId } : {}),
+                }), {
+                    status: 409,
+                    headers: { "Content-Type": "application/json" },
+                });
+            }
             if (latestClarify?.status !== "completed" || !latestClarify.billingSettled) {
                 return new Response(JSON.stringify({
                     error: "澄清阶段用量尚未结算，请恢复原请求",
@@ -810,6 +889,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
             const gradeOperations = preflightOperations(state, "grade");
             const latestGrade = gradeOperations[gradeOperations.length - 1];
+            if (latestGrade?.status === "cancelled") {
+                return new Response(JSON.stringify({
+                    error: "复杂度分级请求已取消",
+                    code: "GRADE_CANCELLED",
+                    retryable: false,
+                    ...(latestGrade.requestId ? { requestId: latestGrade.requestId } : {}),
+                }), {
+                    status: 409,
+                    headers: { "Content-Type": "application/json" },
+                });
+            }
             if (!state.grade || latestGrade?.status !== "completed" || !latestGrade.billingSettled) {
                 return new Response(JSON.stringify({
                     error: "复杂度分级尚未完成",
@@ -966,12 +1056,72 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         const process = (async () => {
             const heartbeat = setInterval(() => {
-                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "plan", t: Date.now() })).catch(() => { });
+                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "plan", t: Date.now() })).catch((error) => {
+                    try { abortOnWriteFailure(operationAbort, error, "Planner client disconnected"); }
+                    catch { /* operation signal carries the cancellation */ }
+                });
             }, 12000);
             let resultCommitted = false;
             let attemptBillingCommitted = false;
+            let knownUsage: UsageBreakdown | undefined;
+            const settleKnownUsageAfterCancellation = async () => {
+                if (llm.byok || !uid || leaseReleased) return;
+                if (!knownUsage && !resultCommitted && !attemptBillingCommitted) return;
+                try {
+                    if (!resultCommitted && !attemptBillingCommitted) {
+                        state.plannerAttemptBillingPending = {
+                            requestId: plannerRequestId,
+                            kind: "client_cancelled",
+                            recordedAt: Date.now(),
+                        };
+                        const committed = await putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode,
+                            knownUsage ? usageCost(llm.modelFor("pro"), knownUsage) : 0,
+                            3600,
+                            uid,
+                            false,
+                        );
+                        if (!committed) return;
+                        attemptBillingCommitted = true;
+                    }
+
+                    const settlement = await settleTaskCostQuota(context.env, uid, taskId);
+                    state.totalCost = settlement.total;
+                    state.consumedQuota = settlement.consumed;
+                    state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                    if (resultCommitted) state.plannerBillingSettled = true;
+                    delete state.plannerAttemptBillingPending;
+                    if (settlement.outOfQuota) {
+                        await markTaskQuotaExhausted(context.env, taskId, uid);
+                    }
+                    const settled = await putTaskWithPlannerLease(
+                        context.env,
+                        taskId,
+                        JSON.stringify(state),
+                        leaseToken,
+                        leaseMode,
+                        3600,
+                        uid,
+                    );
+                    if (settled) {
+                        leaseReleased = true;
+                        attemptBillingCommitted = false;
+                    }
+                } catch (billingError) {
+                    console.warn("cancelled planner usage settlement failed", billingError);
+                }
+            };
             try {
-                await writeSSE(writer, encoder, { type: "phase", phase: "planning", stage: "plan" });
+                await writeSSE(
+                    writer,
+                    encoder,
+                    { type: "phase", phase: "planning", stage: "plan" },
+                    operationAbort,
+                );
                 const upstreamDeadline = createPlannerIdleDeadline(
                     PLANNER_UPSTREAM_IDLE_MS,
                     "Planner 模型响应空闲超时",
@@ -1010,6 +1160,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             authFailed ? "LLM_AUTH_FAILED" : "PLANNER_UPSTREAM_ERROR",
                             resp.status,
                             { retryable: !authFailed },
+                            operationAbort,
                         );
                         return;
                     }
@@ -1018,19 +1169,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         () => consumePlannerChatStream(resp, {
                             onActivity: upstreamDeadline.arm,
                             requireUsage: !llm.byok,
+                            onUsage: usage => { knownUsage = usage; },
                             onThinking: content => writeSSE(writer, encoder, {
                                 type: "reasoning", stage: "plan", content,
-                            }),
+                            }, operationAbort),
                             onOutput: content => writeSSE(writer, encoder, {
                                 type: "delta", stage: "plan", content,
-                            }),
+                            }, operationAbort),
                         }),
                         upstreamDeadline.signal,
                         "读取 Planner 模型响应超时",
                     );
+                    knownUsage ??= streamed.usage;
                 } finally {
                     upstreamDeadline.dispose();
                 }
+                assertPlannerOperationActive(operationDeadline.signal);
 
                 await recordKnowledgeContextUsage({
                     env: context.env,
@@ -1038,6 +1192,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     generationTaskId: taskId,
                     stage: "planner",
                 }).catch((error) => console.warn("planner knowledge usage recording failed", error));
+                assertPlannerOperationActive(operationDeadline.signal);
 
                 const nextPlannerLearningRequest = plannerTools.length
                     ? await createModelLearningRequest({
@@ -1053,6 +1208,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             : [],
                     })
                     : null;
+                assertPlannerOperationActive(operationDeadline.signal);
                 if (nextPlannerLearningRequest) {
                     if (previousPlannerLearningRequest) {
                         removeModelLearningRequest(state, previousPlannerLearningRequest.requestId);
@@ -1069,20 +1225,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             kind: "learning_tool",
                             recordedAt: Date.now(),
                         };
-                        const committed = await withPlannerDeadline(
-                            () => putTaskWithOperationLeaseAndCost(
-                                context.env,
-                                taskId,
-                                JSON.stringify(state),
-                                leaseToken,
-                                leaseMode,
-                                usageCost(llm.modelFor("pro"), usage),
-                                3600,
-                                uid,
-                                false,
-                            ),
-                            operationDeadline.signal,
-                            "提交 Planner Learning 用量超时",
+                        const committed = await putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode,
+                            usageCost(llm.modelFor("pro"), usage),
+                            3600,
+                            uid,
+                            false,
                         );
                         if (!committed) {
                             await writePlannerError(
@@ -1092,6 +1244,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                                 "PLANNER_IN_PROGRESS",
                                 409,
                                 { retryable: true, retryAfter: 2 },
+                                operationAbort,
                             );
                             return;
                         }
@@ -1139,6 +1292,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             "PLANNER_IN_PROGRESS",
                             409,
                             { retryable: true, retryAfter: 2 },
+                            operationAbort,
                         );
                         return;
                     }
@@ -1155,7 +1309,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             targetPath: nextPlannerLearningRequest.targetPath,
                             questions: nextPlannerLearningRequest.needs.map((need) => need.claim.question),
                         }],
-                    });
+                    }, operationAbort);
                     return;
                 }
                 if (previousPlannerLearningRequest) {
@@ -1166,6 +1320,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const content = stripFences(streamed.content);
                 let validationUsageCharged = false;
                 const chargeValidationFailure = async () => {
+                    assertPlannerOperationActive(operationDeadline.signal);
                     const usage = streamed.usage;
                     if (validationUsageCharged || llm.byok || !uid || !usage) return;
                     validationUsageCharged = true;
@@ -1174,20 +1329,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         kind: "validation_failure",
                         recordedAt: Date.now(),
                     };
-                    const committed = await withPlannerDeadline(
-                        () => putTaskWithOperationLeaseAndCost(
-                            context.env,
-                            taskId,
-                            JSON.stringify(state),
-                            leaseToken,
-                            leaseMode,
-                            usageCost(llm.modelFor("pro"), usage),
-                            3600,
-                            uid,
-                            false,
-                        ),
-                        operationDeadline.signal,
-                        "提交 Planner 校验失败用量超时",
+                    const committed = await putTaskWithOperationLeaseAndCost(
+                        context.env,
+                        taskId,
+                        JSON.stringify(state),
+                        leaseToken,
+                        leaseMode,
+                        usageCost(llm.modelFor("pro"), usage),
+                        3600,
+                        uid,
+                        false,
                     );
                     if (!committed) throw new Error("Planner validation billing commit lost its lease");
                     attemptBillingCommitted = true;
@@ -1231,7 +1382,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     plan = JSON.parse(content);
                 } catch {
                     await chargeValidationFailure();
-                    await writePlannerError(writer, encoder, "Planner 返回非 JSON", "PLANNER_INVALID_JSON", 422, { raw: content });
+                    await writePlannerError(
+                        writer,
+                        encoder,
+                        "Planner 返回非 JSON",
+                        "PLANNER_INVALID_JSON",
+                        422,
+                        { raw: content },
+                        operationAbort,
+                    );
                     return;
                 }
 
@@ -1244,6 +1403,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         "PLANNER_INVALID_ROOT",
                         422,
                         { raw: plan },
+                        operationAbort,
                     );
                     return;
                 }
@@ -1258,6 +1418,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         "PLANNER_INVALID_BLUEPRINT",
                         422,
                         { raw: plan },
+                        operationAbort,
                     );
                     return;
                 }
@@ -1266,7 +1427,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 // —— 文件项校验：每个文件必须带合法的 generatorType ——
                 if (!Array.isArray(plan.files) || plan.files.length === 0) {
                     await chargeValidationFailure();
-                    await writePlannerError(writer, encoder, "Planner 未返回 files 数组", "PLANNER_INVALID_FILES", 422);
+                    await writePlannerError(
+                        writer,
+                        encoder,
+                        "Planner 未返回 files 数组",
+                        "PLANNER_INVALID_FILES",
+                        422,
+                        {},
+                        operationAbort,
+                    );
                     return;
                 }
                 const validTypes = new Set<string>(GENERATOR_TYPES);
@@ -1292,6 +1461,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             "PLANNER_INVALID_FILE",
                             422,
                             { file: f },
+                            operationAbort,
                         );
                         return;
                     }
@@ -1304,6 +1474,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             "PLANNER_INVALID_GENERATOR_TYPE",
                             422,
                             { file: f },
+                            operationAbort,
                         );
                         return;
                     }
@@ -1353,10 +1524,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         "PLANNER_INVALID_FILE_GRAPH",
                         422,
                         { reason: error instanceof Error ? error.message : String(error) },
+                        operationAbort,
                     );
                     return;
                 }
 
+                assertPlannerOperationActive(operationDeadline.signal);
                 state.status = "planning";
                 state.projectName = plan.projectName;
                 state.javaVersion = plan.javaVersion;
@@ -1375,7 +1548,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const costDelta = !llm.byok && streamed.usage
                     ? usageCost(llm.modelFor("pro"), streamed.usage)
                     : 0;
-                const committed = await withPlannerDeadline(() => putTaskWithOperationLeaseAndCost(
+                // Once a fenced cost commit starts, await its definitive result even if the
+                // client disconnects. Racing it with the client signal can double-record usage
+                // when cancellation recovery cannot tell that D1 already committed the write.
+                const committed = await putTaskWithOperationLeaseAndCost(
                     context.env,
                     taskId,
                     JSON.stringify(state),
@@ -1385,7 +1561,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     3600,
                     uid,
                     llm.byok,
-                ), operationDeadline.signal, "提交 Planner 结果超时");
+                );
                 if (!committed) {
                     const latestRaw = await withPlannerDeadline(
                         () => getOwnedTask(context.env, taskId, uid),
@@ -1405,7 +1581,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                                     type: "result",
                                     stage: "plan",
                                     ...plannerResultPayload(taskId, latest),
-                                });
+                                }, operationAbort);
                                 return;
                             }
                         } catch { /* wait for the current lease holder */ }
@@ -1417,6 +1593,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         "PLANNER_IN_PROGRESS",
                         409,
                         { retryAfter: 2 },
+                        operationAbort,
                     );
                     return;
                 }
@@ -1461,9 +1638,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     type: "result",
                     stage: "plan",
                     ...plannerResultPayload(taskId, state),
-                });
+                }, operationAbort);
             } catch (error: any) {
-                const timedOut = isPlannerTimeout(error) || operationDeadline.signal.aborted;
+                const cancelled = isClientCancelled(error)
+                    || isClientCancelled(operationAbort.signal.reason)
+                    || isClientCancelled(operationDeadline.signal.reason);
+                if (cancelled) {
+                    await settleKnownUsageAfterCancellation();
+                    return;
+                }
+                const timedOut = isPlannerTimeout(error)
+                    || isPlannerTimeout(operationDeadline.signal.reason);
                 const settlementPending = resultCommitted || attemptBillingCommitted;
                 const message = timedOut
                     ? "Planner 处理超时，请重试"
@@ -1475,11 +1660,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     settlementPending ? "PLANNER_SETTLEMENT_PENDING" : (timedOut ? "PLANNER_TIMEOUT" : "PLANNER_FAILED"),
                     settlementPending ? 503 : (timedOut ? 504 : 500),
                     settlementPending ? { retryable: true, retryAfter: 2 } : {},
+                    operationAbort,
                 );
             } finally {
                 clearInterval(heartbeat);
                 try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 try { await writer.close(); } catch { /* already disconnected */ }
+                disposeClientAbort();
                 operationDeadline.dispose();
                 if (!leaseReleased) {
                     await releaseTaskPlannerLease(
@@ -1502,13 +1689,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             },
         });
     } catch (error) {
-        if (isPlannerTimeout(error) || operationDeadline.signal.aborted || preparationDeadline.signal.aborted) {
+        if (isClientCancelled(error)
+            || isClientCancelled(operationAbort.signal.reason)
+            || isClientCancelled(operationDeadline.signal.reason)
+            || isClientCancelled(preparationDeadline.signal.reason)) {
+            return plannerCancelledResponse();
+        }
+        if (isPlannerTimeout(error)
+            || isPlannerTimeout(operationDeadline.signal.reason)
+            || isPlannerTimeout(preparationDeadline.signal.reason)) {
             return plannerTimeoutResponse();
         }
         throw error;
     } finally {
         preparationDeadline.dispose();
         if (!streamOwnsLease) {
+            disposeClientAbort();
             operationDeadline.dispose();
             if (!leaseReleased) {
                 const release = releaseTaskPlannerLease(

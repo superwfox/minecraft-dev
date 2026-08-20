@@ -12,6 +12,12 @@ import {
 } from "../_lib/llm";
 import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
 import { buildApiContractContext } from "../_lib/apiContracts";
+import {
+    ClientCancelledError,
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkClientAbortSignal,
+} from "../_lib/clientAbort";
 
 interface Env {
     DEEPSEEK_API_KEY: string;
@@ -79,6 +85,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         payload.thinking = {type: "enabled"};
     }
 
+    const upstreamAbort = new AbortController();
+    const unlinkClientAbort = linkClientAbortSignal(
+        upstreamAbort,
+        context.request.signal,
+        "Stream request cancelled by client",
+    );
     let resp: Response;
     try {
         resp = await fetch(llm.url, {
@@ -88,15 +100,40 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 "Authorization": "Bearer " + llm.apiKey,
             },
             body: JSON.stringify(payload),
+            signal: upstreamAbort.signal,
         });
-    } catch {
+    } catch (error) {
+        unlinkClientAbort();
+        if (isClientCancelled(error) || isClientCancelled(upstreamAbort.signal.reason)) {
+            return new Response(JSON.stringify({ error: "请求已取消", code: "CLIENT_CANCELLED" }), {
+                status: 499, headers: { "Content-Type": "application/json" },
+            });
+        }
         return new Response(JSON.stringify({ error: "与模型服务连接失败" }), {
             status: 502, headers: { "Content-Type": "application/json" },
         });
     }
 
-    if (!resp.ok) return new Response(await resp.text(), {status: resp.status});
-    if (!resp.body) return new Response("Empty response", {status: 502});
+    if (!resp.ok) {
+        try {
+            return new Response(await resp.text(), {status: resp.status});
+        } catch (error) {
+            if (isClientCancelled(error) || isClientCancelled(upstreamAbort.signal.reason)) {
+                return new Response(JSON.stringify({ error: "请求已取消", code: "CLIENT_CANCELLED" }), {
+                    status: 499, headers: { "Content-Type": "application/json" },
+                });
+            }
+            return new Response(JSON.stringify({ error: "无法读取模型服务错误响应" }), {
+                status: 502, headers: { "Content-Type": "application/json" },
+            });
+        } finally {
+            unlinkClientAbort();
+        }
+    }
+    if (!resp.body) {
+        unlinkClientAbort();
+        return new Response("Empty response", {status: 502});
+    }
 
     // 用 TransformStream 包一层：事件级转发给前端，同时本端解析 usage。
     const upstream = resp.body;
@@ -104,6 +141,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
+    let downstreamFinished = false;
+
+    const writeDownstream = async (value: Uint8Array) => {
+        try {
+            await writer.write(value);
+        } catch (error) {
+            abortOnWriteFailure(upstreamAbort, error);
+        }
+    };
+
+    const downstreamClosed = writer.closed.catch((error) => {
+        if (downstreamFinished || upstreamAbort.signal.aborted) return;
+        upstreamAbort.abort(new ClientCancelledError("Client disconnected from stream", error));
+    });
 
     const pump = (async () => {
         const reader = upstream.getReader();
@@ -143,13 +194,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const eventText = buffer.slice(0, boundary.index);
                 buffer = buffer.slice(boundary.index + boundary[0].length);
                 inspectEvent(eventText);
-                await writer.write(encoder.encode(eventText + boundary[0]));
+                await writeDownstream(encoder.encode(eventText + boundary[0]));
             }
         };
 
         // 只在完整 SSE 事件之间插入注释心跳，避免破坏被网络分块截开的 JSON 事件。
         heartbeat = setInterval(() => {
-            writer.write(encoder.encode(": heartbeat\n\n")).catch(() => { });
+            writeDownstream(encoder.encode(": heartbeat\n\n")).catch(() => { });
         }, 12_000);
         try {
             while (!upstreamDone) {
@@ -164,24 +215,28 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             buffer += decoder.decode();
             await forwardCompleteEvents();
             if (!upstreamDone) throw new Error("upstream stream ended before [DONE]");
-        } catch {
-            if (!upstreamDone) {
+        } catch (error) {
+            const cancelled = isClientCancelled(error) || isClientCancelled(upstreamAbort.signal.reason);
+            if (!upstreamDone && !cancelled) {
                 try {
-                    await writer.write(encoder.encode(`data: ${JSON.stringify({
+                    await writeDownstream(encoder.encode(`data: ${JSON.stringify({
                         type: "error",
                         error: "模型流连接异常，请重试",
                         code: "STREAM_TRUNCATED",
                         status: 502,
                         retryable: true,
                     })}\n\n`));
-                    await writer.write(encoder.encode("data: [DONE]\n\n"));
+                    await writeDownstream(encoder.encode("data: [DONE]\n\n"));
                 } catch { /* client disconnected */ }
             }
         } finally {
             if (heartbeat) clearInterval(heartbeat);
             try { await reader.cancel(); } catch { /* already closed */ }
             try { reader.releaseLock(); } catch { /* already released */ }
+            downstreamFinished = true;
             try { await writer.close(); } catch { /* already closed */ }
+            await downstreamClosed;
+            unlinkClientAbort();
         }
 
         // 流结束后累积成本（BYOK 自带 key 时跳过）

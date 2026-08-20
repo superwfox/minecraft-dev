@@ -26,6 +26,12 @@ import {
     type ModelLearningResolution,
 } from "../../_lib/learning/toolRuntime";
 import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
+import {
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkAbortSignal,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 const MAX_REWORK = 3;
 const MAX_DYNAMIC_GEN = 3;
@@ -69,8 +75,13 @@ async function writeSSE(
     writer: WritableStreamDefaultWriter<Uint8Array>,
     encoder: TextEncoder,
     data: any,
+    operationAbort: AbortController,
 ): Promise<void> {
-    try { await writer.write(sseEvent(encoder, data)); } catch { /* generation continues after client disconnect */ }
+    try {
+        await writer.write(sseEvent(encoder, data));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "Bucket client disconnected");
+    }
 }
 
 interface BucketStreamError {
@@ -102,10 +113,15 @@ interface BackoffOptions {
     onRetry?: (event: { attempt: number; status: number; waitMs: number }) => void;
 }
 
-function abortError(): Error {
+function abortError(signal?: AbortSignal | null): Error {
+    if (signal?.reason instanceof Error) return signal.reason;
     const error = new Error("The operation was aborted");
     error.name = "AbortError";
     return error;
+}
+
+function assertBucketActive(signal: AbortSignal): void {
+    if (signal.aborted) throw abortError(signal);
 }
 
 function retryDelayMs(retryAfter: string | null, attempt: number): number {
@@ -121,13 +137,13 @@ function retryDelayMs(retryAfter: string | null, attempt: number): number {
 }
 
 async function sleepWithSignal(ms: number, signal?: AbortSignal | null): Promise<void> {
-    if (signal?.aborted) throw abortError();
+    if (signal?.aborted) throw abortError(signal);
     await new Promise<void>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout>;
         const onAbort = () => {
             clearTimeout(timer);
             signal?.removeEventListener("abort", onAbort);
-            reject(abortError());
+            reject(abortError(signal));
         };
         timer = setTimeout(() => {
             signal?.removeEventListener("abort", onAbort);
@@ -161,6 +177,7 @@ async function callAI(
     dbg: Dbg = noopDbg,
     messages?: ModelChatMessage[],
     tools: Record<string, unknown>[] = [],
+    signal?: AbortSignal,
 ): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
@@ -175,7 +192,8 @@ async function callAI(
     if (tools.length) body.tools = tools;
 
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    const disposeParentAbort = linkAbortSignal(ctrl, signal);
+    const timer = setTimeout(() => ctrl.abort(abortError()), LLM_TIMEOUT_MS);
     const t0 = Date.now();
     dbg("callAI:req", { model, jsonMode, usePro, sysLen: system.length, userLen: user.length });
     try {
@@ -209,6 +227,7 @@ async function callAI(
         throw e;
     } finally {
         clearTimeout(timer);
+        disposeParentAbort();
     }
 }
 
@@ -223,6 +242,7 @@ async function callAIStream(
     dbg: Dbg = noopDbg,
     messages?: ModelChatMessage[],
     tools: Record<string, unknown>[] = [],
+    signal?: AbortSignal,
 ): Promise<AICallResult> {
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse(几百次)会超 CPU
     // 被硬杀(debug 实测:29 次生成仅 2 次跑到 stream:done)。改为非流式,只做 1 次 resp.json()——
@@ -240,7 +260,8 @@ async function callAIStream(
     if (tools.length) body.tools = tools;
 
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    const disposeParentAbort = linkAbortSignal(ctrl, signal);
+    const timer = setTimeout(() => ctrl.abort(abortError()), LLM_TIMEOUT_MS);
     const t0 = Date.now();
     dbg("stream:req", { path: pathTag, model, usePro, sysLen: system.length, userLen: user.length });
     try {
@@ -275,6 +296,7 @@ async function callAIStream(
         throw e;
     } finally {
         clearTimeout(timer);
+        disposeParentAbort();
     }
 }
 
@@ -372,12 +394,14 @@ async function logGeneration(
     state: any,
     writer: WritableStreamDefaultWriter<Uint8Array>,
     encoder: TextEncoder,
+    operationAbort: AbortController,
     msg: string,
     path?: string,
 ): Promise<void> {
+    assertBucketActive(operationAbort.signal);
     state.logs ??= [];
     state.logs.push(msg);
-    await writeSSE(writer, encoder, { type: "log", path, msg });
+    await writeSSE(writer, encoder, { type: "log", path, msg }, operationAbort);
 }
 
 function nonEmptyModelContent(result: AICallResult, stage: string): string {
@@ -403,11 +427,13 @@ async function callWithLearningTool(input: {
     mcVersion: string;
     resolveTool: ResolveLearningToolFn;
     charge: ChargeFn;
+    signal: AbortSignal;
     invoke: (
         messages: ModelChatMessage[],
         tools: Record<string, unknown>[],
     ) => Promise<AICallResult>;
 }): Promise<LearningAwareCallResult> {
+    assertBucketActive(input.signal);
     const baseMessages: ModelChatMessage[] = [
         { role: "system", content: input.system },
         { role: "user", content: input.user },
@@ -441,6 +467,7 @@ async function callWithLearningTool(input: {
         : [];
     const result = await input.invoke(messages, tools);
     await input.charge(result);
+    assertBucketActive(input.signal);
     const nextRequest = tools.length ? await createModelLearningRequest({
         message: result.message,
         messages,
@@ -489,8 +516,10 @@ async function processFileStage(
     onKnowledgeApplied: (filePath: string) => void,
     resolveLearningTool: ResolveLearningToolFn,
     charge: ChargeFn,
+    operationAbort: AbortController,
     dbg: Dbg = noopDbg,
 ): Promise<FileStageOutcome> {
+    assertBucketActive(operationAbort.signal);
     const filePath = target.path;
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
     const apiContractInput = {
@@ -537,7 +566,7 @@ async function processFileStage(
             reworkCount: checkpoint.reworkCount,
         });
         const doneMsg = `● ${filePath} 已完成${checkpoint.reworkCount > 0 ? ` (修正${checkpoint.reworkCount}次)` : ""}`;
-        await logGeneration(state, writer, encoder, doneMsg, filePath);
+        await logGeneration(state, writer, encoder, operationAbort, doneMsg, filePath);
         return {
             path: filePath,
             checkpoint: null,
@@ -555,7 +584,7 @@ async function processFileStage(
         };
     };
     const runRework = async (): Promise<FileStageOutcome> => {
-        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reworking" });
+        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reworking" }, operationAbort);
         dbg("file:rework-begin", { path: filePath, round: checkpoint.reworkCount });
         const rw = reworkPrompt(
             filePath,
@@ -580,8 +609,10 @@ async function processFileStage(
             mcVersion: ctx.version,
             resolveTool: resolveLearningTool,
             charge,
+            signal: operationAbort.signal,
             invoke: (messages, tools) => callAIStream(
                 llm, rw.system, rw.user, writer, encoder, filePath, false, dbg, messages, tools,
+                operationAbort.signal,
             ),
         });
         if (call.kind === "learning") return waitForLearning(call.request, "rework");
@@ -589,7 +620,7 @@ async function processFileStage(
         checkpoint.content = nonEmptyModelContent(rwRes, "返工");
         if (checkpoint.reworkCount >= MAX_REWORK) {
             const warnMsg = `! ${filePath} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
-            await logGeneration(state, writer, encoder, warnMsg, filePath);
+            await logGeneration(state, writer, encoder, operationAbort, warnMsg, filePath);
             return complete();
         }
         checkpoint.stage = "review";
@@ -598,8 +629,8 @@ async function processFileStage(
 
     dbg("stage:start", { path: filePath, stage: checkpoint.stage, round: checkpoint.reworkCount });
     if (checkpoint.stage === "generate") {
-        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "generating" });
-        await logGeneration(state, writer, encoder, `▸ 正在生成 ${filePath}`, filePath);
+        await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "generating" }, operationAbort);
+        await logGeneration(state, writer, encoder, operationAbort, `▸ 正在生成 ${filePath}`, filePath);
         dbg("file:dispatch", { path: filePath, gtype: (target as any).generatorType });
         dbg("file:gen-begin", { path: filePath });
         const call = await callWithLearningTool({
@@ -615,6 +646,7 @@ async function processFileStage(
             mcVersion: ctx.version,
             resolveTool: resolveLearningTool,
             charge,
+            signal: operationAbort.signal,
             invoke: (messages, tools) => callAIStream(
                 llm,
                 dispatched.gen.system,
@@ -626,6 +658,7 @@ async function processFileStage(
                 dbg,
                 messages,
                 tools,
+                operationAbort.signal,
             ),
         });
         if (call.kind === "learning") return waitForLearning(call.request, "generate");
@@ -657,11 +690,12 @@ async function processFileStage(
             apiContractCtx,
             knowledgeContext,
         );
-        await writeSSE(writer, encoder, { type: "phase", path: dynamic.path, phase: "generating" });
+        await writeSSE(writer, encoder, { type: "phase", path: dynamic.path, phase: "generating" }, operationAbort);
         await logGeneration(
             state,
             writer,
             encoder,
+            operationAbort,
             `▸ 动态生成 ${dynamic.className} (${checkpoint.dynamicIndex + 1}/${checkpoint.dynamicFiles.length})`,
             filePath,
         );
@@ -678,6 +712,7 @@ async function processFileStage(
             mcVersion: ctx.version,
             resolveTool: resolveLearningTool,
             charge,
+            signal: operationAbort.signal,
             invoke: (messages, tools) => callAIStream(
                 llm,
                 subDispatched.gen.system,
@@ -689,6 +724,7 @@ async function processFileStage(
                 dbg,
                 messages,
                 tools,
+                operationAbort.signal,
             ),
         });
         if (call.kind === "learning") return waitForLearning(call.request, "dynamic_generate");
@@ -699,7 +735,7 @@ async function processFileStage(
         checkpoint.stage = checkpoint.dynamicIndex < checkpoint.dynamicFiles.length
             ? "dynamic_generate"
             : "review";
-        await logGeneration(state, writer, encoder, `● ${dynamic.className} 动态生成完成`, filePath);
+        await logGeneration(state, writer, encoder, operationAbort, `● ${dynamic.className} 动态生成完成`, filePath);
         return {
             ...outcome(checkpoint.stage),
             newFiles: [{
@@ -713,8 +749,8 @@ async function processFileStage(
 
     if (checkpoint.stage === "rework") return runRework();
 
-    await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reviewing" });
-    await logGeneration(state, writer, encoder, `▸ 审查 ${filePath}...`, filePath);
+    await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reviewing" }, operationAbort);
+    await logGeneration(state, writer, encoder, operationAbort, `▸ 审查 ${filePath}...`, filePath);
     dbg("file:review-begin", { path: filePath, round: checkpoint.reworkCount });
     let review: any;
     let reviewUsedModel = false;
@@ -739,6 +775,7 @@ async function processFileStage(
             mcVersion: ctx.version,
             resolveTool: resolveLearningTool,
             charge,
+            signal: operationAbort.signal,
             invoke: (messages, tools) => callAI(
                 llm,
                 check.system,
@@ -748,6 +785,7 @@ async function processFileStage(
                 dbg,
                 messages,
                 tools,
+                operationAbort.signal,
             ),
         });
         if (call.kind === "learning") return waitForLearning(call.request, "review");
@@ -762,7 +800,7 @@ async function processFileStage(
     const missingClasses = safeMissingClasses(review?.missing_classes);
     dbg("file:review-done", { path: filePath, is_ok: !!review?.is_ok, missing: missingClasses.length });
     if (review?.is_ok) {
-        await logGeneration(state, writer, encoder, `● ${filePath} 审查通过`, filePath);
+        await logGeneration(state, writer, encoder, operationAbort, `● ${filePath} 审查通过`, filePath);
         return complete();
     }
 
@@ -792,6 +830,7 @@ async function processFileStage(
                 state,
                 writer,
                 encoder,
+                operationAbort,
                 `▸ 发现 ${dynamicFiles.length} 个缺失类，动态生成: ${dynamicFiles.map(file => file.className).join(", ")}`,
                 filePath,
             );
@@ -806,6 +845,7 @@ async function processFileStage(
         state,
         writer,
         encoder,
+        operationAbort,
         `↻ ${filePath} 需修正 (${checkpoint.reworkCount}/${MAX_REWORK}): ${checkpoint.lastReason}`,
         filePath,
     );
@@ -946,6 +986,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return resolution;
     };
 
+    const operationAbort = new AbortController();
+    const disposeClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Bucket client disconnected",
+    );
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
     const writer = writable.getWriter();
@@ -961,7 +1007,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             bucket: bucketIndex,
             msg,
             ...(extra || {}),
-        })).catch(() => { });
+        })).catch((error) => {
+            try { abortOnWriteFailure(operationAbort, error, "Bucket client disconnected"); }
+            catch { /* operation signal carries the cancellation */ }
+        });
     };
 
     const process = (async () => {
@@ -970,7 +1019,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let hbCount = 0;
         const heartbeat = setInterval(() => {
             hbCount++;
-            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now(), n: hbCount })).catch(() => { });
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now(), n: hbCount })).catch((error) => {
+                try { abortOnWriteFailure(operationAbort, error, "Bucket client disconnected"); }
+                catch { /* operation signal carries the cancellation */ }
+            });
             dbg("heartbeat", { n: hbCount });
         }, 12000);
         try {
@@ -1002,7 +1054,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             dbg("process:start", { bucketIndex, concurrency, superOn: !!superConcurrency, skills: state.skills?.length || 0, bucketsTotal: buckets.length });
             await writeSSE(writer, encoder, {
                 type: "bucket_start", bucketIndex, paths: targets.map(f => f.path), concurrency,
-            });
+            }, operationAbort);
 
             // 桶已全部完成（无 pending）→ 标记并前进
             if (pending.length === 0) {
@@ -1010,14 +1062,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await putTaskState(context.env, taskId, state, 3600, uid);
                 const completed = completedBucketFiles();
                 const newFiles = dynamicFilesForClient();
-                for (const newFile of newFiles) await writeSSE(writer, encoder, { type: "new_file", ...newFile });
+                for (const newFile of newFiles) {
+                    await writeSSE(writer, encoder, { type: "new_file", ...newFile }, operationAbort);
+                }
                 await writeSSE(writer, encoder, {
                     type: "result", bucketIndex, bucketDone: true,
                     done: state.currentBucket >= buckets.length,
                     progressed: false,
                     completed, newFiles, errors: [],
                     bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
-                });
+                }, operationAbort);
                 try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 return;
             }
@@ -1028,7 +1082,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             for (const target of targets) state.fileStatuses[target.path] = "generating";
 
             dbg("batch:begin", { pending: pending.length, targets: targets.map(t => t.path) });
-            const settled = await Promise.all(targets.map(async (target): Promise<FileStageOutcome | null> => {
+            const taskResults = await Promise.allSettled(targets.map(async (target): Promise<FileStageOutcome | null> => {
                 const checkpoint = checkpointFor(state, target.path);
                 dbg("task:begin", { path: target.path, stage: checkpoint.stage });
                 try {
@@ -1046,11 +1100,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         markKnowledgeApplied,
                         resolveLearningTool,
                         charge,
+                        operationAbort,
                         dbg,
                     );
                     dbg("task:ok", { path: target.path, stage: result.nextStage, done: !!result.completed });
                     return result;
                 } catch (taskErr: any) {
+                    if (isClientCancelled(taskErr) || isClientCancelled(operationAbort.signal.reason)) {
+                        throw taskErr;
+                    }
                     const mapped = bucketStreamError(taskErr, "FILE_STAGE_FAILED");
                     const reason = mapped.message;
                     dbg("task:throw", {
@@ -1061,10 +1119,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         stack: String(taskErr?.stack || "").slice(0, 600),
                     });
                     errors.push({ path: target.path, reason, ...mapped });
-                    await logGeneration(state, writer, encoder, `× ${target.path} 当前阶段中断：${reason}`, target.path);
+                    await logGeneration(
+                        state,
+                        writer,
+                        encoder,
+                        operationAbort,
+                        `× ${target.path} 当前阶段中断：${reason}`,
+                        target.path,
+                    );
                     return null;
                 }
             }));
+            const rejected = taskResults.find(
+                (result): result is PromiseRejectedResult => result.status === "rejected",
+            );
+            if (rejected) throw rejected.reason;
+            const settled = taskResults.map((result) => (result as PromiseFulfilledResult<FileStageOutcome | null>).value);
+            assertBucketActive(operationAbort.signal);
             const results = settled.filter((result): result is FileStageOutcome => !!result);
             const learningToolRequests = results.flatMap((result) => result.learningToolRequests);
             const upsertGeneratedFile = (file: GeneratedFileOutput & { reworkCount?: number }) => {
@@ -1095,6 +1166,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const bucketDone = bucket.every(file => state.fileStatuses[file.path] === "done");
             if (bucketDone) state.currentBucket = Math.max(state.currentBucket ?? 0, bucketIndex + 1);
             state.currentFileIndex = state.generatedFiles.length;
+            assertBucketActive(operationAbort.signal);
             // 先保存阶段，再做计费等附属写入；计费故障不能让已完成的模型阶段丢失并被重复执行。
             await putTaskState(context.env, taskId, state, 3600, uid);
             try {
@@ -1115,10 +1187,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         type: "file_done",
                         path: result.completed.path,
                         content: result.completed.content,
-                    });
+                    }, operationAbort);
                 }
             }
-            for (const newFile of newFiles) await writeSSE(writer, encoder, { type: "new_file", ...newFile });
+            for (const newFile of newFiles) {
+                await writeSSE(writer, encoder, { type: "new_file", ...newFile }, operationAbort);
+            }
 
             if (primaryError) {
                 await writeSSE(writer, encoder, {
@@ -1128,7 +1202,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     code: primaryError.code,
                     status: primaryError.status,
                     retryable,
-                });
+                }, operationAbort);
             }
 
             dbg("result:ok", {
@@ -1163,13 +1237,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 })),
                 errors,
                 bucketsRemaining: Math.max(0, buckets.length - state.currentBucket),
-            });
+            }, operationAbort);
             try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } catch (e: any) {
+            if (isClientCancelled(e) || isClientCancelled(operationAbort.signal.reason)) return;
             const mapped = bucketStreamError(e);
             const errMsg = mapped.message;
             dbg("process:catch", { err: e?.name, msg: errMsg.slice(0, 400), stack: String(e?.stack || "").slice(0, 800) });
-            await writeSSE(writer, encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` });
+            await writeSSE(writer, encoder, { type: "log", msg: `× 桶执行错误: ${errMsg}` }, operationAbort);
             await writeSSE(writer, encoder, {
                 type: "error",
                 stage: "bucket",
@@ -1177,7 +1252,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 code: mapped.code,
                 status: mapped.status,
                 retryable: mapped.retryable,
-            });
+            }, operationAbort);
             await writeSSE(writer, encoder, {
                 type: "result",
                 bucketIndex,
@@ -1196,12 +1271,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     status: mapped.status,
                     retryable: mapped.retryable,
                 }],
-            });
+            }, operationAbort);
             try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
         } finally {
             dbg("process:finally", { hb: hbCount });
             clearInterval(heartbeat);
             try { await flushCharge(); } catch { /* 计费失败不覆盖主流程结果 */ }
+            disposeClientAbort();
             try { await writer.close(); } catch { /* already closed/disconnected */ }
         }
     })();

@@ -1,5 +1,5 @@
 export type PreflightStage = "clarify" | "grade";
-export type PreflightOperationStatus = "running" | "retryable" | "completed";
+export type PreflightOperationStatus = "running" | "retryable" | "cancelled" | "completed";
 
 export interface PreflightOperationRecord {
     requestId: string;
@@ -46,7 +46,7 @@ export function preflightOperations(state: any, stage: PreflightStage): Prefligh
         record
         && typeof record.requestId === "string"
         && typeof record.inputHash === "string"
-        && ["running", "retryable", "completed"].includes(record.status),
+        && ["running", "retryable", "cancelled", "completed"].includes(record.status),
     ).slice(-MAX_OPERATION_HISTORY);
     return state[key] as PreflightOperationRecord[];
 }
@@ -64,7 +64,8 @@ export function activePreflightOperation(
     stage: PreflightStage,
 ): PreflightOperationRecord | undefined {
     return preflightOperations(state, stage).find(record =>
-        record.status !== "completed" || !record.billingSettled,
+        record.status !== "cancelled"
+        && (record.status !== "completed" || !record.billingSettled),
     );
 }
 
@@ -76,7 +77,9 @@ export function appendPreflightOperation(
     const operations = preflightOperations(state, stage);
     operations.push(record);
     if (operations.length > MAX_OPERATION_HISTORY) {
-        const removable = operations.findIndex(item => item.status === "completed");
+        const removable = operations.findIndex(item =>
+            item.status === "completed" || item.status === "cancelled",
+        );
         if (removable >= 0) operations.splice(removable, 1);
     }
     return record;

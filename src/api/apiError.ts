@@ -56,6 +56,7 @@ export async function responseError(
 ): Promise<Error> {
     const info = await readApiError(response, fallback);
     const error = new Error(info.message);
-    (error as Error & { code?: string }).code = info.code;
+    (error as Error & { code?: string; status?: number }).code = info.code;
+    (error as Error & { code?: string; status?: number }).status = response.status;
     return error;
 }

@@ -48,7 +48,7 @@ function needsKvFallbackLimit(path: string): boolean {
         || path === "/api/auth/callback"
         || path === "/api/learning/start"
         || path === "/api/learning/step"
-        || ["plan", "clarify", "grade", "bucket", "file", "fix", "build"]
+        || ["plan", "clarify", "grade", "bucket", "file", "fix", "build", "task"]
             .some(name => path === `/api/generate/${name}`);
 }
 
@@ -109,7 +109,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     if (session && (path === "/api/chat" || path === "/api/stream")) {
         let body: any = {};
         try { body = await request.clone().json(); } catch { /* handler validates the body */ }
-        if (!body.taskId) {
+        const taskBound = body.purpose !== "format_prompt" && !!body.taskId;
+        if (!taskBound) {
             const llm = await resolveLLM({ request, env, data: context.data });
             if (!llm.byok) {
                 const q = await getQuota(env.TASKS, session.uid);

@@ -28,6 +28,12 @@ import {
     preflightOperations,
     replayPreflightResult,
 } from "../../_lib/preflightOperations";
+import {
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkAbortSignal,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 const GRADE_IDLE_MS = 120_000;
 const GRADE_OPERATION_MS = 350_000;
@@ -58,8 +64,13 @@ async function writeSSE(
     writer: WritableStreamDefaultWriter<Uint8Array>,
     encoder: TextEncoder,
     data: any,
+    operationAbort: AbortController,
 ): Promise<void> {
-    try { await writer.write(sseEvent(encoder, data)); } catch { /* keep processing after disconnect */ }
+    try {
+        await writer.write(sseEvent(encoder, data));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "Grade client disconnected");
+    }
 }
 
 function normalizedGradeInput(body: any): Record<string, unknown> {
@@ -86,9 +97,7 @@ async function callReasoner(
     onOutput: (content: string) => Promise<void>,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
-    const abortFromParent = () => ctrl.abort(parentSignal.reason);
-    if (parentSignal.aborted) abortFromParent();
-    else parentSignal.addEventListener("abort", abortFromParent, { once: true });
+    const unlinkParent = linkAbortSignal(ctrl, parentSignal);
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const armIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
@@ -120,7 +129,7 @@ async function callReasoner(
         return { content: streamed.content, usage: streamed.usage };
     } finally {
         if (idleTimer) clearTimeout(idleTimer);
-        parentSignal.removeEventListener("abort", abortFromParent);
+        unlinkParent();
     }
 }
 
@@ -131,6 +140,14 @@ function gradeError(error: unknown): {
     retryable: boolean;
     retryAfter?: number;
 } {
+    if (isClientCancelled(error)) {
+        return {
+            message: "复杂度分级已取消",
+            code: "CLIENT_CANCELLED",
+            status: 499,
+            retryable: false,
+        };
+    }
     if (error instanceof OpenAIUpstreamHttpError) {
         return {
             message: error.message,
@@ -203,6 +220,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (immediateRecord?.status === "completed" && immediateRecord.billingSettled) {
         return replayPreflightResult("grade", immediateRecord);
     }
+    if (immediateRecord?.status === "cancelled") {
+        return preflightJsonError("复杂度分级请求已取消", "GRADE_CANCELLED", 409, undefined, {
+            retryable: false,
+        });
+    }
 
     const leaseToken = `grade:${requestId}:${crypto.randomUUID().replace(/-/g, "")}`;
     let leaseMode: TaskOperationLeaseMode | null = null;
@@ -230,6 +252,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (latestRecord?.status === "completed" && latestRecord.billingSettled) {
             return replayPreflightResult("grade", latestRecord);
         }
+        if (latestRecord?.status === "cancelled") {
+            return preflightJsonError("复杂度分级请求已取消", "GRADE_CANCELLED", 409, undefined, {
+                retryable: false,
+            });
+        }
         return preflightJsonError(
             latestRecord ? "复杂度分级仍在执行" : "任务正在执行其他操作",
             latestRecord ? "GRADE_IN_PROGRESS" : "TASK_OPERATION_IN_PROGRESS",
@@ -239,6 +266,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const operationAbort = new AbortController();
+    const unlinkClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Grade client disconnected",
+    );
     const operationTimer = setTimeout(() => operationAbort.abort(), GRADE_OPERATION_MS);
     let streamOwnsDeadline = false;
 
@@ -298,6 +330,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
             return replayPreflightResult("grade", record);
         }
+        if (record?.status === "cancelled") {
+            await releaseLease();
+            return preflightJsonError("复杂度分级请求已取消", "GRADE_CANCELLED", 409, undefined, {
+                retryable: false,
+            });
+        }
 
         const enforcePreflightProtocol = Number(state.preflightProtocolVersion) >= 1;
         const clarifyOperations = enforcePreflightProtocol
@@ -305,6 +343,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             : [];
         const latestClarify = clarifyOperations[clarifyOperations.length - 1];
         if (latestClarify
+            && latestClarify.status !== "cancelled"
             && (latestClarify.status !== "completed" || !latestClarify.billingSettled)) {
             await releaseLease();
             return preflightJsonError(
@@ -375,11 +414,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         streamOwnsDeadline = true;
         const process = (async () => {
             const heartbeat = setInterval(() => {
-                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "grade", t: Date.now() })).catch(() => { });
+                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "grade", t: Date.now() }))
+                    .catch(error => {
+                        try { abortOnWriteFailure(operationAbort, error, "Grade client disconnected"); }
+                        catch { /* operation signal carries the cancellation */ }
+                    });
             }, 12_000);
             let resultCommitted = false;
+            let usage: UsageBreakdown | undefined;
             try {
-                await writeSSE(writer, encoder, { type: "phase", stage: "grade", phase: "grading" });
+                await writeSSE(writer, encoder, { type: "phase", stage: "grade", phase: "grading" }, operationAbort);
                 const correction = typeof record!.input.correction === "string"
                     ? record!.input.correction
                     : undefined;
@@ -400,9 +444,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     prompt.user,
                     operationAbort.signal,
                     !llm.byok,
-                    content => writeSSE(writer, encoder, { type: "reasoning", stage: "grade", content }),
-                    content => writeSSE(writer, encoder, { type: "delta", stage: "grade", content }),
+                    content => writeSSE(writer, encoder, { type: "reasoning", stage: "grade", content }, operationAbort),
+                    content => writeSSE(writer, encoder, { type: "delta", stage: "grade", content }, operationAbort),
                 );
+                usage = callRes.usage;
+                assertGradeOperationActive(operationAbort.signal);
 
                 let parsed: any;
                 try {
@@ -478,13 +524,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         : { direct: true, level, learningRequired, learningNeedCount: knowledgeNeeds.length };
                 }
 
+                assertGradeOperationActive(operationAbort.signal);
                 record!.status = "completed";
                 record!.result = result;
                 record!.completedAt = Date.now();
                 record!.billingSettled = llm.byok;
                 delete record!.lastError;
-                const costDelta = !llm.byok && callRes.usage
-                    ? usageCost(llm.modelFor("pro"), callRes.usage)
+                const costDelta = !llm.byok && usage
+                    ? usageCost(llm.modelFor("pro"), usage)
                     : 0;
                 const committed = await putTaskWithOperationLeaseAndCost(
                     context.env,
@@ -511,8 +558,44 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     await persistState(true);
                 }
 
-                await writeSSE(writer, encoder, { type: "result", stage: "grade", ...result });
+                await writeSSE(writer, encoder, { type: "result", stage: "grade", ...result }, operationAbort);
             } catch (error) {
+                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
+                if (cancelled && !resultCommitted) {
+                    record!.status = "cancelled";
+                    record!.completedAt = Date.now();
+                    record!.lastError = "客户端已取消";
+                    delete record!.result;
+                    const costDelta = !llm.byok && usage ? usageCost(llm.modelFor("pro"), usage) : 0;
+                    record!.billingSettled = llm.byok || !usage;
+                    try {
+                        const committed = await putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode!,
+                            costDelta,
+                            3600,
+                            uid,
+                            record!.billingSettled,
+                        );
+                        if (!committed) throw new GradeLeaseLostError();
+                        if (record!.billingSettled) {
+                            leaseReleased = true;
+                        } else {
+                            const settlement = await settleTaskCostQuota(context.env, uid, taskId);
+                            state.totalCost = settlement.total;
+                            state.consumedQuota = settlement.consumed;
+                            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                            record!.billingSettled = true;
+                            if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+                            await persistState(true);
+                        }
+                    } catch { /* lease cleanup below preserves the cancellation */ }
+                    return;
+                }
+                if (cancelled) return;
                 const mapped = gradeError(error);
                 if (!resultCommitted) {
                     record!.status = "retryable";
@@ -524,16 +607,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     mapped.retryable = true;
                     mapped.retryAfter = 2;
                 }
-                await writeSSE(writer, encoder, { type: "log", msg: `× 分级错误: ${mapped.message}` });
+                await writeSSE(writer, encoder, { type: "log", msg: `× 分级错误: ${mapped.message}` }, operationAbort);
                 await writeSSE(writer, encoder, {
                     type: "error", stage: "grade", error: mapped.message, ...mapped,
-                });
+                }, operationAbort);
                 await writeSSE(writer, encoder, {
                     type: "result", stage: "grade", error: mapped.message, ...mapped,
-                });
+                }, operationAbort);
             } finally {
                 clearTimeout(operationTimer);
                 clearInterval(heartbeat);
+                unlinkClientAbort();
                 if (!leaseReleased) await releaseLease().catch(() => { });
                 try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 try { await writer.close(); } catch { /* already disconnected */ }
@@ -559,6 +643,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             { retryable: mapped.retryable },
         );
     } finally {
-        if (!streamOwnsDeadline) clearTimeout(operationTimer);
+        if (!streamOwnsDeadline) {
+            clearTimeout(operationTimer);
+            unlinkClientAbort();
+        }
     }
 };

@@ -37,6 +37,8 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (event: "update:modelValue", value: string): void;
   (event: "submit"): void;
+  (event: "composition-start"): void;
+  (event: "composition-end"): void;
 }>();
 
 const editorEl = ref<HTMLElement | null>(null);
@@ -353,10 +355,12 @@ function onInput() {
 
 function onCompositionStart() {
   composing.value = true;
+  emit("composition-start");
 }
 
 function onCompositionEnd() {
   composing.value = false;
+  emit("composition-end");
   nextTick(() => {
     applyTypingShortcuts();
     ensureEmptyBlock();

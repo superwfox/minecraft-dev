@@ -159,6 +159,14 @@
       </div>
     </div>
 
+    <div class="glass2 gen-card gen-interrupted-card" v-if="genTask.phase === 'interrupted'">
+      <div class="gen-card-title">▪ 任务已中断</div>
+      <div class="gen-interrupted-copy">已保存当前进度，不会自动恢复或继续消耗 token。</div>
+      <button class="gen-resume-btn" :disabled="resumeBusy" @click="continueGeneration">
+        <Play :size="15" aria-hidden="true"/><span>继续任务</span>
+      </button>
+    </div>
+
     <!-- 失败卡片：手动重试入口（自动兜底用尽后，交回用户手动操作） -->
     <div class="glass2 gen-card gen-error-card" v-if="genTask.phase === 'error'">
       <div class="gen-card-title">▪ 生成失败</div>
@@ -199,9 +207,10 @@
 import {ref, computed, watch, nextTick, onMounted, onBeforeUnmount} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
 import type {GeneratorType, GenFile, LearningStatus} from "../logic/generateState";
-import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate} from "../logic/generateHandler";
+import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 import {buildSafeDebugExport} from "../logic/safeDebug";
+import {Play} from "lucide-vue-next";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
 import LearningEvidence from "./LearningEvidence.vue";
 
@@ -210,6 +219,17 @@ const marqueeOn = computed(() =>
     ["planning", "generating", "verifying", "fixing"].includes(genTask.phase)
 );
 const canRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
+const resumeBusy = ref(false);
+
+async function continueGeneration() {
+    if (resumeBusy.value || genTask.phase !== "interrupted") return;
+    resumeBusy.value = true;
+    try {
+        await resumeGenerate();
+    } finally {
+        resumeBusy.value = false;
+    }
+}
 const activeKnowledgeCount = computed(() =>
     genTask.knowledgeUsed.filter(item => item.status === "active").length,
 );
@@ -516,6 +536,41 @@ watch(() => genTask.streamingContent, async () => {
 }
 
 /* 失败卡片 + 重试 */
+.gen-card.gen-interrupted-card {
+  border-color: rgba(198, 176, 125, 0.48);
+  box-shadow: inset 3px 0 0 rgba(198, 176, 125, 0.74), 0 12px 32px rgba(0,0,0,0.2);
+}
+.gen-interrupted-copy {
+  color: rgba(232, 227, 217, 0.68);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.gen-resume-btn {
+  align-self: flex-start;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border: 1px solid rgba(198, 176, 125, 0.48);
+  border-radius: 6px;
+  background: rgba(198, 176, 125, 0.1);
+  color: #e6d9ba;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.gen-resume-btn:hover:not(:disabled) {
+  border-color: rgba(213, 201, 172, 0.74);
+  background: rgba(198, 176, 125, 0.17);
+  color: #fff7e5;
+}
+.gen-resume-btn:focus-visible {
+  outline: 2px solid rgba(213, 201, 172, 0.72);
+  outline-offset: 2px;
+}
+.gen-resume-btn:disabled { opacity: 0.42; cursor: not-allowed; }
 .gen-card.gen-error-card {
   border-color: rgba(255, 122, 102, 0.55);
   box-shadow: inset 3px 0 0 rgba(255, 122, 102, 0.72), 0 12px 32px rgba(0,0,0,0.2);

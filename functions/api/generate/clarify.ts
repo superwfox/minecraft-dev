@@ -25,6 +25,12 @@ import {
     preflightJsonError,
     replayPreflightResult,
 } from "../../_lib/preflightOperations";
+import {
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkAbortSignal,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 const MAX_CLARIFY_ROUNDS = 5;
 const CLARIFY_IDLE_MS = 120_000;
@@ -56,8 +62,13 @@ async function writeSSE(
     writer: WritableStreamDefaultWriter<Uint8Array>,
     encoder: TextEncoder,
     data: any,
+    operationAbort: AbortController,
 ): Promise<void> {
-    try { await writer.write(sseEvent(encoder, data)); } catch { /* keep processing after disconnect */ }
+    try {
+        await writer.write(sseEvent(encoder, data));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "Clarify client disconnected");
+    }
 }
 
 function normalizedClarifyInput(body: any): Record<string, unknown> {
@@ -87,9 +98,7 @@ async function callReasoner(
     onOutput: (content: string) => Promise<void>,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
-    const abortFromParent = () => ctrl.abort(parentSignal.reason);
-    if (parentSignal.aborted) abortFromParent();
-    else parentSignal.addEventListener("abort", abortFromParent, { once: true });
+    const unlinkParent = linkAbortSignal(ctrl, parentSignal);
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const armIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
@@ -121,7 +130,7 @@ async function callReasoner(
         return { content: streamed.content, usage: streamed.usage };
     } finally {
         if (idleTimer) clearTimeout(idleTimer);
-        parentSignal.removeEventListener("abort", abortFromParent);
+        unlinkParent();
     }
 }
 
@@ -132,6 +141,14 @@ function clarifyError(error: unknown): {
     retryable: boolean;
     retryAfter?: number;
 } {
+    if (isClientCancelled(error)) {
+        return {
+            message: "需求确认已取消",
+            code: "CLIENT_CANCELLED",
+            status: 499,
+            retryable: false,
+        };
+    }
     if (error instanceof OpenAIUpstreamHttpError) {
         return {
             message: error.message,
@@ -204,6 +221,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (immediateRecord?.status === "completed" && immediateRecord.billingSettled) {
         return replayPreflightResult("clarify", immediateRecord);
     }
+    if (immediateRecord?.status === "cancelled") {
+        return preflightJsonError("需求确认请求已取消", "CLARIFY_CANCELLED", 409, undefined, {
+            retryable: false,
+        });
+    }
 
     const leaseToken = `clarify:${requestId}:${crypto.randomUUID().replace(/-/g, "")}`;
     let leaseMode: TaskOperationLeaseMode | null = null;
@@ -233,6 +255,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (latestRecord?.status === "completed" && latestRecord.billingSettled) {
             return replayPreflightResult("clarify", latestRecord);
         }
+        if (latestRecord?.status === "cancelled") {
+            return preflightJsonError("需求确认请求已取消", "CLARIFY_CANCELLED", 409, undefined, {
+                retryable: false,
+            });
+        }
         return preflightJsonError(
             latestRecord ? "需求确认仍在执行" : "任务正在执行其他操作",
             latestRecord ? "CLARIFY_IN_PROGRESS" : "TASK_OPERATION_IN_PROGRESS",
@@ -242,6 +269,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     const operationAbort = new AbortController();
+    const unlinkClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "Clarify client disconnected",
+    );
     const operationTimer = setTimeout(() => operationAbort.abort(), CLARIFY_OPERATION_MS);
     let streamOwnsDeadline = false;
 
@@ -300,6 +332,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await releaseLease();
             }
             return replayPreflightResult("clarify", record);
+        }
+        if (record?.status === "cancelled") {
+            await releaseLease();
+            return preflightJsonError("需求确认请求已取消", "CLARIFY_CANCELLED", 409, undefined, {
+                retryable: false,
+            });
         }
 
         const activeRecord = activePreflightOperation(state, "clarify");
@@ -370,19 +408,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         streamOwnsDeadline = true;
         const process = (async () => {
             const heartbeat = setInterval(() => {
-                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "clarify", t: Date.now() })).catch(() => { });
+                writer.write(sseEvent(encoder, { type: "heartbeat", stage: "clarify", t: Date.now() }))
+                    .catch(error => {
+                        try { abortOnWriteFailure(operationAbort, error, "Clarify client disconnected"); }
+                        catch { /* operation signal carries the cancellation */ }
+                    });
             }, 12_000);
             let resultCommitted = false;
+            let usage: UsageBreakdown | undefined;
             try {
                 await writeSSE(writer, encoder, {
                     type: "phase",
                     stage: "clarify",
                     phase: "clarifying",
                     round: state.clarifyRounds.length + 1,
-                });
+                }, operationAbort);
 
                 let result: Record<string, unknown> | undefined;
-                let usage: UsageBreakdown | undefined;
                 if (state.clarifyRounds.length >= MAX_CLARIFY_ROUNDS) {
                     state.clarifyDone = true;
                     state.logs.push(`● 澄清轮次达到上限 ${MAX_CLARIFY_ROUNDS}，强制结束`);
@@ -404,10 +446,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         prompt.user,
                         operationAbort.signal,
                         !llm.byok,
-                        content => writeSSE(writer, encoder, { type: "reasoning", stage: "clarify", content }),
-                        content => writeSSE(writer, encoder, { type: "delta", stage: "clarify", content }),
+                        content => writeSSE(writer, encoder, { type: "reasoning", stage: "clarify", content }, operationAbort),
+                        content => writeSSE(writer, encoder, { type: "delta", stage: "clarify", content }, operationAbort),
                     );
                     usage = callRes.usage;
+                    assertClarifyOperationActive(operationAbort.signal);
 
                     let parsed: { done?: boolean; todos?: any[]; needMoreInput?: boolean; hint?: string } = {};
                     try {
@@ -440,6 +483,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     }
                 }
 
+                assertClarifyOperationActive(operationAbort.signal);
                 record!.status = "completed";
                 record!.result = result!;
                 record!.completedAt = Date.now();
@@ -471,8 +515,44 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     await persistState(true);
                 }
 
-                await writeSSE(writer, encoder, { type: "result", stage: "clarify", ...result! });
+                await writeSSE(writer, encoder, { type: "result", stage: "clarify", ...result! }, operationAbort);
             } catch (error) {
+                const cancelled = isClientCancelled(error) || isClientCancelled(operationAbort.signal.reason);
+                if (cancelled && !resultCommitted) {
+                    record!.status = "cancelled";
+                    record!.completedAt = Date.now();
+                    record!.lastError = "客户端已取消";
+                    delete record!.result;
+                    const costDelta = !llm.byok && usage ? usageCost(llm.modelFor("pro"), usage) : 0;
+                    record!.billingSettled = llm.byok || !usage;
+                    try {
+                        const committed = await putTaskWithOperationLeaseAndCost(
+                            context.env,
+                            taskId,
+                            JSON.stringify(state),
+                            leaseToken,
+                            leaseMode!,
+                            costDelta,
+                            3600,
+                            uid,
+                            record!.billingSettled,
+                        );
+                        if (!committed) throw new ClarifyLeaseLostError();
+                        if (record!.billingSettled) {
+                            leaseReleased = true;
+                        } else {
+                            const settlement = await settleTaskCostQuota(context.env, uid, taskId);
+                            state.totalCost = settlement.total;
+                            state.consumedQuota = settlement.consumed;
+                            state.quotaExhausted = settlement.outOfQuota || state.quotaExhausted;
+                            record!.billingSettled = true;
+                            if (settlement.outOfQuota) await markTaskQuotaExhausted(context.env, taskId, uid);
+                            await persistState(true);
+                        }
+                    } catch { /* lease cleanup below preserves the cancellation */ }
+                    return;
+                }
+                if (cancelled) return;
                 const mapped = clarifyError(error);
                 if (!resultCommitted) {
                     record!.status = "retryable";
@@ -484,16 +564,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     mapped.retryable = true;
                     mapped.retryAfter = 2;
                 }
-                await writeSSE(writer, encoder, { type: "log", msg: `× 澄清错误: ${mapped.message}` });
+                await writeSSE(writer, encoder, { type: "log", msg: `× 澄清错误: ${mapped.message}` }, operationAbort);
                 await writeSSE(writer, encoder, {
                     type: "error", stage: "clarify", error: mapped.message, ...mapped,
-                });
+                }, operationAbort);
                 await writeSSE(writer, encoder, {
                     type: "result", stage: "clarify", error: mapped.message, ...mapped,
-                });
+                }, operationAbort);
             } finally {
                 clearTimeout(operationTimer);
                 clearInterval(heartbeat);
+                unlinkClientAbort();
                 if (!leaseReleased) await releaseLease().catch(() => { });
                 try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 try { await writer.close(); } catch { /* already disconnected */ }
@@ -519,6 +600,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             { retryable: mapped.retryable },
         );
     } finally {
-        if (!streamOwnsDeadline) clearTimeout(operationTimer);
+        if (!streamOwnsDeadline) {
+            clearTimeout(operationTimer);
+            unlinkClientAbort();
+        }
     }
 };

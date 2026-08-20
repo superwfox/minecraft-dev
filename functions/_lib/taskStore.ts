@@ -230,6 +230,18 @@ async function readD1TaskOwner(db: D1Database, taskId: string): Promise<string |
     return row ? String(row.owner_uid ?? "") : null;
 }
 
+async function readD1TaskIgnoringExpiration(db: D1Database, taskId: string): Promise<string | null> {
+    const result = await db.prepare(`
+        SELECT c.payload
+        FROM generation_tasks AS t
+        JOIN generation_task_chunks AS c ON c.task_id = t.task_id
+        WHERE t.task_id = ?1
+        ORDER BY c.chunk_index ASC
+    `).bind(taskId).all<{ payload: string }>();
+    if (!result.results.length) return null;
+    return result.results.map(row => row.payload).join("");
+}
+
 async function readD1Task(db: D1Database, taskId: string, ownerUid?: string): Promise<string | null> {
     const statement = ownerUid
         ? db.prepare(`
@@ -783,6 +795,46 @@ export async function getOwnedTask(
     }
 }
 
+/** Check deletion ownership without treating an expired task as absent. */
+export async function hasOwnedTask(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+): Promise<boolean> {
+    if (!ownerUid) return false;
+    if (env.DB) {
+        try {
+            const storedOwner = await readD1TaskOwner(env.DB, taskId);
+            if (storedOwner !== null) {
+                if (storedOwner) return storedOwner === ownerUid;
+
+                // Legacy D1 rows may have an empty owner column. Read their state
+                // without the normal expiry filter, then promote the verified owner
+                // so the owner-scoped DELETE can remove the row atomically.
+                const raw = await readD1TaskIgnoringExpiration(env.DB, taskId);
+                if (!raw) return false;
+                const parsed = JSON.parse(raw) as { uid?: unknown };
+                if (parsed.uid !== ownerUid) return false;
+                await writeD1Task(env.DB, taskId, raw, STATE_TTL_SECONDS, ownerUid);
+                return true;
+            }
+        } catch (error) {
+            if (error instanceof TaskOwnershipError) return false;
+            console.warn("D1 task ownership check for deletion failed", error);
+            throw new TaskStoreUnavailableError("D1 task ownership check for deletion failed");
+        }
+    }
+
+    const raw = await env.TASKS.get(taskId);
+    if (!raw) return false;
+    try {
+        const parsed = JSON.parse(raw) as { uid?: unknown };
+        return parsed.uid === ownerUid;
+    } catch {
+        return false;
+    }
+}
+
 async function storeTask(
     env: TaskStoreEnv,
     taskId: string,
@@ -918,7 +970,8 @@ export async function deleteTask(env: TaskStoreEnv, taskId: string, ownerUid: st
                 `).bind(taskId, ownerUid),
             ]);
         } catch (error) {
-            console.warn("D1 task delete failed; falling back to KV", error);
+            console.warn("D1 task delete failed", error);
+            throw new TaskStoreUnavailableError("D1 task delete failed");
         }
     }
     const raw = await env.TASKS.get(taskId);

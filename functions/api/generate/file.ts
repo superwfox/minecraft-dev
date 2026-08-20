@@ -12,6 +12,12 @@ import {
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
+import {
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkAbortSignal,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 const MAX_REWORK = 5;
 const MAX_DYNAMIC_GEN = 3;
@@ -24,9 +30,57 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-interface AICallResult { content: string; model: string; usage?: UsageBreakdown; }
+interface AICallResult {
+    content: string;
+    model: string;
+    usage?: UsageBreakdown;
+    usageQueued?: boolean;
+}
 
-async function callAI(llm: LLMProvider, system: string, user: string, jsonMode = false, usePro = false): Promise<AICallResult> {
+function fileAbortError(signal?: AbortSignal): Error {
+    if (signal?.reason instanceof Error) return signal.reason;
+    const error = new Error("The operation was aborted");
+    error.name = "AbortError";
+    return error;
+}
+
+function assertFileActive(signal: AbortSignal): void {
+    if (signal.aborted) throw fileAbortError(signal);
+}
+
+async function writeFileSSE(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+    data: any,
+    operationAbort: AbortController,
+): Promise<void> {
+    try {
+        await writer.write(sseEvent(encoder, data));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "File generation client disconnected");
+    }
+}
+
+async function writeFileDone(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    encoder: TextEncoder,
+    operationAbort: AbortController,
+): Promise<void> {
+    try {
+        await writer.write(encoder.encode("data: [DONE]\n\n"));
+    } catch (error) {
+        abortOnWriteFailure(operationAbort, error, "File generation client disconnected");
+    }
+}
+
+async function callAI(
+    llm: LLMProvider,
+    system: string,
+    user: string,
+    jsonMode = false,
+    usePro = false,
+    signal?: AbortSignal,
+): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
@@ -39,7 +93,8 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
     if (jsonMode) body.response_format = { type: "json_object" };
 
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+    const disposeParentAbort = linkAbortSignal(ctrl, signal);
+    const timer = setTimeout(() => ctrl.abort(fileAbortError()), LLM_TIMEOUT_MS);
     try {
         const resp = await fetch(llm.url, {
             method: "POST",
@@ -56,6 +111,7 @@ async function callAI(llm: LLMProvider, system: string, user: string, jsonMode =
         };
     } finally {
         clearTimeout(timer);
+        disposeParentAbort();
     }
 }
 
@@ -63,6 +119,8 @@ async function callAIStream(
     llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     usePro = false,
+    operationAbort: AbortController,
+    onUsage?: (result: AICallResult) => Promise<void>,
 ): Promise<AICallResult> {
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
@@ -78,8 +136,12 @@ async function callAIStream(
 
     // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
     const ctrl = new AbortController();
+    const disposeParentAbort = linkAbortSignal(ctrl, operationAbort.signal);
     let idle: any;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), LLM_IDLE_MS); };
+    const arm = () => {
+        clearTimeout(idle);
+        idle = setTimeout(() => ctrl.abort(fileAbortError()), LLM_IDLE_MS);
+    };
     arm();
     try {
         const resp = await fetch(llm.url, {
@@ -95,6 +157,7 @@ async function callAIStream(
         let full = "";
         let buffer = "";
         let usage: UsageBreakdown | undefined;
+        let usageQueued = false;
 
         while (true) {
             const { done, value } = await reader.read();
@@ -111,18 +174,25 @@ async function callAIStream(
                 if (payload === "[DONE]") continue;
                 try {
                     const chunk = JSON.parse(payload);
+                    if (chunk.usage) {
+                        usage = chunk.usage;
+                        if (!usageQueued && onUsage) {
+                            await onUsage({ content: "", model, usage });
+                            usageQueued = true;
+                        }
+                    }
                     const delta = chunk.choices?.[0]?.delta?.content;
                     if (delta) {
                         full += delta;
-                        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: "delta", content: delta })}\n\n`));
+                        await writeFileSSE(writer, encoder, { type: "delta", content: delta }, operationAbort);
                     }
-                    if (chunk.usage) usage = chunk.usage;
                 } catch { /* skip */ }
             }
         }
-        return { content: full, model, usage };
+        return { content: full, model, usage, usageQueued };
     } finally {
         clearTimeout(idle);
+        disposeParentAbort();
     }
 }
 
@@ -178,9 +248,11 @@ async function generateSingleFile(
     onKnowledgeApplied: () => void,
     maxRework: number,
     charge: ChargeFn,
+    operationAbort: AbortController,
 ): Promise<{ content: string; apiSummary: any; reworkCount: number; failed: boolean }> {
-    await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: filePath }));
-    await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 正在生成 ${filePath}` }));
+    assertFileActive(operationAbort.signal);
+    await writeFileSSE(writer, encoder, { type: "phase", phase: "generating", file: filePath }, operationAbort);
+    await writeFileSSE(writer, encoder, { type: "log", msg: `▸ 正在生成 ${filePath}` }, operationAbort);
     state.logs.push(`▸ 正在生成 ${filePath}`);
 
     // 动态文件按类名后缀启发式推断 generatorType
@@ -207,7 +279,10 @@ async function generateSingleFile(
     const dispatched = dispatchGen(inferredFile, ctx, summaries, computeSlice(inferredFile, blueprint), skillCtx, apiContractCtx, knowledgeContext);
 
     const gen = dispatched.gen;
-    const initialGen = await callAIStream(llm, gen.system, gen.user, writer, encoder);
+    const initialGen = await callAIStream(
+        llm, gen.system, gen.user, writer, encoder, false, operationAbort, charge,
+    );
+    assertFileActive(operationAbort.signal);
     onKnowledgeApplied();
     await charge(initialGen);
     let content = stripFences(initialGen.content);
@@ -215,8 +290,9 @@ async function generateSingleFile(
     let passed = false;
 
     for (let i = 0; i < maxRework; i++) {
-        await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: filePath }));
-        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${filePath}...` }));
+        assertFileActive(operationAbort.signal);
+        await writeFileSSE(writer, encoder, { type: "phase", phase: "reviewing", file: filePath }, operationAbort);
+        await writeFileSSE(writer, encoder, { type: "log", msg: `▸ 审查 ${filePath}...` }, operationAbort);
         state.logs.push(`▸ 审查 ${filePath}...`);
 
         let review: any;
@@ -225,13 +301,21 @@ async function generateSingleFile(
             review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
         } else {
             const check = dispatched.checker(filePath, content);
-            const reviewRes = await callAI(llm, check.system, check.user, true, reworkCount > 0);
+            const reviewRes = await callAI(
+                llm,
+                check.system,
+                check.user,
+                true,
+                reworkCount > 0,
+                operationAbort.signal,
+            );
+            assertFileActive(operationAbort.signal);
             await charge(reviewRes);
             try { review = JSON.parse(stripFences(reviewRes.content)); } catch { passed = true; break; }
         }
 
         if (review.is_ok) {
-            await writer.write(sseEvent(encoder, { type: "log", msg: `● ${filePath} 审查通过` }));
+            await writeFileSSE(writer, encoder, { type: "log", msg: `● ${filePath} 审查通过` }, operationAbort);
             state.logs.push(`● ${filePath} 审查通过`);
             passed = true;
             break;
@@ -239,18 +323,22 @@ async function generateSingleFile(
 
         reworkCount++;
         const msg = `↻ ${filePath} 需修正 (${reworkCount}/${maxRework}): ${review.reason}`;
-        await writer.write(sseEvent(encoder, { type: "log", msg }));
+        await writeFileSSE(writer, encoder, { type: "log", msg }, operationAbort);
         state.logs.push(msg);
 
-        await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: filePath }));
+        await writeFileSSE(writer, encoder, { type: "phase", phase: "reworking", file: filePath }, operationAbort);
         const rw = reworkPrompt(filePath, fileRole, content, review.reason, ctx, summaries, apiContractCtx, knowledgeContext);
-        const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, false);
+        const rwRes = await callAIStream(
+            llm, rw.system, rw.user, writer, encoder, false, operationAbort, charge,
+        );
+        assertFileActive(operationAbort.signal);
         await charge(rwRes);
         content = stripFences(rwRes.content);
     }
 
     // Extract summary locally to avoid another model request.
-    await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: filePath }));
+    assertFileActive(operationAbort.signal);
+    await writeFileSSE(writer, encoder, { type: "phase", phase: "summarizing", file: filePath }, operationAbort);
     const apiSummary = extractFileSummary(filePath, content, fileRole);
 
     return { content, apiSummary, reworkCount, failed: !passed };
@@ -308,13 +396,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge: ChargeFn = async (r) => {
-        if (llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
+        if (r.usageQueued || llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         pendingUsage.push({ model: r.model, usage: r.usage });
     };
     const flushCharge = async () => {
         if (chargeFlushed || llm.byok || !uid || pendingUsage.length === 0) return;
+        const entries = pendingUsage.splice(0);
+        let cost: Awaited<ReturnType<typeof accumulateCosts>>;
+        try {
+            cost = await accumulateCosts(context.env, uid, taskId, entries);
+        } catch (error) {
+            pendingUsage.unshift(...entries);
+            throw error;
+        }
         chargeFlushed = true;
-        const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) {
@@ -365,6 +460,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const apiContractCtx = buildApiContractContext(apiContractInput);
     const dispatched = dispatchGen(target, ctx, summaries, slice, skillCtx, apiContractCtx, knowledge.context);
 
+    const operationAbort = new AbortController();
+    const disposeClientAbort = linkClientAbortSignal(
+        operationAbort,
+        context.request.signal,
+        "File generation client disconnected",
+    );
     const { readable, writable } = new TransformStream<Uint8Array>();
     const encoder = new TextEncoder();
     const writer = writable.getWriter();
@@ -372,16 +473,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const process = (async () => {
         // 心跳:推理/审查首 token 前那段静默期每 12s 写一个,避免被 CF 因长静默切断连接。
         const heartbeat = setInterval(() => {
-            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch(() => { });
+            writer.write(sseEvent(encoder, { type: "heartbeat", t: Date.now() })).catch((error) => {
+                try { abortOnWriteFailure(operationAbort, error, "File generation client disconnected"); }
+                catch { /* operation signal carries the cancellation */ }
+            });
         }, 12000);
         try {
             // Phase: generating main file
-            await writer.write(sseEvent(encoder, { type: "phase", phase: "generating", file: target.path }));
-            await writer.write(sseEvent(encoder, { type: "log", msg: `正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})` }));
+            await writeFileSSE(writer, encoder, {
+                type: "phase", phase: "generating", file: target.path,
+            }, operationAbort);
+            await writeFileSSE(writer, encoder, {
+                type: "log", msg: `正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`,
+            }, operationAbort);
             state.logs.push(`正在生成 ${target.path} (${state.currentFileIndex + 1}/${state.plan.length})`);
 
             const gen = dispatched.gen;
-            const initialRes = await callAIStream(llm, gen.system, gen.user, writer, encoder);
+            const initialRes = await callAIStream(
+                llm,
+                gen.system,
+                gen.user,
+                writer,
+                encoder,
+                false,
+                operationAbort,
+                charge,
+            );
+            assertFileActive(operationAbort.signal);
             markKnowledgeApplied(target.path);
             await charge(initialRes);
             let content = stripFences(initialRes.content);
@@ -391,8 +509,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             // reChecker loop with dynamic file generation support
             while (reworkCount < MAX_REWORK) {
-                await writer.write(sseEvent(encoder, { type: "phase", phase: "reviewing", file: target.path }));
-                await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 审查 ${target.path}...` }));
+                assertFileActive(operationAbort.signal);
+                await writeFileSSE(writer, encoder, {
+                    type: "phase", phase: "reviewing", file: target.path,
+                }, operationAbort);
+                await writeFileSSE(writer, encoder, {
+                    type: "log", msg: `▸ 审查 ${target.path}...`,
+                }, operationAbort);
                 state.logs.push(`▸ 审查 ${target.path}...`);
 
                 let review: any;
@@ -401,13 +524,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
                 } else {
                     const check = dispatched.checker(target.path, content);
-                    const reviewRes = await callAI(llm, check.system, check.user, true, reworkCount > 0);
+                    const reviewRes = await callAI(
+                        llm,
+                        check.system,
+                        check.user,
+                        true,
+                        reworkCount > 0,
+                        operationAbort.signal,
+                    );
+                    assertFileActive(operationAbort.signal);
                     await charge(reviewRes);
                     try { review = JSON.parse(stripFences(reviewRes.content)); } catch { passed = true; break; }
                 }
 
                 if (review.is_ok) {
-                    await writer.write(sseEvent(encoder, { type: "log", msg: `● ${target.path} 审查通过` }));
+                    await writeFileSSE(
+                        writer,
+                        encoder,
+                        { type: "log", msg: `● ${target.path} 审查通过` },
+                        operationAbort,
+                    );
                     state.logs.push(`● ${target.path} 审查通过`);
                     passed = true;
                     break;
@@ -423,7 +559,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         .slice(0, MAX_DYNAMIC_GEN);
 
                     if (toGenerate.length > 0) {
-                        await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}` }));
+                        await writeFileSSE(writer, encoder, {
+                            type: "log",
+                            msg: `▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}`,
+                        }, operationAbort);
                         state.logs.push(`▸ 发现 ${toGenerate.length} 个缺失类，动态生成: ${toGenerate.join(", ")}`);
 
                         for (const className of toGenerate) {
@@ -433,17 +572,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             const result = await generateSingleFile(
                                 llm, newPath, newRole, ctx, summaries, blueprint,
                                 writer, encoder, state, knowledge.context,
-                                () => markKnowledgeApplied(newPath), 1, charge,
+                                () => markKnowledgeApplied(newPath), 1, charge, operationAbort,
                             );
+                            assertFileActive(operationAbort.signal);
 
                             state.generatedFiles.push({ path: newPath, content: result.content, apiSummary: result.apiSummary });
                             summaries.push({ path: newPath, ...result.apiSummary });
 
-                            await writer.write(sseEvent(encoder, {
+                            await writeFileSSE(writer, encoder, {
                                 type: "new_file", path: newPath, role: newRole, content: result.content,
-                            }));
+                            }, operationAbort);
                             const msg = `● ${className} 动态生成完成`;
-                            await writer.write(sseEvent(encoder, { type: "log", msg }));
+                            await writeFileSSE(writer, encoder, { type: "log", msg }, operationAbort);
                             state.logs.push(msg);
                         }
 
@@ -455,12 +595,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 // Normal rework
                 reworkCount++;
                 const reworkMsg = `↻ ${target.path} 需修正 (${reworkCount}/${MAX_REWORK}): ${review.reason}`;
-                await writer.write(sseEvent(encoder, { type: "log", msg: reworkMsg }));
+                await writeFileSSE(writer, encoder, { type: "log", msg: reworkMsg }, operationAbort);
                 state.logs.push(reworkMsg);
 
-                await writer.write(sseEvent(encoder, { type: "phase", phase: "reworking", file: target.path }));
+                await writeFileSSE(writer, encoder, {
+                    type: "phase", phase: "reworking", file: target.path,
+                }, operationAbort);
                 const rw = reworkPrompt(target.path, target.role, content, review.reason, ctx, summaries, apiContractCtx, knowledge.context);
-                const rwRes = await callAIStream(llm, rw.system, rw.user, writer, encoder, false);
+                const rwRes = await callAIStream(
+                    llm,
+                    rw.system,
+                    rw.user,
+                    writer,
+                    encoder,
+                    false,
+                    operationAbort,
+                    charge,
+                );
+                assertFileActive(operationAbort.signal);
                 await charge(rwRes);
                 content = stripFences(rwRes.content);
             }
@@ -470,44 +622,50 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             // 接受当前最后一版，记 warn 继续；真正的对错交给后续编译 + 编译错误修复兜底。
             if (!passed && reworkCount >= MAX_REWORK) {
                 const warnMsg = `! ${target.path} 经 ${MAX_REWORK} 次修正仍未通过审查，接受当前版本，交由编译阶段校验`;
-                await writer.write(sseEvent(encoder, { type: "log", msg: warnMsg }));
+                await writeFileSSE(writer, encoder, { type: "log", msg: warnMsg }, operationAbort);
                 state.logs.push(warnMsg);
             }
 
             // Local summary extraction avoids one LLM call per file.
-            await writer.write(sseEvent(encoder, { type: "phase", phase: "summarizing", file: target.path }));
+            assertFileActive(operationAbort.signal);
+            await writeFileSSE(writer, encoder, {
+                type: "phase", phase: "summarizing", file: target.path,
+            }, operationAbort);
             const apiSummary = extractFileSummary(target.path, content, target.role);
 
             state.generatedFiles.push({ path: target.path, content, apiSummary });
             state.currentFileIndex++;
             const doneMsg = `● ${target.path} 已完成${reworkCount > 0 ? ` (修正${reworkCount}次)` : ""}`;
             state.logs.push(doneMsg);
-            await writer.write(sseEvent(encoder, { type: "log", msg: doneMsg }));
+            await writeFileSSE(writer, encoder, { type: "log", msg: doneMsg }, operationAbort);
 
+            assertFileActive(operationAbort.signal);
             await flushCharge();
+            assertFileActive(operationAbort.signal);
             await putTaskState(context.env, taskId, state, 3600, uid);
 
-            await writer.write(sseEvent(encoder, {
+            await writeFileSSE(writer, encoder, {
                 type: "result", done: false,
                 fileIndex: state.currentFileIndex - 1,
                 path: target.path, content,
                 remaining: state.plan.length - state.currentFileIndex,
                 reworkCount,
-            }));
+            }, operationAbort);
 
-            await writer.write(encoder.encode("data: [DONE]\n\n"));
+            await writeFileDone(writer, encoder, operationAbort);
         } catch (e: any) {
+            if (isClientCancelled(e) || isClientCancelled(operationAbort.signal.reason)) return;
             const mapped = fileStreamError(e);
-            await writer.write(sseEvent(encoder, { type: "log", msg: `× 错误: ${mapped.message}` }));
-            await writer.write(sseEvent(encoder, {
+            await writeFileSSE(writer, encoder, { type: "log", msg: `× 错误: ${mapped.message}` }, operationAbort);
+            await writeFileSSE(writer, encoder, {
                 type: "error",
                 stage: "file",
                 error: mapped.message,
                 code: mapped.code,
                 status: mapped.status,
                 retryable: mapped.retryable,
-            }));
-            await writer.write(sseEvent(encoder, {
+            }, operationAbort);
+            await writeFileSSE(writer, encoder, {
                 type: "result",
                 stage: "file",
                 done: false,
@@ -515,12 +673,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 code: mapped.code,
                 status: mapped.status,
                 retryable: mapped.retryable,
-            }));
-            await writer.write(encoder.encode("data: [DONE]\n\n"));
+            }, operationAbort);
+            await writeFileDone(writer, encoder, operationAbort);
         } finally {
             clearInterval(heartbeat);
             try { await flushCharge(); } catch { /* 计费失败不覆盖文件生成结果 */ }
-            await writer.close();
+            disposeClientAbort();
+            try { await writer.close(); } catch { /* already closed/disconnected */ }
         }
     })();
 

@@ -60,6 +60,12 @@ import {
     type ModelLearningResolution,
 } from "../../_lib/learning/toolRuntime";
 import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
+import {
+    abortOnWriteFailure,
+    isClientCancelled,
+    linkAbortSignal,
+    linkClientAbortSignal,
+} from "../../_lib/clientAbort";
 
 interface Env {
     DB?: D1Database;
@@ -68,7 +74,13 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-interface AICallResult { content: string; message: any; model: string; usage?: UsageBreakdown; }
+interface AICallResult {
+    content: string;
+    message: any;
+    model: string;
+    usage?: UsageBreakdown;
+    usageQueued?: boolean;
+}
 
 interface PendingKnowledgeUsage {
     knowledgeId: string;
@@ -115,6 +127,7 @@ async function callAIStream(
     llm: LLMProvider, system: string, user: string,
     writer: WritableStreamDefaultWriter<Uint8Array>, encoder: TextEncoder,
     parentSignal?: AbortSignal,
+    onUsage?: (result: AICallResult) => Promise<void>,
     messages?: ModelChatMessage[],
     tools: Record<string, unknown>[] = [],
 ): Promise<AICallResult> {
@@ -131,9 +144,7 @@ async function callAIStream(
 
     // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
     const ctrl = new AbortController();
-    const abortFromParent = () => ctrl.abort();
-    if (parentSignal?.aborted) abortFromParent();
-    else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const disposeParentAbort = linkAbortSignal(ctrl, parentSignal);
     let idle: any;
     const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), FIX_IDLE_MS); };
     arm();
@@ -152,6 +163,7 @@ async function callAIStream(
         let reasoningContent = "";
         let buffer = "";
         let usage: UsageBreakdown | undefined;
+        let usageQueued = false;
         const toolCalls = new Map<number, {
             id: string;
             type: "function";
@@ -195,7 +207,13 @@ async function callAIStream(
                         }
                         toolCalls.set(index, current);
                     }
-                    if (chunk.usage) usage = chunk.usage;
+                    if (chunk.usage) {
+                        usage = chunk.usage;
+                        if (!usageQueued && onUsage) {
+                            await onUsage({ content: "", message: null, model, usage });
+                            usageQueued = true;
+                        }
+                    }
                 } catch { /* skip */ }
             }
         }
@@ -213,10 +231,11 @@ async function callAIStream(
             },
             model,
             usage,
+            usageQueued,
         };
     } finally {
         clearTimeout(idle);
-        parentSignal?.removeEventListener("abort", abortFromParent);
+        disposeParentAbort();
     }
 }
 
@@ -226,6 +245,27 @@ function stripFences(raw: string): string {
 
 function sseEvent(encoder: TextEncoder, data: any): Uint8Array {
     return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function abortAwareWriter(
+    writer: WritableStreamDefaultWriter<Uint8Array>,
+    operationAbort: AbortController,
+): WritableStreamDefaultWriter<Uint8Array> {
+    return new Proxy(writer, {
+        get(target, property) {
+            if (property === "write") {
+                return async (chunk: Uint8Array) => {
+                    try {
+                        await target.write(chunk);
+                    } catch (error) {
+                        abortOnWriteFailure(operationAbort, error, "Fix client disconnected");
+                    }
+                };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
 }
 
 function extractSummaries(generatedFiles: any[]): FileSummary[] {
@@ -403,9 +443,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let repairLeaseMode: TaskOperationLeaseMode | null = null;
     let repairLeaseReleased = false;
     let repairLeaseLost = false;
+    let repairResumeSnapshot: any | null = null;
     let repairLeaseValidUntil = 0;
     let repairLeaseExpiryTimer: ReturnType<typeof setTimeout> | undefined;
     const repairAbort = new AbortController();
+    let disposeClientAbort = () => { };
     const clearRepairLeaseExpiryTimer = () => {
         if (repairLeaseExpiryTimer === undefined) return;
         clearTimeout(repairLeaseExpiryTimer);
@@ -415,7 +457,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (repairLeaseLost) return;
         repairLeaseLost = true;
         clearRepairLeaseExpiryTimer();
-        repairAbort.abort();
+        if (!repairAbort.signal.aborted) repairAbort.abort(new RepairLeaseLostError());
     };
     const armRepairLeaseExpiry = (leaseStartedAt: number) => {
         repairLeaseValidUntil = leaseStartedAt
@@ -514,6 +556,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return repairAuthorizationExpired();
         }
 
+        repairResumeSnapshot = JSON.parse(JSON.stringify(state));
         state.status = "repairing";
         state.repairStartedAt = Date.now();
         state.error = null;
@@ -549,6 +592,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let repairLeaseRenewal: Promise<void> | null = null;
     let repairLeaseRenewalStopped = false;
     const assertRepairLease = () => {
+        if (isClientCancelled(repairAbort.signal.reason)) {
+            throw repairAbort.signal.reason;
+        }
         if (mode !== "repair") return;
         if (repairLeaseValidUntil > 0 && Date.now() >= repairLeaseValidUntil) {
             markRepairLeaseLost();
@@ -557,7 +603,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             || repairLeaseLost
             || repairLeaseReleased
             || repairAbort.signal.aborted) {
-            throw new RepairLeaseLostError();
+            throw repairAbort.signal.reason instanceof RepairLeaseLostError
+                ? repairAbort.signal.reason
+                : new RepairLeaseLostError();
         }
     };
     const renewRepairLease = () => {
@@ -613,6 +661,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (pendingRenewal) await pendingRenewal;
     };
     const persistState = async (releaseLease = false) => {
+        assertRepairLease();
         if (mode !== "repair") {
             await putTaskState(context.env, taskId, state, 3600, uid);
             return;
@@ -650,35 +699,94 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const pendingUsage: UsageCostEntry[] = [];
     let chargeFlushed = false;
     const charge = async (r: AICallResult) => {
-        assertRepairLease();
-        if (!llm || llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
+        if (r.usageQueued || !llm || llm.byok || !uid || !r.usage) return; // BYOK 自带 key：跳过计费
         pendingUsage.push({ model: r.model, usage: r.usage });
     };
-    const flushCharge = async () => {
+    const flushCharge = async (allowCancelled = false) => {
         if (chargeFlushed || !llm || llm.byok || !uid || pendingUsage.length === 0) return;
-        assertRepairLease();
+        if (!allowCancelled) assertRepairLease();
+        const entries = pendingUsage.splice(0);
         chargeFlushed = true;
-        const cost = await accumulateCosts(context.env, uid, taskId, pendingUsage.splice(0));
-        assertRepairLease();
+        let cost: Awaited<ReturnType<typeof accumulateCosts>>;
+        try {
+            cost = await accumulateCosts(context.env, uid, taskId, entries);
+        } catch (error) {
+            pendingUsage.unshift(...entries);
+            chargeFlushed = false;
+            throw error;
+        }
         state.totalCost = cost.total;
         state.consumedQuota = cost.consumed;
         if (cost.outOfQuota) {
             state.quotaExhausted = true;
             await markTaskQuotaExhausted(context.env, taskId, uid);
-            assertRepairLease();
         }
     };
+    const flushCancelledCharge = async () => {
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 2 && pendingUsage.length > 0; attempt++) {
+            try {
+                await flushCharge(true);
+                return;
+            } catch (error) {
+                lastError = error;
+            }
+        }
+        if (lastError) throw lastError;
+    };
+    const persistCancelledRepairState = async (): Promise<boolean> => {
+        if (mode !== "repair"
+            || !repairResumeSnapshot
+            || !repairLeaseMode
+            || repairLeaseLost
+            || repairLeaseReleased) return false;
+        await stopRepairLeaseRenewal();
+        if (repairLeaseLost || repairLeaseReleased) return false;
 
+        const cancelledState = JSON.parse(JSON.stringify(repairResumeSnapshot));
+        cancelledState.status = "error";
+        cancelledState.error = null;
+        delete cancelledState.repairStartedAt;
+        if (state.totalCost !== undefined) cancelledState.totalCost = state.totalCost;
+        if (state.consumedQuota !== undefined) cancelledState.consumedQuota = state.consumedQuota;
+        if (state.quotaExhausted) cancelledState.quotaExhausted = true;
+
+        const committed = await putTaskWithOperationLease(
+            context.env,
+            taskId,
+            JSON.stringify(cancelledState),
+            repairLeaseToken,
+            repairLeaseMode,
+            3600,
+            uid,
+            true,
+        );
+        if (!committed) {
+            markRepairLeaseLost();
+            return false;
+        }
+        state = cancelledState;
+        repairLeaseReleased = true;
+        clearRepairLeaseExpiryTimer();
+        return true;
+    };
+
+    disposeClientAbort = linkClientAbortSignal(
+        repairAbort,
+        context.request.signal,
+        "Fix client disconnected",
+    );
     let stream: TransformStream<Uint8Array>;
     try {
         stream = new TransformStream<Uint8Array>();
     } catch (error) {
+        disposeClientAbort();
         await releaseRepairLease().catch((releaseError) => console.warn("repair lease release failed", releaseError));
         throw error;
     }
     const { readable, writable } = stream;
     const encoder = new TextEncoder();
-    const writer = writable.getWriter();
+    const writer = abortAwareWriter(writable.getWriter(), repairAbort);
     if (mode === "repair") {
         repairLeaseRenewTimer = setInterval(renewRepairLease, REPAIR_LEASE_RENEW_INTERVAL_MS);
     }
@@ -1087,6 +1195,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     writer,
                     encoder,
                     repairAbort.signal,
+                    charge,
                     messages,
                     tools,
                 );
@@ -1166,6 +1275,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         writer,
                         encoder,
                         repairAbort.signal,
+                        charge,
                     );
                     markKnowledgeApplied(filePath);
                     await charge(fixRes);
@@ -1286,6 +1396,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
             await writer.write(encoder.encode("data: [DONE]\n\n"));
         } catch (e: any) {
+            if (isClientCancelled(e) || isClientCancelled(repairAbort.signal.reason)) {
+                try {
+                    await flushCancelledCharge();
+                } catch (chargeError) {
+                    console.warn("cancelled repair usage settlement failed", chargeError);
+                }
+                try {
+                    await persistCancelledRepairState();
+                } catch (persistError) {
+                    console.warn("cancelled repair state recovery failed", persistError);
+                }
+                return;
+            }
             let leaseFailure = e instanceof RepairLeaseLostError || repairLeaseLost;
             if (!leaseFailure) {
                 const message = e?.message || "自动修复失败";
@@ -1332,11 +1455,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         } finally {
             clearInterval(heartbeat);
             await stopRepairLeaseRenewal().catch(() => { });
-            if (!repairLeaseLost && !repairLeaseReleased) {
+            if (!isClientCancelled(repairAbort.signal.reason)
+                && !repairLeaseLost
+                && !repairLeaseReleased) {
                 try { await flushCharge(); } catch { /* 计费失败不覆盖修复结果 */ }
             }
             await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
             clearRepairLeaseExpiryTimer();
+            disposeClientAbort();
             try { await writer.close(); } catch { /* 客户端可能已断开 */ }
         }
     })();

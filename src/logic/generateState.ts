@@ -1,6 +1,8 @@
 import { reactive, ref, watch } from "vue";
+import {legacyActionMessageMeta, normalizeActionMessageMeta} from "./actionMessages";
+import type {ActionMessageMeta} from "./actionMessages";
 
-export type GenPhase = "idle" | "planning" | "clarifying" | "grading" | "confirming" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "done" | "error";
+export type GenPhase = "idle" | "planning" | "clarifying" | "grading" | "confirming" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "interrupted" | "done" | "error";
 
 export type GradePath = {
     id: string;
@@ -432,6 +434,7 @@ export type ClarifyRound = {
 export type GenTask = {
     taskId: string;
     phase: GenPhase;
+    interruptedFrom: Exclude<GenPhase, "interrupted"> | "";
     userPrompt: string;   // 原始需求（持久化用：刷新后重试/续跑）
     coreType: string;
     version: string;
@@ -442,6 +445,7 @@ export type GenTask = {
     currentIndex: number;
     logs: string[];
     error: string;
+    errorMeta: ActionMessageMeta | null;
     streamingContent: string;
     streamingPhase: string;
     streamingFile: string;
@@ -482,6 +486,7 @@ export type GenTask = {
 export const genTask = reactive<GenTask>({
     taskId: "",
     phase: "idle",
+    interruptedFrom: "",
     userPrompt: "",
     coreType: "",
     version: "",
@@ -492,6 +497,7 @@ export const genTask = reactive<GenTask>({
     currentIndex: 0,
     logs: [],
     error: "",
+    errorMeta: null,
     streamingContent: "",
     streamingPhase: "",
     streamingFile: "",
@@ -602,6 +608,7 @@ export function recordLearningDebugEvent(
 export function resetGenTask() {
     genTask.taskId = "";
     genTask.phase = "idle";
+    genTask.interruptedFrom = "";
     genTask.userPrompt = "";
     genTask.coreType = "";
     genTask.version = "";
@@ -612,6 +619,7 @@ export function resetGenTask() {
     genTask.currentIndex = 0;
     genTask.logs = [];
     genTask.error = "";
+    genTask.errorMeta = null;
     genTask.streamingContent = "";
     genTask.streamingPhase = "";
     genTask.streamingFile = "";
@@ -671,10 +679,20 @@ let persistTimer: any = null;
 
 function writeGenTaskSnapshot() {
     try {
-        if (genTask.phase === "idle" || !genTask.taskId) { localStorage.removeItem(GEN_KEY); return; }
+        const canRestartModeOne = !genTask.taskId
+            && !!genTask.userPrompt
+            && !!genTask.coreType
+            && !!genTask.version
+            && (genTask.phase === "planning"
+                || (genTask.phase === "interrupted" && genTask.interruptedFrom === "planning"));
+        if (genTask.phase === "idle" || (!genTask.taskId && !canRestartModeOne)) {
+            localStorage.removeItem(GEN_KEY);
+            return;
+        }
         const snap = {
             taskId: genTask.taskId,
             phase: genTask.phase,
+            interruptedFrom: genTask.interruptedFrom,
             userPrompt: genTask.userPrompt,
             coreType: genTask.coreType,
             version: genTask.version,
@@ -714,6 +732,7 @@ function writeGenTaskSnapshot() {
             learningDebugEvents: genTask.learningDebugEvents.slice(-MAX_LEARNING_DEBUG_EVENTS),
             learningDebugDroppedEvents: genTask.learningDebugDroppedEvents,
             error: genTask.error,
+            errorMeta: genTask.errorMeta,
             t: Date.now(),
         };
         localStorage.setItem(GEN_KEY, JSON.stringify(snap));
@@ -739,10 +758,22 @@ export function restoreGenTask(): boolean {
         const raw = localStorage.getItem(GEN_KEY);
         if (!raw) return false;
         const s = JSON.parse(raw);
-        if (!s.taskId || s.phase === "idle") return false;
+        if (s.phase === "idle") return false;
+        const canRestartModeOne = !s.taskId
+            && typeof s.userPrompt === "string" && !!s.userPrompt
+            && typeof s.coreType === "string" && !!s.coreType
+            && typeof s.version === "string" && !!s.version
+            && (s.phase === "planning"
+                || (s.phase === "interrupted" && s.interruptedFrom === "planning"));
+        if (!s.taskId && !canRestartModeOne) return false;
         if (s.t && Date.now() - s.t > 3600_000) { localStorage.removeItem(GEN_KEY); return false; } // 超 KV TTL 作废
-        genTask.taskId = s.taskId;
-        genTask.phase = s.phase;
+        const storedPhase = s.phase as GenPhase;
+        const restoredFromActive = !["done", "error", "interrupted"].includes(storedPhase);
+        genTask.taskId = s.taskId || "";
+        genTask.phase = restoredFromActive ? "interrupted" : storedPhase;
+        genTask.interruptedFrom = restoredFromActive
+            ? storedPhase as Exclude<GenPhase, "interrupted">
+            : (s.interruptedFrom && s.interruptedFrom !== "interrupted" ? s.interruptedFrom : "");
         genTask.userPrompt = s.userPrompt || "";
         genTask.coreType = s.coreType || "";
         genTask.version = s.version || "";
@@ -794,14 +825,26 @@ export function restoreGenTask(): boolean {
             1_000_000_000,
             safeCount(s.learningDebugDroppedEvents) + restoreDropped,
         );
-        genTask.error = s.error || "";
+        genTask.error = restoredFromActive ? "" : (s.error || "");
+        genTask.errorMeta = restoredFromActive
+            ? null
+            : (normalizeActionMessageMeta(s.errorMeta) || legacyActionMessageMeta(s.error) || null);
+        if (restoredFromActive) {
+            genTask.preflightActive = false;
+            genTask.streamingPhase = "";
+            genTask.streamingFile = "";
+            genTask.streamingContent = "";
+            genTask.logs.push("■ 上次页面离开时任务仍在进行，已暂停等待手动继续");
+            persistGenTaskNow();
+        }
         return true;
     } catch { return false; }
 }
 
 // genTask 关键字段变化 → 防抖落盘
 watch(
-    () => [genTask.phase, genTask.files.length, genTask.currentIndex, genTask.logs.length,
+    () => [genTask.phase, genTask.interruptedFrom, genTask.files.length, genTask.currentIndex, genTask.logs.length,
+        genTask.error, genTask.errorMeta?.kind, genTask.errorMeta?.code, genTask.errorMeta?.status,
         genTask.files.filter(f => f.status === "done").length,
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,

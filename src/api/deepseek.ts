@@ -8,6 +8,11 @@ import {
 } from "../logic/byok";
 import { responseError } from "./apiError";
 import { MINECRAFT_VERSION_ENUM } from "../logic/minecraftVersions";
+import {
+    normalizeFormattedPrompt,
+    normalizePrecheckPayload,
+} from "../logic/promptFormatting";
+import type {PrecheckResult} from "../logic/promptFormatting";
 
 export type ChatMsg = {
     role: string;
@@ -87,7 +92,11 @@ async function throwResponseError(response: Response, direct: boolean): Promise<
         throw error;
     }
     if (response.status === 401) {
-        throw new Error(direct ? "DeepSeek API Key 无效，请重新填写" : "登录已过期，请重新登录");
+        const error = new Error(direct ? "DeepSeek API Key 无效，请重新填写" : "登录已过期，请重新登录");
+        (error as any).code = direct ? "LLM_AUTH_FAILED" : "AUTH_REQUIRED";
+        (error as any).status = response.status;
+        (error as any).noRetry = true;
+        throw error;
     }
     if (response.status === 402) {
         if (direct) {
@@ -95,10 +104,18 @@ async function throwResponseError(response: Response, direct: boolean): Promise<
                 "billing",
                 "当前 DeepSeek 账户余额不足。请前往 DeepSeek 平台充值，或清除 Key 后改用踏海充值额度。",
             );
-            throw new Error("DeepSeek 账户余额不足，请前往 DeepSeek 平台充值");
+            const error = new Error("DeepSeek 账户余额不足，请前往 DeepSeek 平台充值");
+            (error as any).code = "INSUFFICIENT_QUOTA";
+            (error as any).status = response.status;
+            (error as any).noRetry = true;
+            throw error;
         }
         openDeepSeekKeyModal("missing", "充值额度已用尽，请填写 DeepSeek API Key 后重试。");
-        throw new Error("可用额度不足，请充值或填写 DeepSeek API Key");
+        const error = new Error("可用额度不足，请充值或填写 DeepSeek API Key");
+        (error as any).code = "QUOTA_REQUIRED";
+        (error as any).status = response.status;
+        (error as any).noRetry = true;
+        throw error;
     }
     throw await responseError(
         response,
@@ -106,12 +123,12 @@ async function throwResponseError(response: Response, direct: boolean): Promise<
     );
 }
 
-async function askDeepSeek(prompt: string, preset: string): Promise<string> {
+async function askDeepSeek(prompt: string, preset: string, signal?: AbortSignal): Promise<string> {
     const messages = [
         { role: "system", content: preset },
         { role: "user", content: prompt },
     ];
-    const { response, direct } = await requestCompletion("/api/chat", messages);
+    const { response, direct } = await requestCompletion("/api/chat", messages, {signal});
     if (!response.ok) await throwResponseError(response, direct);
     const data = await response.json() as any;
     return data.content ?? data.choices?.[0]?.message?.content ?? "";
@@ -222,6 +239,7 @@ async function consumeSSE(
                             openDeepSeekKeyModal("missing", "充值额度已用尽，请填写 DeepSeek API Key 后重试。");
                             failure.message = "可用额度不足，请充值或填写 DeepSeek API Key";
                         }
+                        (failure as any).code = direct ? "INSUFFICIENT_QUOTA" : "QUOTA_REQUIRED";
                         (failure as any).noRetry = true;
                         (failure as any).terminal = true;
                     }
@@ -276,14 +294,14 @@ const PRECHECK_PRESET =
     "不要求细节（后续澄清会细化），只要逻辑闭环即可。" +
     "只输出 JSON，不要任何其他内容：" +
     "完整 → {\"complete\": true}；" +
-    "不完整 → {\"complete\": false, \"hint\": \"请补充：1) xxx；2) xxx；3) xxx\"}，" +
-    "hint 列出 2-4 条简短、具体的补充方向。";
+    "不完整 → {\"complete\": false, \"heading\": \"还需要补充\", \"items\": [{\"topic\": \"简短主题\", \"detail\": \"需要用户确认的具体问题\"}]}。" +
+    "items 必须包含 2-6 个互不重复的对象；topic 简短明确且不带序号，detail 每项只写一个具体问题。";
 
 export async function precheckPrompt(
     prompt: string,
     listener?: StreamListener,
     signal?: AbortSignal,
-): Promise<{ complete: boolean; hint?: string }> {
+): Promise<PrecheckResult> {
     const messages = [
         { role: "system", content: PRECHECK_PRESET },
         { role: "user", content: prompt },
@@ -297,12 +315,29 @@ export async function precheckPrompt(
     const raw = (await consumeSSE(response, listener, direct)).output.trim();
     const cleaned = raw.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "").trim();
     try {
-        const parsed = JSON.parse(cleaned);
-        if (typeof parsed?.complete !== "boolean") throw new Error("缺少 complete 字段");
-        return { complete: parsed.complete === true, hint: parsed.hint };
+        const normalized = normalizePrecheckPayload(JSON.parse(cleaned));
+        if (!normalized) throw new Error("缺少 complete 字段");
+        return normalized;
     } catch {
         throw new Error("需求完整性检查返回格式无效，请重试");
     }
+}
+
+export async function formatUserPrompt(prompt: string, signal?: AbortSignal): Promise<string> {
+    const direct = hasDeepSeekKey();
+    const response = await fetchWithByokFallback("/api/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({purpose: "format_prompt", input: prompt}),
+        signal,
+    });
+    if (!response.ok) await throwResponseError(response, direct);
+    const data = await response.json() as {markdown?: unknown};
+    const formatted = normalizeFormattedPrompt(
+        typeof data.markdown === "string" ? data.markdown : "",
+    );
+    if (!formatted) throw new Error("格式化结果为空");
+    return formatted;
 }
 
 export function consistChat(
