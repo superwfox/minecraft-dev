@@ -24,10 +24,29 @@ export const YUAN_PER_QUOTA = 1; // 1 元 = 1 件额度
 // 单任务按金额累积扣费：跨过 COST_PER_QUOTA 元即追扣下一件
 export const COST_PER_QUOTA = 0.8;
 
-// DeepSeek 单价（元 / 百万 token）。cacheHit = 缓存命中输入，input = 未命中输入，output = 输出
-export const MODEL_PRICING: Record<string, { cacheHit: number; input: number; output: number }> = {
-    "deepseek-v4-flash": { cacheHit: 0.02, input: 1, output: 2 },
-    "deepseek-v4-pro": { cacheHit: 0.025, input: 3, output: 6 },
+export interface TokenPricing {
+    cacheHit: number;
+    input: number;
+    output: number;
+}
+
+export interface ModelPricing {
+    offPeak: TokenPricing;
+    peak: TokenPricing;
+}
+
+// DeepSeek 官网单价（人民币 / 百万 tokens）：
+// https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+// 高峰为北京时间 09:00-12:00、14:00-18:00，即 UTC 01:00-04:00、06:00-10:00；其余为空闲时段。
+export const MODEL_PRICING: Record<string, ModelPricing> = {
+    "deepseek-v4-flash": {
+        offPeak: { cacheHit: 0.05, input: 1.5, output: 4.5 },
+        peak: { cacheHit: 0.10, input: 3.0, output: 9.0 },
+    },
+    "deepseek-v4-pro": {
+        offPeak: { cacheHit: 0.15, input: 4.5, output: 13.5 },
+        peak: { cacheHit: 0.30, input: 9.0, output: 27.0 },
+    },
 };
 
 // 构建端硬上限（单用户每日；不限制单任务次数）
@@ -172,9 +191,19 @@ export interface UsageCostEntry {
     usage?: UsageBreakdown;
 }
 
-export function usageCost(model: string, u: UsageBreakdown): number {
-    const p = MODEL_PRICING[model];
-    if (!p) return 0;
+export function isDeepSeekPeakTime(at: Date | number = Date.now()): boolean {
+    const hour = (at instanceof Date ? at : new Date(at)).getUTCHours();
+    return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
+}
+
+export function usageCost(
+    model: string,
+    u: UsageBreakdown,
+    at: Date | number = Date.now(),
+): number {
+    const modelPricing = MODEL_PRICING[model];
+    if (!modelPricing) return 0;
+    const p = isDeepSeekPeakTime(at) ? modelPricing.peak : modelPricing.offPeak;
     const hit = u.prompt_cache_hit_tokens ?? 0;
     const miss = u.prompt_cache_miss_tokens ?? Math.max(0, (u.prompt_tokens ?? 0) - hit);
     const out = u.completion_tokens ?? 0;
@@ -236,7 +265,11 @@ export async function accumulateCosts(
     prepaid = true,
 ): Promise<{ consumed: number; total: number; outOfQuota: boolean; delta: number }> {
     if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
-    const cost = entries.reduce((sum, entry) => sum + (entry.usage ? usageCost(entry.model, entry.usage) : 0), 0);
+    const pricedAt = Date.now();
+    const cost = entries.reduce(
+        (sum, entry) => sum + (entry.usage ? usageCost(entry.model, entry.usage, pricedAt) : 0),
+        0,
+    );
     if (cost <= 0) {
         const d1Rec = await getTaskCostFromD1(env, taskId, uid);
         if (d1Rec) return { ...d1Rec, outOfQuota: false, delta: 0 };

@@ -8,7 +8,7 @@
 
 | Agent | 模型 | 职责 |
 | --- | --- | --- |
-| **Pre-checker** | `flash` / `pro` | 判断需求是否逻辑闭环、能否进入规划 |
+| **Pre-checker** | `flash` | 判断需求是否已有可识别的核心功能、能否进入规划 |
 | **Clarifier** | `pro`（Reasoner） | 多轮 TodoList 形式产出关键决策点 |
 | **Grader** | `pro`（Reasoner） | 给需求打复杂度分级，非「直接」级出**实现路径**让用户选 |
 | **Planner** | `pro`（Reasoner） | 产出主类蓝图 + 分类型文件树 + 拓扑序 |
@@ -23,9 +23,9 @@
 | 模型 | 用途 | 备注 |
 |------|------|------|
 | `deepseek-v4-flash` | Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | 速度快，承担批量生成 |
-| `deepseek-v4-pro` | precheck / clarify / **grade** / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
+| `deepseek-v4-pro` | clarify / **grade** / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
 
-> **自带 DeepSeek Key（所有用户）**：Key 保存在用户浏览器。预检、普通对话及无任务 IDE 问答可由浏览器直连 DeepSeek；clarify / grade / plan / bucket / file / fix 等需要任务状态的阶段仍由服务端编排，Key 仅随请求临时传递，`resolveLLM` 不落库且跳过平台计费。未配置时使用已有充值余额走共享 DeepSeek。
+> **自带 DeepSeek Key（所有用户）**：Key 保存在用户浏览器。所有模型请求统一通过 Pages Functions 路由，模型名称与平台请求保持一致；Key 仅随请求临时传递，`resolveLLM` 不落库且跳过平台计费。未配置时使用已有充值余额走共享 DeepSeek。
 
 `functions/api/chat.ts` 与 `stream.ts` 在 `model` 包含 `pro` 时自动注入上述两个字段，调用方只传模型名即可。
 
@@ -77,11 +77,11 @@ graph TB
 
 ### precheck 完整性预检
 
-用户提交后，前端先调 `/api/chat`（`deepseek-v4-pro`，注入 thinking）判定需求是否闭环（`src/api/deepseek.ts` 的 `precheckPrompt`）：
+用户提交后，前端先调 `/api/stream`（`deepseek-v4-flash`）判断是否已经能识别核心功能并进入规划（`src/api/deepseek.ts` 的 `precheckPrompt`）：
 
 - `{"complete": true}` → 继续；
-- `{"complete": false, "hint": "..."}` → 输入框预填「原始内容 + 补充方向：xxx」，等用户补完再提交；
-- 解析失败按「通过」处理，不阻塞流程。
+- `{"complete": false, "heading": "...", "items": [...]}` → 仅展示真正阻断规划的少量补充问题，等用户补完再提交；
+- 解析或请求失败会保留当前草稿并提示重试，不会静默进入生成。
 
 随后 `getInfo`（`flash`）从需求中提取 `coreType` 与 `version`（已写明则无需再问）。
 
@@ -111,9 +111,9 @@ sequenceDiagram
 
 - **Reasoner 流式协议**：`deepseek-v4-pro` 的 chunk 同时含 `delta.reasoning_content`（思考）和 `delta.content`（输出）。前端把 reasoning 写入可折叠的「AI 思考中」区域，content 增量喂给 JSON 解析器。
 - **增量卡片渲染**：在 delta 阶段就用深度计数解析器（`generateHandler.ts` 的 `extractCompletedTodos`）抽出已闭合的 todo 推进 ClarifyPanel，消除「思考完→等结果→突然出现」的空档。
-- **强制澄清项**（写死在 `plannerClarifyPrompt` 系统消息）：
-  - `ui-interaction`（必）：聊天命令 + SendMessage / 聊天命令 + Inventory GUI（其他方案经 `allowCustom` 输入，备注「无法保证质量」）
-  - `persistence`（必）：文本 / 二进制；选「文本」后下一轮追问 `text-format`（CSV / TXT / YAML）
+- **按需澄清项**（仅在确实存在会改变产品行为的分叉时提出）：
+  - `ui-interaction`：需求明确涉及可视化选择、列表、分页或图形界面时询问
+  - `persistence`：需求确实需要跨服务器重启保留的数据时询问；无状态操作不问
   - `growth-curve`（条件）：出现价格/经验/等级/冷却等关键词时必含，options 为函数曲线名（`linear / power2 / power0.5 / log / exp`），前端 `CurveChart.vue` 纯 SVG 渲染对比图
   - 按需：`permission-prefix` / `world-scope` / `external-plugin` / `command-alias` / `message-config` / `reload-strategy`
 - **needMoreInput 二次回退**：若 Reasoner 判断需求仍过于模糊，返回 `{ needMoreInput: true, hint }`，前端进入 `awaiting_input` 让用户补充，追加到 `userPrompt` 后继续。

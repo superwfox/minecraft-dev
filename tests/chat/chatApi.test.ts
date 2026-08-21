@@ -98,7 +98,11 @@ describe("POST /api/chat", () => {
         expect(payload).not.toHaveProperty("reasoning_effort");
         expect(payload.messages).toHaveLength(2);
         expect(payload.messages[0]).toMatchObject({ role: "system" });
-        expect(payload.messages[0].content).toContain("只能整理其含义");
+        expect(payload.messages[0].content).toContain("无损整理和排版");
+        expect(payload.messages[0].content).toContain("用户未提及的权限、通知、配置、持久化");
+        expect(payload.messages[0].content).toContain("必须直接省略");
+        expect(payload.messages[0].content).toContain("只有用户原文明示某项未定");
+        expect(payload.messages[0].content).not.toContain("用户未想到但实现前必须明确");
         expect(payload.messages[0].content).not.toContain("caller-controlled prompt");
         expect(payload.messages[1]).toEqual({
             role: "user",

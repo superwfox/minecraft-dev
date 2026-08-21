@@ -33,7 +33,7 @@ DEEPSEEK_RESPONSES_WEB_SEARCH=true
 GITHUB_PAT=ghp_...
 ```
 
-`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后也只在 Grader 识别到未被静态契约或已有公共知识覆盖的原子技术缺口时联网。用户自带的 DeepSeek Key 仅在服务端编排阶段按同一开关参与联网学习。
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后也只在 Grader 识别到未被静态契约或已有公共知识覆盖的原子技术缺口时联网。用户自带的 DeepSeek Key 通过统一服务端模型路由按同一开关参与联网学习。
 
 **获取密钥**：
 

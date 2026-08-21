@@ -330,7 +330,7 @@ functions/api/generate/clarify.ts    180
 | Planner 出蓝图 | reasoner `high`，~20~40 s |
 | Cloudflare Pages Functions 子请求计数 | 每个桶 ~`并发数 × (1 gen + ≤5 rework + 1 review + 1 summary)` |
 | D1 写入 | 默认单文件 bucket 为 1 次分块任务状态写 + 1 次原子成本累计；不再占用任务 KV 写额度 |
-| 模型成本（约） | 单次端到端 ¥0.05 ~ ¥0.20，取决于澄清轮次和 rework 次数 |
+| 模型成本 | 按实际 token 与请求时段结算；Flash 空闲/高峰：命中 ¥0.05/0.10、未命中 ¥1.5/3、输出 ¥4.5/9；Pro 对应 ¥0.15/0.30、¥4.5/9、¥13.5/27（均为每百万 tokens） |
 
 并发上限 `GEN_CONCURRENCY=2` 是经过试验的甜点：再高会触发 DeepSeek RPM 限速 + CF 子请求计数告警，再低则端到端时长翻倍。
 
@@ -356,7 +356,7 @@ CF 端需要的环境变量与绑定：
 - `API_RATE_LIMITER` —— 可选 Cloudflare Rate Limiting binding；配置后 API 软限流不再读写 `TASKS`
 - `EDGE_RATE_LIMITING=true` —— 使用域名级 WAF Rate Limiting 时设置；关闭代码内 KV 限流兜底
 
-`DEEPSEEK_RESPONSES_WEB_SEARCH` 接受 `1`、`true`、`yes`（忽略大小写）。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 和 Fixer 会收到原生 `learn_public_api` function tool，并可在缺少版本敏感的公开 API 事实时主动调用；只有 Grader 确认这是未被静态契约或已有公共知识覆盖的原子技术缺口后，Learning 运行时才会继续执行范围校验、联网查证、证据验证、缓存、额度和恢复。用户自带的 DeepSeek Key 在服务端编排阶段遵循同一开关，浏览器直连请求不参与该流程；GLM BYOK 始终只读取已有公共知识，不会收到该工具。Cloudflare 环境变量变更后需要重新部署对应环境的 Pages Functions。
+`DEEPSEEK_RESPONSES_WEB_SEARCH` 接受 `1`、`true`、`yes`（忽略大小写）。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 和 Fixer 会收到原生 `learn_public_api` function tool，并可在缺少版本敏感的公开 API 事实时主动调用；只有 Grader 确认这是未被静态契约或已有公共知识覆盖的原子技术缺口后，Learning 运行时才会继续执行范围校验、联网查证、证据验证、缓存、额度和恢复。用户自带的 DeepSeek Key 也通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递且不参与平台计费；GLM BYOK 始终只读取已有公共知识，不会收到该工具。Cloudflare 环境变量变更后需要重新部署对应环境的 Pages Functions。
 
 ---
 

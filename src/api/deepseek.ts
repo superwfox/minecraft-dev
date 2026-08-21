@@ -1,5 +1,4 @@
 import {
-    deepSeekRequest,
     fetchWithByokFallback,
     handleDeepSeekAccessFailure,
     handleDeepSeekAccessResponse,
@@ -46,9 +45,6 @@ const TODO_PRESET =
     "\"params\" : String[] #没有请填null ," +
     "\"event\" : String #没有请填null";
 
-const DEEPSEEK_CHAT_MODEL = "deepseek-chat";
-const DEEPSEEK_REASONING_MODEL = "deepseek-reasoner";
-
 async function requestCompletion(
     platformUrl: "/api/chat" | "/api/stream",
     messages: ChatMsg[],
@@ -59,18 +55,14 @@ async function requestCompletion(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            model: direct
-                ? (options.reasoning ? DEEPSEEK_REASONING_MODEL : DEEPSEEK_CHAT_MODEL)
-                : (options.reasoning ? "deepseek-v4-pro" : "deepseek-v4-flash"),
+            model: options.reasoning ? "deepseek-v4-pro" : "deepseek-v4-flash",
             messages,
             ...(options.stream ? { stream: true } : {}),
         }),
         signal: options.signal,
     };
 
-    const response = direct
-        ? await deepSeekRequest(init)
-        : await fetchWithByokFallback(platformUrl, init);
+    const response = await fetchWithByokFallback(platformUrl, init);
     return { response, direct };
 }
 
@@ -288,14 +280,17 @@ export function streamGetTodoList(prompt: string, onDelta: (chunk: string) => vo
     return streamAsk(prompt, TODO_PRESET, onDelta);
 }
 
-const PRECHECK_PRESET =
-    "你是一个 Minecraft 插件需求完整性检查器，判断用户的描述是否逻辑闭环、可以进入规划阶段。" +
-    "需求必须至少有明确的核心功能或玩法目标，能识别\"玩家做什么\"或\"系统实现什么\"。" +
-    "不要求细节（后续澄清会细化），只要逻辑闭环即可。" +
-    "只输出 JSON，不要任何其他内容：" +
-    "完整 → {\"complete\": true}；" +
-    "不完整 → {\"complete\": false, \"heading\": \"还需要补充\", \"items\": [{\"topic\": \"简短主题\", \"detail\": \"需要用户确认的具体问题\"}]}。" +
-    "items 必须包含 2-6 个互不重复的对象；topic 简短明确且不带序号，detail 每项只写一个具体问题。";
+const PRECHECK_PRESET = `你是一个 Minecraft 插件需求入口检查器，只判断是否已经能识别至少一个核心功能或玩法目标并进入规划阶段。你不是需求审计器，不负责枚举可选功能、工程边界或实现细节。
+判定原则：
+- 能识别“玩家或系统在什么场景做什么、得到什么结果”时，直接 complete=true；不要求用户把所有细节写全。
+- 权限、通知文本、配置、持久化、首次或每次触发、防刷、断线重连、服务器重启、背包已满、插件加载时已在线玩家、常规失败处理等未说明细节，均由后续模型采用自然、轻量且安全的默认实现，不得因此要求用户补充。
+- 标题、章节以及正文中的“未提及”“待确认”提示，不得覆盖已经明确的核心目标；只有用户明确表示核心产品行为取决于某个答案时，才把它视为阻断项。
+- 只有完全无法识别核心功能，或存在没有自然默认值且会导致互不兼容产品行为的关键矛盾时，才 complete=false。
+- 示例：“玩家进入服务器时发放 1 颗钻石，插件运行于 Paper 26.2”已经完整，必须返回 {"complete":true}，不得追问反馈、防刷、重连、背包或已在线玩家。
+只输出 JSON，不要任何其他内容：
+完整 → {"complete": true}；
+不完整 → {"complete": false, "heading": "还需要补充", "items": [{"topic": "简短主题", "detail": "真正阻止识别核心需求的具体问题"}]}。
+items 只能包含 1-3 个互不重复且确实阻断规划的问题，不得为凑数量添加问题；topic 简短明确且不带序号，detail 每项只写一个具体问题。`;
 
 export async function precheckPrompt(
     prompt: string,
@@ -307,7 +302,6 @@ export async function precheckPrompt(
         { role: "user", content: prompt },
     ];
     const { response, direct } = await requestCompletion("/api/stream", messages, {
-        reasoning: true,
         stream: true,
         signal,
     });

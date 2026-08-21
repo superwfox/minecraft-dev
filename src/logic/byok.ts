@@ -2,7 +2,6 @@ import { computed, reactive, ref } from "vue";
 
 const STORAGE_KEY = "tahai-deepseek-key";
 const CREDENTIAL_ID_STORAGE_KEY = "tahai-deepseek-key-id";
-const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/v1/chat/completions";
 
 export type DeepSeekKeyModalReason = "welcome" | "missing" | "invalid" | "billing" | "manage";
 
@@ -103,24 +102,6 @@ export function clearDeepSeekKey(): void {
     deepSeekKeyState.credentialId = "";
 }
 
-export class DeepSeekKeyRequiredError extends Error {
-    readonly code = "DEEPSEEK_KEY_REQUIRED";
-
-    constructor() {
-        super("请先配置 DeepSeek API Key");
-        this.name = "DeepSeekKeyRequiredError";
-    }
-}
-
-/** 返回当前 Key；缺失时打开配置弹窗并抛出不含敏感信息的错误。 */
-export function requireKey(): string {
-    const key = deepSeekKeyState.key.trim();
-    if (key) return key;
-
-    openDeepSeekKeyModal("missing");
-    throw new DeepSeekKeyRequiredError();
-}
-
 export function handleDeepSeekAccessFailure(
     status: unknown,
     code: unknown,
@@ -168,29 +149,6 @@ export async function handleDeepSeekAccessResponse(
     return handleDeepSeekAccessFailure(response.status, code, options);
 }
 
-/** 供浏览器直连 DeepSeek 的请求层使用。 */
-export function deepSeekHeaders(): Record<string, string> {
-    return {
-        Authorization: `Bearer ${requireKey()}`,
-        "Content-Type": "application/json",
-    };
-}
-
-/**
- * 浏览器直连 DeepSeek。401 会原样交给调用方，同时提示用户检查 Key，
- * 不会回退到平台额度。
- */
-export async function deepSeekRequest(init: RequestInit): Promise<Response> {
-    const headers = new Headers(init.headers);
-    const directHeaders = deepSeekHeaders();
-    headers.set("Authorization", directHeaders.Authorization);
-    if (!headers.has("Content-Type")) headers.set("Content-Type", directHeaders["Content-Type"]);
-
-    const response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, { ...init, headers });
-    await handleDeepSeekAccessResponse(response, { allowBare401: true });
-    return response;
-}
-
 /** 已配置 Key 时，向现有服务端生成端点附加 DeepSeek BYOK 头。 */
 export function byokHeaders(): Record<string, string> {
     const key = deepSeekKeyState.key.trim();
@@ -202,10 +160,7 @@ export function byokHeaders(): Record<string, string> {
     };
 }
 
-/**
- * 保留现有调用签名：无 Key 时使用充值额度；有 Key 时使用 DeepSeek BYOK。
- * Key 鉴权失败不再静默重试平台额度，避免意外扣减充值额度。
- */
+/** 所有模型请求统一走服务端模型路由；Key 只切换凭证和计费方式。 */
 export async function fetchWithByokFallback(url: string, init: RequestInit = {}): Promise<Response> {
     const extraHeaders = byokHeaders();
     if (!extraHeaders["X-LLM-Key"]) return fetch(url, init);

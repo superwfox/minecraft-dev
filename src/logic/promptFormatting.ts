@@ -61,7 +61,7 @@ function uniqueItems(values: unknown[]): PrecheckGuidanceItem[] {
         if (seen.has(key)) continue;
         seen.add(key);
         items.push(item);
-        if (items.length >= 6) break;
+        if (items.length >= 3) break;
     }
     return items;
 }

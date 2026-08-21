@@ -25,8 +25,8 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 | 模型 | 用途 | 自动注入 |
 |------|------|----------|
-| `deepseek-v4-flash` | Generator / Summarizer / Dynamic Gen / IDE 助手 / 对话兜底 | — |
-| `deepseek-v4-pro` | precheck / clarify / planner / reChecker / rework / fix | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+| `deepseek-v4-flash` | Pre-checker / Generator / Summarizer / Dynamic Gen / IDE 助手 / 对话兜底 | — |
+| `deepseek-v4-pro` | clarify / grade / planner / reChecker / rework / fix | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 `/api/chat` 和 `/api/stream` 在 `model` 包含 `pro` 时自动注入上述两个字段；调用方只需传模型名。
 
@@ -34,7 +34,7 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 ### POST /api/chat
 
-非流式对话，用于需求完整性预检（precheck）、信息提取（getInfo）等。
+非流式对话，用于提示词整理和普通结构化响应；需求完整性预检与信息提取使用 `/api/stream`。
 
 **请求**：
 ```json
@@ -279,7 +279,7 @@ data: [DONE]
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。用户自带的 DeepSeek Key 在服务端编排阶段遵循同一开关，浏览器直连请求不参与该服务端学习流程；GLM BYOK 只读取已有公共知识，不会收到该工具。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
 
 ## KV 绑定
 

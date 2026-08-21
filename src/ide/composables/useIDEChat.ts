@@ -1,7 +1,6 @@
 import {reactive, ref} from "vue";
 import {useIDEStore} from "./useIDEStore";
 import {
-    deepSeekRequest,
     fetchWithByokFallback,
     handleDeepSeekAccessFailure,
     handleDeepSeekAccessResponse,
@@ -63,7 +62,6 @@ FILE edit src/main/resources/plugin.yml
 `;
 
 const TRUNCATE_CHARS = 6000;
-const DEEPSEEK_CHAT_MODEL = "deepseek-chat";
 
 async function requestIDEStream(
     messages: Array<{ role: string; content: string }>,
@@ -71,22 +69,19 @@ async function requestIDEStream(
     signal?: AbortSignal,
 ): Promise<{ response: Response; usedKey: boolean }> {
     const usedKey = hasDeepSeekKey();
-    const direct = usedKey;
     const init: RequestInit = {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
-            model: direct ? DEEPSEEK_CHAT_MODEL : "deepseek-v4-flash",
-            taskId: direct ? undefined : (taskId || undefined),
+            model: "deepseek-v4-flash",
+            taskId: taskId || undefined,
             messages,
             stream: true,
         }),
         signal,
     };
 
-    const response = direct
-        ? await deepSeekRequest(init)
-        : await fetchWithByokFallback("/api/stream", init);
+    const response = await fetchWithByokFallback("/api/stream", init);
     return {response, usedKey};
 }
 

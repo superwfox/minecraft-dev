@@ -53,6 +53,23 @@ describe("prompt formatting helpers", () => {
         ]);
     });
 
+    it("caps incomplete guidance at three genuinely blocking questions", () => {
+        expect(normalizePrecheckPayload({
+            complete: false,
+            items: [
+                "核心目标：插件要实现什么",
+                "触发行为：玩家如何触发",
+                "目标对象：效果作用于谁",
+                "反馈方式：是否发送消息",
+                "持久化：是否保存记录",
+            ],
+        })?.guidance?.items).toEqual([
+            {topic: "核心目标", detail: "插件要实现什么"},
+            {topic: "触发行为", detail: "玩家如何触发"},
+            {topic: "目标对象", detail: "效果作用于谁"},
+        ]);
+    });
+
     it("strips a single Markdown fence from formatted output", () => {
         expect(normalizeFormattedPrompt("```markdown\n# 标题\n\n**核心需求**\n```"))
             .toBe("# 标题\n\n**核心需求**");

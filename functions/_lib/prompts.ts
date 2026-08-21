@@ -145,7 +145,7 @@ export function plannerClarifyPrompt(
         : "";
 
     return {
-        system: `你是一个 Minecraft ${coreType} ${version} 插件项目规划器的澄清阶段。你的任务不是直接产出文件列表，而是先列出所有不明晰、需用户确认的决策点，组织成 TodoList。
+        system: `你是一个 Minecraft ${coreType} ${version} 插件项目规划器的澄清阶段。你的任务不是直接产出文件列表，而是先判断是否存在少数真正必须由用户确认的产品决策；没有必要问题时直接完成澄清，不得为了流程生成 TodoList。
 
 只输出 JSON，格式如下：
 {
@@ -166,12 +166,19 @@ export function plannerClarifyPrompt(
 - 如果用户的原始需求过分模糊（如仅"写个插件"、"来点好玩的"、字数过少且无任何可识别的核心功能），或功能描述严重不完善以致无法识别出任何明确的核心玩法/操作/目标，则不要产出 todos，改为返回：
   { "needMoreInput": true, "hint": "为了帮你规划，请补充：1) ...；2) ...；3) ..." }
 - hint 中列出 2-4 条具体、简短的补充问题，引导用户完善需求
-- 只要能识别出至少一个明确功能点（如"一个出生点"、"记录玩家击杀数"），就正常产出 todos，不要用 needMoreInput
+- 只要能识别出至少一个明确功能点（如"一个出生点"、"记录玩家击杀数"），就不要用 needMoreInput；继续判断是否真的存在必须由用户决定的产品分叉，如果没有则直接返回 done:true
 
 提问总原则（精简优先，宁缺毋滥）：
-- 玩家能直接触发、语义已清楚的简单操作（给物品/传送/广播/即时效果/执行一条命令等），**不要**为走流程而提问其反馈方式或存储方式——默认「聊天命令 + 文本反馈、无需持久化」直接做。
+- 只有同时存在至少两个合理、互不兼容且会明显改变用户可感知行为的方案，并且没有自然的最小默认值时才提问。实现模型可以安全决定的技术细节必须自动补偿，不得转交用户。
+- 玩家能直接触发、语义已清楚的简单操作（给物品/传送/广播/即时效果/执行一条命令等），**不要**为走流程而提问其反馈方式、权限、存储方式或异常处理；未要求反馈时默认不额外发消息，无状态操作默认无需持久化。
 - 只问「确认后会显著改变实现」的决策点。若某澄清项即便确认也只带来微小功能、却会引入持久化 / 管理器等重类（大幅抬高复杂度、易生成失败），**不要问**，默认用最轻方式（内存 / PDC / 直接 config）。
 - 【行为语义消歧·高优先】用户常用「动作/结果」描述需求（如「右键吃东西」「打怪掉钱」「破坏方块给经验」），但同一句话往往对应多个不同的底层事件或实现路径，选错监听事件＝整份代码跑偏，这类歧义比「要不要持久化」更致命，**只要出现且会改变实现就必须问**。但提问只能用玩家能直观理解的「行为差别」来描述，**绝不向用户暴露 PlayerInteractEvent / Consume / BlockBreak 这类事件名或 API**。仅是措辞不同、底层实现完全一致的，不问。
+
+默认补偿规则（用户未明确指定其他行为时直接采用，不提问）：
+- “进入服务器 / 进服 / 加入游戏时”默认指玩家成功进入世界后的加入事件；每次实际加入都触发，包括断线后重新加入。插件加载时已经在线的玩家不追溯触发。
+- “进入服务器时发放物品”不属于登录阶段歧义，不询问握手、白名单或人物生成时机；按成功加入后发放实现。
+- 未说明首次奖励、防刷或跨重启记录时，不擅自增加这些产品规则和持久化；按原文事件每次触发。
+- 背包容量、空返回值等纯技术边界由代码生成阶段采用不会静默丢失结果的安全处理，不作为澄清问题。
 
 条件规则（满足条件才问；已在历史出现过的不重复）：
 - id="ui-interaction" —— **仅当**需求涉及「需要可视化选择 / 列表 / 分页 / 图形界面」时才问；纯文本提示就够的简单命令不要问，默认文本反馈。
@@ -185,7 +192,7 @@ export function plannerClarifyPrompt(
     · 「右键/使用某物」 → 「右手一按就触发（哪怕没吃成/用成）」 vs 「真正吃完/用完那一下才触发」
     · 「打/攻击生物」 → 「左键碰一下就算」 vs 「真正造成伤害才算」 vs 「把目标打死才算」
     · 「挖/破坏方块」 → 「开始挖的瞬间」 vs 「方块真正被挖断」
-    · 「进服/加入」 → 「登录握手阶段（可拦截/白名单/踢人）」 vs 「已进世界、人物生成完毕（可发欢迎语/给物品）」
+    · 「进服/加入」本身不问，默认成功进入世界后的加入事件；只有需求明确涉及准入校验、白名单、登录前认证或踢出玩家时，才区分登录阶段与进入世界后
 - id="trigger-mode" —— **仅当**需求含「禁止/不让玩家做某事」或「当玩家做某事时…」、且分不清要阻止动作还是仅事后响应时才问。
   options 固定为：["阻止这个行为发生", "允许行为发生、只额外触发效果"]
 - id="target-match" —— **仅当**需求针对「特定物品 / 某把特定武器 / 特定方块」判断、且判断依据不明时才问。
@@ -510,6 +517,8 @@ files[].generatorType 必须从下列枚举中精确选择：
 
 极简原则（严格遵守）：
 - 只规划用户需求中明确提到或逻辑上必需的文件，不要自行扩展功能范围
+- 对无状态的事件动作采用自然最小默认值：未要求反馈就不额外发消息，未要求权限就不增加权限节点，未要求首次奖励或防刷就不增加持久化记录；“进入服务器时”按每次成功加入后的事件处理，不追溯插件加载时已经在线的玩家
+- 规划向玩家物品栏发放物品的职责时，必须在相关 files[].role 中写明处理 Inventory.addItem 返回的剩余物，背包已满时在玩家位置自然掉落，避免静默丢失；这是技术完整性处理，不扩展为邮件、暂存或领取系统
 - 每个文件的 role 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
 - 用户原始需求若明确指定了某条输出的颜色或格式，必须把该要求原样写入每个相关 files[].role，供逐文件生成与审查识别例外；未明确指定时不得自行添加其他颜色
 - 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
@@ -587,6 +596,7 @@ Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
 - **命令实现**：实现命令类时必须同时实现 CommandExecutor.onCommand 与 TabCompleter.onTabComplete。onTabComplete 至少根据 args.length 返回当前层级的合理候选（无候选则返回空 List），不要返回 null。一个类可同时 implements CommandExecutor, TabCompleter
 - **命令注册**：在 Main.onEnable 中：PluginCommand cmd = getCommand("xxx"); cmd.setExecutor(new XxxCommand()); cmd.setTabCompleter(new XxxCommand()); 同一个类做两件事时只 new 一个实例
 - **Listener 注册**：在 Main.onEnable 中调用 getServer().getPluginManager().registerEvents(new XxxListener(), this)。Listener 类必须 implements Listener，事件方法必须加 @EventHandler 注解
+- **物品发放**：向玩家物品栏添加物品时必须检查 Inventory.addItem(...) 返回的剩余物；无法放入的部分使用玩家世界的 dropItemNaturally 在玩家位置掉落，不得静默丢弃，也不得自行扩展为邮件或暂存系统
 - **Inventory GUI**：自定义 GUI 必须用 InventoryHolder 标识（推荐让 GUI 类 implements InventoryHolder 并由 Bukkit.createInventory(this, size, title) 创建）。监听 InventoryClickEvent 时先判断 event.getInventory().getHolder() instanceof YourGUI，再 event.setCancelled(true) 阻止取出物品，然后用 event.getRawSlot() 派发点击逻辑
 - **配置读取**：通过 getConfig().getXxx("path", default) 读取。Main.onEnable 必须先调用 saveDefaultConfig() 才能读到 resources/config.yml 的默认值
 - **YAML 数据持久化**：用 File dataFile = new File(getDataFolder(), "data.yml"); YamlConfiguration cfg = YamlConfiguration.loadConfiguration(dataFile); 读写后 cfg.save(dataFile) 落盘。getDataFolder() 不存在时先 mkdirs()。Main.onDisable 必须保存所有可变数据
