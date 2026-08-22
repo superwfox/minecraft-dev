@@ -535,6 +535,29 @@ export const genTask = reactive<GenTask>({
     learningDebugDroppedEvents: 0,
 });
 
+const GEN_LOG_TIME_PREFIX = /^\[(?:(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d|--:--:--)\]\s/;
+const UNKNOWN_GEN_LOG_TIME_PREFIX = "[--:--:--] ";
+
+export function formatGenLog(message: string, at: Date | number = Date.now()): string {
+    if (GEN_LOG_TIME_PREFIX.test(message)) return message;
+    const candidate = at instanceof Date ? at : new Date(at);
+    const date = Number.isFinite(candidate.getTime()) ? candidate : new Date();
+    const time = [date.getHours(), date.getMinutes(), date.getSeconds()]
+        .map((value) => String(value).padStart(2, "0"))
+        .join(":");
+    return `[${time}] ${message}`;
+}
+
+export function appendGenLog(message: string, at?: Date | number): string {
+    const formatted = formatGenLog(message, at);
+    genTask.logs.push(formatted);
+    return formatted;
+}
+
+function restoreGenLog(message: string): string {
+    return GEN_LOG_TIME_PREFIX.test(message) ? message : `${UNKNOWN_GEN_LOG_TIME_PREFIX}${message}`;
+}
+
 const MAX_LEARNING_DEBUG_EVENTS = 256;
 
 function optionalCount(value: unknown): number | undefined {
@@ -782,7 +805,11 @@ export function restoreGenTask(): boolean {
         genTask.javaVersion = s.javaVersion || "";
         genTask.files = s.files || [];
         genTask.currentIndex = genTask.files.filter(file => file?.status === "done").length;
-        genTask.logs = s.logs || [];
+        genTask.logs = Array.isArray(s.logs)
+            ? s.logs
+                .filter((log: unknown): log is string => typeof log === "string")
+                .map(restoreGenLog)
+            : [];
         genTask.preflightStage = s.preflightStage === "clarify" || s.preflightStage === "grade" || s.preflightStage === "plan"
             ? s.preflightStage
             : "";
@@ -834,7 +861,7 @@ export function restoreGenTask(): boolean {
             genTask.streamingPhase = "";
             genTask.streamingFile = "";
             genTask.streamingContent = "";
-            genTask.logs.push("■ 上次页面离开时任务仍在进行，已暂停等待手动继续");
+            appendGenLog("■ 上次页面离开时任务仍在进行，已暂停等待手动继续");
             persistGenTaskNow();
         }
         return true;

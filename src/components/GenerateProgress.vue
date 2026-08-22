@@ -134,7 +134,23 @@
         </div>
       </div>
       <div v-if="expandedFile?.content" class="gen-preview">
-        <pre>{{ expandedFile.content }}</pre>
+        <div class="gen-preview-toolbar">
+          <span v-if="copyState !== 'idle'" class="gen-preview-copy-status"
+                :class="{ error: copyState === 'error' }" role="status" aria-live="polite">
+            {{ copyState === "success" ? "已复制" : "复制失败，请手动选择代码" }}
+          </span>
+          <button type="button" class="gen-preview-copy"
+                  :class="{ success: copyState === 'success', error: copyState === 'error' }"
+                  :title="copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败，请手动选择代码' : '复制当前文件代码'"
+                  :aria-label="copyState === 'success' ? '已复制当前文件代码' : '复制当前文件代码'"
+                  @click="copyExpandedCode">
+            <Check v-if="copyState === 'success'" :size="16" aria-hidden="true"/>
+            <Copy v-else :size="16" aria-hidden="true"/>
+          </button>
+        </div>
+        <div class="gen-preview-scroll">
+          <pre>{{ expandedFile.content }}</pre>
+        </div>
       </div>
     </div>
 
@@ -210,7 +226,7 @@ import type {GeneratorType, GenFile, LearningStatus} from "../logic/generateStat
 import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 import {buildSafeDebugExport} from "../logic/safeDebug";
-import {Play} from "lucide-vue-next";
+import {Check, Copy, Play} from "lucide-vue-next";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
 import LearningEvidence from "./LearningEvidence.vue";
 
@@ -343,11 +359,124 @@ function learningTrackState(index: number): "done" | "active" | "stopped" | "pen
 }
 
 const expandedPath = ref<string>("");
+type CopyState = "idle" | "success" | "error";
+const copyState = ref<CopyState>("idle");
+let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+let copyRequestSequence = 0;
+let componentUnmounted = false;
 const downloadUrl = computed(() => getDownloadUrl());
 
+function resetCopyFeedback() {
+    copyRequestSequence++;
+    copyState.value = "idle";
+    if (copyFeedbackTimer !== undefined) {
+        clearTimeout(copyFeedbackTimer);
+        copyFeedbackTimer = undefined;
+    }
+}
+
+async function writeClipboardText(text: string): Promise<boolean> {
+    if (navigator.clipboard?.writeText) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return true;
+        } catch {
+            // Safari and non-secure contexts may reject Clipboard API; use the DOM fallback below.
+        }
+    }
+
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "0";
+    textarea.style.left = "0";
+    textarea.style.width = "1px";
+    textarea.style.height = "1px";
+    textarea.style.padding = "0";
+    textarea.style.border = "0";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+
+    try {
+        return document.execCommand("copy");
+    } catch {
+        return false;
+    } finally {
+        textarea.remove();
+        activeElement?.focus({preventScroll: true});
+    }
+}
+
+async function copyExpandedCode() {
+    const file = expandedFile.value;
+    if (!file?.content) return;
+
+    const path = file.path;
+    resetCopyFeedback();
+    const requestSequence = copyRequestSequence;
+    const copied = await writeClipboardText(file.content);
+    if (componentUnmounted || requestSequence !== copyRequestSequence || expandedPath.value !== path) return;
+
+    copyState.value = copied ? "success" : "error";
+    copyFeedbackTimer = setTimeout(() => {
+        if (requestSequence === copyRequestSequence && expandedPath.value === path) {
+            copyState.value = "idle";
+            copyFeedbackTimer = undefined;
+        }
+    }, copied ? 1_600 : 3_000);
+}
+
+watch(expandedPath, resetCopyFeedback);
+onBeforeUnmount(() => {
+    componentUnmounted = true;
+    resetCopyFeedback();
+});
+
 // 只下载正向白名单构造的诊断，避免源码、路径、Prompt 或上游响应进入文件。
-function downloadDebug() {
-    const payload = buildSafeDebugExport(genTask);
+async function downloadDebug() {
+    const exportedAt = Date.now();
+    const basePayload = buildSafeDebugExport(genTask, exportedAt);
+    let learningEvidence: { searchedSources?: unknown; diagnostics?: unknown } | undefined;
+    const identity = {
+        taskId: genTask.taskId,
+        jobId: genTask.learningProgress.jobId,
+        stage: genTask.learningProgress.stage,
+        revision: genTask.learningProgress.revision,
+    };
+    if (identity.taskId && identity.jobId && identity.stage) {
+        try {
+            const params = new URLSearchParams({
+                taskId: identity.taskId,
+                jobId: identity.jobId,
+                stage: identity.stage,
+                revision: String(identity.revision),
+            });
+            const response = await fetch(`/api/learning/evidence?${params.toString()}`);
+            if (response.ok) {
+                const evidence = await response.json();
+                const current = genTask.learningProgress;
+                if (genTask.taskId === identity.taskId
+                    && current.jobId === identity.jobId
+                    && current.stage === identity.stage
+                    && current.revision === identity.revision
+                    && evidence?.learningJobId === identity.jobId
+                    && evidence?.learningStage === identity.stage
+                    && Number(evidence?.learningRevision) === identity.revision) {
+                    learningEvidence = evidence;
+                }
+            }
+        } catch {
+            // The base debug export is still useful when evidence cannot be reconciled.
+        }
+    }
+    const payload = learningEvidence
+        ? buildSafeDebugExport(genTask, exportedAt, learningEvidence)
+        : basePayload;
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -911,11 +1040,71 @@ watch(() => genTask.streamingContent, async () => {
 }
 
 .gen-preview {
+  display: flex;
+  flex-direction: column;
   background: rgba(0,0,0,0.3);
   border-radius: 10px;
-  padding: 14px;
   max-height: 300px;
+  overflow: hidden;
+}
+.gen-preview-toolbar {
+  min-height: 40px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  background: rgba(0,0,0,0.24);
+}
+.gen-preview-copy-status {
+  color: rgba(190, 224, 176, 0.9);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.gen-preview-copy-status.error { color: rgba(255, 174, 160, 0.92); }
+.gen-preview-copy {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.72);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.gen-preview-copy:hover {
+  background: rgba(255,255,255,0.11);
+  border-color: rgba(255,255,255,0.28);
+  color: rgba(255,255,255,0.92);
+}
+.gen-preview-copy:focus-visible {
+  outline: 2px solid var(--oak-highlight, #AF9876);
+  outline-offset: 2px;
+}
+.gen-preview-copy.success {
+  color: rgba(190, 224, 176, 0.95);
+  border-color: rgba(151, 205, 130, 0.4);
+}
+.gen-preview-copy.error {
+  color: rgba(255, 174, 160, 0.95);
+  border-color: rgba(255, 130, 110, 0.4);
+}
+.gen-preview-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+  padding: 14px;
+  box-sizing: border-box;
 }
 .gen-preview pre {
   color: rgba(255,255,255,0.8);

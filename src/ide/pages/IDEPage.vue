@@ -123,7 +123,7 @@ import {useIDEStore, type IDESeedFile} from "../composables/useIDEStore";
 import {useIDEChat} from "../composables/useIDEChat";
 import {loadFromPom, type LoadStatus} from "../composables/useJarSymbols";
 import {setDynamicDict} from "../composables/useBukkitDict";
-import {genTask, resetGenTask} from "../../logic/generateState";
+import {appendGenLog, genTask, resetGenTask} from "../../logic/generateState";
 import {startBuildFromIDE} from "../../logic/generateHandler";
 
 const route = useRoute();
@@ -320,7 +320,7 @@ async function onCompile() {
     }));
     genTask.currentIndex = files.length;
     genTask.phase = "uploading";
-    genTask.logs = ["▸ 从 IDE 启动构建，使用本地最新内容..."];
+    appendGenLog("▸ 从 IDE 启动构建，使用本地最新内容...");
 
     router.push("/chat");
     // 让 router 完成切换再启动构建，避免在 unmount 期间触发响应

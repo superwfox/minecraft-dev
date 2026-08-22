@@ -6,6 +6,7 @@
       <span>学习证据</span>
       <span v-if="publicSourceCount" class="learning-count">{{ publicSourceCount }} 个 URL</span>
       <span v-if="knowledgeCount" class="learning-count recipe">{{ knowledgeCount }} 条结论</span>
+      <span v-if="diagnosticCount" class="learning-count debug">{{ diagnosticCount }} 条诊断</span>
       <ChevronDown :size="17" class="learning-chevron" :class="{ open: expanded }" aria-hidden="true" />
     </button>
 
@@ -20,11 +21,39 @@
           <RefreshCw :size="16" aria-hidden="true" />
         </button>
       </div>
-      <div v-else-if="!items.length && !searchedSources.length" class="learning-empty">
+      <div v-else-if="!items.length && !searchedSources.length && !diagnostics.length" class="learning-empty">
         本次没有产生可展示的联网证据
       </div>
 
       <div v-else class="evidence-sections">
+        <section v-if="diagnostics.length" class="evidence-section">
+          <header class="evidence-section-head">
+            <Bug :size="16" aria-hidden="true" />
+            <h3>详细诊断</h3>
+            <span>{{ diagnostics.length }}</span>
+          </header>
+          <div class="diagnostic-list">
+            <article v-for="(event, index) in diagnostics" :key="`${event.at}:${event.code}:${index}`"
+                     class="diagnostic-item" :class="event.status">
+              <div class="diagnostic-head">
+                <span class="diagnostic-stage">{{ diagnosticStageLabel(event.stage) }}</span>
+                <code>{{ event.code }}</code>
+                <time>{{ formatDiagnosticTime(event.at) }}</time>
+              </div>
+              <p>{{ event.message }}</p>
+              <div v-if="event.query" class="diagnostic-value">
+                <span>查询</span>
+                <code>{{ event.query }}</code>
+              </div>
+              <a v-if="event.url" class="diagnostic-url" :href="event.url"
+                 target="_blank" rel="noopener noreferrer">{{ event.url }}</a>
+              <div v-if="diagnosticMeta(event).length" class="diagnostic-meta">
+                <span v-for="meta in diagnosticMeta(event)" :key="meta">{{ meta }}</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section v-if="searchedSources.length" class="evidence-section">
           <header class="evidence-section-head">
             <Search :size="16" aria-hidden="true" />
@@ -67,6 +96,9 @@
                 {{ rejectionLabel(source.rejectionCode) }}
                 <code>{{ source.rejectionCode }}</code>
               </div>
+              <div v-if="sourceTechnicalMeta(source).length" class="source-technical-meta">
+                <span v-for="meta in sourceTechnicalMeta(source)" :key="meta">{{ meta }}</span>
+              </div>
             </article>
           </div>
         </section>
@@ -74,7 +106,7 @@
         <section v-if="items.length" class="evidence-section">
           <header class="evidence-section-head">
             <Code2 :size="16" aria-hidden="true" />
-            <h3>验证结论与方法通例</h3>
+            <h3>验证结论</h3>
             <span>{{ items.length }}</span>
           </header>
           <div class="learning-items">
@@ -118,7 +150,11 @@
                   <pre><code>{{ item.recipe.code }}</code></pre>
                 </div>
               </div>
-              <div v-else class="recipe-empty">该结论未形成可复用的方法通例，本次不会注入代码生成。</div>
+              <div v-else class="recipe-empty">
+                {{ item.answerType === "coordinate"
+                  ? "该结论是结构化依赖坐标，不需要 Java 方法通例。"
+                  : "该结论未形成可复用的方法通例，本次不会注入代码生成。" }}
+              </div>
 
               <div v-if="item.sources.length" class="learning-sources">
                 <a v-for="source in item.sources" :key="source.sourceId"
@@ -146,6 +182,7 @@
 import { computed, ref, watch } from "vue";
 import {
     BookOpenCheck,
+    Bug,
     ChevronDown,
     Code2,
     ExternalLink,
@@ -158,6 +195,7 @@ import {
     resolveLearningEvidenceResult,
     type LearningEvidenceIdentity,
     type LearningEvidenceItem,
+    type LearningDiagnosticEvent,
     type LearningSearchedSource,
 } from "../logic/learningEvidenceState";
 import { responseError } from "../api/apiError";
@@ -177,14 +215,18 @@ const loading = ref(false);
 const error = ref("");
 const items = ref<LearningEvidenceItem[]>([]);
 const searchedSources = ref<LearningSearchedSource[]>([]);
+const diagnostics = ref<LearningDiagnosticEvent[]>([]);
 const loadedKey = ref("");
 let loadSequence = 0;
+let activeLoadKey = "";
 
 const statusVisible = computed(() => !!props.learningStatus && props.learningStatus !== "idle");
 const publicSourceCount = computed(() => Math.max(
     searchedSources.value.length,
     Math.max(0, Number(props.searchedSourceCount) || 0),
 ));
+const diagnosticCount = computed(() => diagnostics.value.length);
+const autoExpandStatuses = new Set(["deferred", "needs_review", "failed"]);
 const bodyId = computed(() => {
     const suffix = props.taskId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 100) || "current";
     return `learning-evidence-body-${suffix}`;
@@ -250,6 +292,53 @@ function rejectionLabel(code: string) {
         source_limit: "已达到来源数量上限",
     };
     return labels[code] || "来源未被接纳";
+}
+
+function diagnosticStageLabel(stage: LearningDiagnosticEvent["stage"]) {
+    if (stage === "discovery") return "发现";
+    if (stage === "fetch") return "抓取";
+    if (stage === "privacy") return "隐私过滤";
+    if (stage === "verification") return "验证";
+    return "采用";
+}
+
+function formatDiagnosticTime(value: number) {
+    if (!value) return "--:--:--";
+    try {
+        return new Date(value).toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        });
+    } catch {
+        return "--:--:--";
+    }
+}
+
+function formatBytes(value?: number) {
+    if (value === undefined) return "";
+    if (value < 1024) return `${value} B`;
+    return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+}
+
+function diagnosticMeta(event: LearningDiagnosticEvent) {
+    return [
+        event.httpStatus !== undefined ? `HTTP ${event.httpStatus}` : "",
+        event.contentType || "",
+        formatBytes(event.byteCount),
+        event.elapsedMs !== undefined ? `${event.elapsedMs} ms` : "",
+    ].filter(Boolean);
+}
+
+function sourceTechnicalMeta(source: LearningSearchedSource) {
+    return [
+        source.detailCode || "",
+        source.httpStatus !== undefined ? `HTTP ${source.httpStatus}` : "",
+        source.contentType || "",
+        formatBytes(source.byteCount),
+        source.elapsedMs !== undefined ? `${source.elapsedMs} ms` : "",
+    ].filter(Boolean);
 }
 
 function authorityLabel(value: string) {
@@ -320,9 +409,11 @@ function formatScope(raw: unknown) {
 
 async function load() {
     if (!props.taskId) return;
-    const sequence = ++loadSequence;
     const requestedKey = evidenceKey.value;
+    if (loading.value && activeLoadKey === requestedKey) return;
+    const sequence = ++loadSequence;
     const requestedIdentity = { ...evidenceIdentity.value };
+    activeLoadKey = requestedKey;
     loading.value = true;
     error.value = "";
     try {
@@ -353,15 +444,20 @@ async function load() {
             requestedIdentity,
             responseIdentity,
             data.searchedSources,
+            data.diagnostics,
         );
         items.value = result.items;
         searchedSources.value = result.searchedSources;
+        diagnostics.value = result.diagnostics;
         loadedKey.value = result.cache ? requestedKey : "";
     } catch {
         if (sequence !== loadSequence) return;
         error.value = "证据暂时无法读取";
     } finally {
-        if (sequence === loadSequence) loading.value = false;
+        if (sequence === loadSequence) {
+            loading.value = false;
+            activeLoadKey = "";
+        }
     }
 }
 
@@ -372,17 +468,25 @@ function toggle() {
 
 watch(() => props.taskId, () => {
     loadSequence++;
-    expanded.value = false;
+    activeLoadKey = "";
+    expanded.value = autoExpandStatuses.has(props.learningStatus || "");
     loading.value = false;
     loadedKey.value = "";
     items.value = [];
     searchedSources.value = [];
+    diagnostics.value = [];
     error.value = "";
 });
 
 watch(evidenceKey, (next, previous) => {
     if (expanded.value && next !== previous) void load();
 });
+
+watch(() => props.learningStatus, (status) => {
+    if (!autoExpandStatuses.has(status || "") || expanded.value) return;
+    expanded.value = true;
+    if (loadedKey.value !== evidenceKey.value) void load();
+}, { immediate: true });
 </script>
 
 <style scoped>
@@ -419,6 +523,10 @@ watch(evidenceKey, (next, previous) => {
   background: rgba(93, 159, 118, 0.14);
   color: #a9d8ba;
 }
+.learning-count.debug {
+  background: rgba(180, 143, 68, 0.14);
+  color: #e2c88f;
+}
 .learning-chevron { margin-left: auto; transition: transform 0.18s; }
 .learning-chevron.open { transform: rotate(180deg); }
 .learning-body { padding: 8px 0 0; }
@@ -446,7 +554,8 @@ watch(evidenceKey, (next, previous) => {
 }
 .evidence-sections,
 .learning-items,
-.searched-list { display: flex; flex-direction: column; }
+.searched-list,
+.diagnostic-list { display: flex; flex-direction: column; }
 .evidence-section { padding: 12px 0 2px; border-top: 1px solid rgba(244, 241, 236, 0.08); }
 .evidence-section:first-child { border-top: 0; }
 .evidence-section-head {
@@ -459,9 +568,44 @@ watch(evidenceKey, (next, previous) => {
 .evidence-section-head h3 { margin: 0; font-size: 12px; font-weight: 650; }
 .evidence-section-head span { margin-left: auto; color: rgba(244, 241, 236, 0.34); font: 11px monospace; }
 .searched-source,
-.learning-item { padding: 12px 2px; border-top: 1px solid rgba(244, 241, 236, 0.08); }
+.learning-item,
+.diagnostic-item { padding: 12px 2px; border-top: 1px solid rgba(244, 241, 236, 0.08); }
 .searched-source:first-child,
-.learning-item:first-child { border-top: 0; }
+.learning-item:first-child,
+.diagnostic-item:first-child { border-top: 0; }
+.diagnostic-item { border-left: 2px solid rgba(244, 241, 236, 0.12); padding-left: 10px; }
+.diagnostic-item.success { border-left-color: rgba(93, 159, 118, 0.7); }
+.diagnostic-item.warning,
+.diagnostic-item.skipped { border-left-color: rgba(180, 143, 68, 0.72); }
+.diagnostic-item.error { border-left-color: rgba(183, 91, 74, 0.76); }
+.diagnostic-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.diagnostic-stage {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: #a8ccd5;
+  background: rgba(67, 128, 145, 0.14);
+  font-size: 11px;
+}
+.diagnostic-head code { min-width: 0; color: rgba(244, 241, 236, 0.58); font: 10.5px monospace; overflow-wrap: anywhere; }
+.diagnostic-head time { margin-left: auto; flex: 0 0 auto; color: rgba(244, 241, 236, 0.3); font: 10.5px monospace; }
+.diagnostic-item p { margin: 7px 0 0; color: rgba(244, 241, 236, 0.7); font-size: 12px; line-height: 1.5; }
+.diagnostic-value { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; margin-top: 7px; }
+.diagnostic-value span { color: rgba(244, 241, 236, 0.34); font-size: 11px; }
+.diagnostic-value code,
+.diagnostic-url { color: rgba(166, 204, 213, 0.86); font: 11px/1.5 monospace; overflow-wrap: anywhere; }
+.diagnostic-url { display: block; margin-top: 7px; text-decoration: none; }
+.diagnostic-url:hover { color: #c2e0e6; }
+.diagnostic-meta,
+.source-technical-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.diagnostic-meta span,
+.source-technical-meta span {
+  padding: 2px 6px;
+  border: 1px solid rgba(244, 241, 236, 0.1);
+  border-radius: 4px;
+  color: rgba(244, 241, 236, 0.42);
+  font: 10px monospace;
+}
 .searched-head,
 .learning-item-head,
 .recipe-head { display: flex; align-items: center; gap: 8px; }

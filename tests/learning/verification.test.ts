@@ -58,6 +58,9 @@ describe("knowledge verification", () => {
             recipe: undefined,
         })), need, [source])).toThrow("verification_support_missing");
         expect(() => parseVerificationResult(JSON.stringify(makeVerification({
+            recipe: undefined,
+        })), makeNeed({ claim: { answerType: "behavior" } }), [source])).toThrow("verification_support_missing");
+        expect(() => parseVerificationResult(JSON.stringify(makeVerification({
             recipe: makeRecipe({
                 code: "```java\npublic static void broken() { }\n```",
             }),
@@ -79,6 +82,43 @@ describe("knowledge verification", () => {
         expect(() => parseVerificationResult(JSON.stringify(makeVerification({
             recipe: makeRecipe({ notes: [] }),
         })), need, [source])).toThrow("verification_support_missing");
+    });
+
+    it("accepts evidence-backed coordinate conclusions without a Java recipe", () => {
+        const need = makeNeed({
+            claim: {
+                subject: "io.papermc.paper:paper-api",
+                question: "Which stable Paper 26.2 Maven coordinate exists?",
+                answerType: "coordinate",
+            },
+            scope: {
+                dependency: "io.papermc.paper:paper-api:26.2-R0.1-SNAPSHOT",
+                packageName: undefined,
+                symbol: undefined,
+            },
+            sourcePolicy: "dependency",
+        });
+        const source = makeSource({
+            sourceType: "artifact",
+            authority: "official",
+            excerpt: "The published coordinate is io.papermc.paper:paper-api:26.2.build.112-stable.",
+        });
+        const parsed = parseVerificationResult(JSON.stringify(makeVerification({
+            normalizedClaim: {
+                coordinate: "io.papermc.paper:paper-api:26.2.build.112-stable",
+            },
+            evidence: [{
+                sourceId: source.sourceId,
+                relation: "supports",
+                locator: "published POM",
+                excerpt: "io.papermc.paper:paper-api:26.2.build.112-stable",
+            }],
+            runtimeSummary: "Paper 26.2 uses the published stable build-qualified coordinate.",
+            recipe: undefined,
+        })), need, [source]);
+
+        expect(parsed.recipe).toBeUndefined();
+        expect(parsed.verdict).toBe("supported");
     });
 
     it("rejects verifier fields that exceed their declared limits", () => {
@@ -157,19 +197,34 @@ describe("knowledge verification", () => {
         });
         const artifact = makeSource({
             sourceId: "src-artifact",
-            domain: "repo.maven.apache.org",
+            domain: "repo.papermc.io",
             sourceType: "artifact",
-            authority: "ground_truth",
+            authority: "official",
         });
-        expect(decideKnowledgeStatus(makeNeed(), makeVerification({
+        expect(decideKnowledgeStatus(makeNeed({
+            claim: {
+                answerType: "coordinate",
+                subject: "example:artifact",
+                question: "Which exact artifact coordinate is published?",
+            },
+            scope: {
+                dependency: "example:artifact:invalid",
+                packageName: undefined,
+                symbol: undefined,
+            },
+            sourcePolicy: "dependency",
+        }), makeVerification({
             evidence: [{
                 sourceId: "src-artifact",
                 relation: "supports",
                 locator: "POM",
                 excerpt: "artifact coordinate",
             }],
-            recipe: makeRecipe({ sourceIds: ["src-artifact"] }),
-        }), [artifact], now).status).toBe("needs_review");
+            recipe: undefined,
+        }), [artifact], now)).toEqual({
+            status: "active",
+            expiresAt: now + 90 * 86_400_000,
+        });
         const officialDocs = makeSource({
             sourceId: "src-docs",
             domain: "docs.example-b.com",
@@ -239,6 +294,7 @@ describe("knowledge verification", () => {
         expect(result).toMatchObject({
             ok: false,
             reasonCode: "verification_invalid_response",
+            detailCode: "verification_identity",
             usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
     });
@@ -273,6 +329,7 @@ describe("knowledge verification", () => {
         expect(result).toMatchObject({
             ok: false,
             reasonCode: "verification_timeout",
+            detailCode: "verification_timeout",
             retryable: true,
         });
         expect(fetchImpl).toHaveBeenCalledOnce();
@@ -318,6 +375,41 @@ describe("knowledge verification", () => {
         expect(requestBody.messages[0].content).toContain("连续逐字复制");
         expect(requestBody.messages[1].content).toContain("【不可信来源数据】");
         expect(requestBody.messages[1].content).toContain("连续逐字引用");
+        expect(requestBody.messages[1].content).toContain("【输出 JSON 契约】");
+        expect(requestBody.messages[1].content).toContain("implementation_recipe.v1");
+        expect(requestBody.messages[1].content).toContain("coordinate/migration/rule");
         expect(requestBody.messages[1].content).toContain(marker);
+    });
+
+    it("returns a public HTTP detail code without exposing the provider body", async () => {
+        const fetchImpl = vi.fn(async () => new Response("private upstream failure body", {
+            status: 422,
+            headers: { "Content-Type": "text/plain" },
+        })) as unknown as typeof fetch;
+        const llm: LLMProvider = {
+            providerId: "deepseek",
+            url: "https://api.deepseek.com/v1/chat/completions",
+            apiKey: "test-key",
+            byok: false,
+            credentialId: "",
+            learningCacheRead: true,
+            canAutoLearn: true,
+            modelFor: () => "deepseek-v4-pro",
+        };
+
+        const result = await verifyKnowledgeNeed({
+            llm,
+            need: makeNeed(),
+            sources: [makeSource()],
+            fetchImpl,
+        });
+
+        expect(result).toMatchObject({
+            ok: false,
+            reasonCode: "verification_http",
+            detailCode: "verification_http_422",
+            httpStatus: 422,
+        });
+        expect(JSON.stringify(result)).not.toContain("private upstream failure body");
     });
 });

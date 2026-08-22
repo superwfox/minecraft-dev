@@ -2,6 +2,7 @@ import { learningKnowledgeIds } from "../../_lib/learning/public";
 import { publicLearningCandidateUrl } from "../../_lib/learning/sourceFetch";
 import { getLearningEvidenceItems, getLearningJob } from "../../_lib/learning/store";
 import type {
+    LearningDiagnosticEvent,
     LearningJobRecord,
     LearningSourceRejectionCode,
     LearningStage,
@@ -40,11 +41,66 @@ const SOURCE_REJECTION_CODES = new Set<LearningSourceRejectionCode>([
     "budget_exhausted",
     "source_limit",
 ]);
+const DIAGNOSTIC_STAGES = new Set<LearningDiagnosticEvent["stage"]>([
+    "discovery",
+    "fetch",
+    "privacy",
+    "verification",
+    "activation",
+]);
+const DIAGNOSTIC_STATUSES = new Set<LearningDiagnosticEvent["status"]>([
+    "info",
+    "success",
+    "warning",
+    "error",
+    "skipped",
+]);
 
 function safeText(value: unknown, max: number): string {
     return typeof value === "string"
         ? value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max)
         : "";
+}
+
+function safeCount(value: unknown, max = 1_000_000_000): number | undefined {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0
+        ? Math.min(max, Math.floor(number))
+        : undefined;
+}
+
+function diagnostics(job: LearningJobRecord | null): LearningDiagnosticEvent[] {
+    if (!job || !Array.isArray(job.work.diagnostics)) return [];
+    return job.work.diagnostics.slice(-80).flatMap((event) => {
+        if (!event || typeof event !== "object"
+            || !DIAGNOSTIC_STAGES.has(event.stage)
+            || !DIAGNOSTIC_STATUSES.has(event.status)) return [];
+        const code = safeText(event.code, 100);
+        const message = safeText(event.message, 600);
+        if (!code || !message) return [];
+        const projected: LearningDiagnosticEvent = {
+            at: safeCount(event.at, 8_640_000_000_000_000) ?? 0,
+            stage: event.stage,
+            status: event.status,
+            code,
+            message,
+        };
+        const needId = safeText(event.needId, 100);
+        const query = safeText(event.query, 500);
+        const url = event.url ? publicLearningCandidateUrl(event.url) : "";
+        const httpStatus = safeCount(event.httpStatus, 999);
+        const contentType = safeText(event.contentType, 120);
+        const byteCount = safeCount(event.byteCount);
+        const elapsedMs = safeCount(event.elapsedMs, 300_000);
+        if (needId) projected.needId = needId;
+        if (query) projected.query = query;
+        if (url) projected.url = url;
+        if (httpStatus !== undefined) projected.httpStatus = httpStatus;
+        if (contentType) projected.contentType = contentType;
+        if (byteCount !== undefined) projected.byteCount = byteCount;
+        if (elapsedMs !== undefined) projected.elapsedMs = elapsedMs;
+        return [projected];
+    });
 }
 
 function searchedSources(job: LearningJobRecord | null): PublicLearningSearchedSource[] {
@@ -70,6 +126,11 @@ function searchedSources(job: LearningJobRecord | null): PublicLearningSearchedS
             reason: safeText(source.reason, 240) || "该候选未提供可用的搜索理由",
             status,
             ...(rejectionCode ? { rejectionCode } : {}),
+            detailCode: safeText(source.detailCode, 100) || undefined,
+            httpStatus: safeCount(source.httpStatus, 999),
+            contentType: safeText(source.contentType, 120) || undefined,
+            byteCount: safeCount(source.byteCount),
+            elapsedMs: safeCount(source.elapsedMs, 300_000),
             title: safeText(source.title, 300),
             sourceType: safeText(source.sourceType, 80) || "unclassified",
             authority: safeText(source.authority, 80) || "unclassified",
@@ -107,6 +168,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!context.env.DB) return json({
         items: [],
         searchedSources: [],
+        diagnostics: [],
         learningJobId: "",
         learningStage: "",
         learningStatus: "idle",
@@ -124,6 +186,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const snapshot: PublicLearningEvidenceSnapshot = {
         items: await getLearningEvidenceItems(context.env, ids),
         searchedSources: searchedSources(job),
+        diagnostics: diagnostics(job),
         learningJobId: job?.jobId ?? "",
         learningStage: job?.stage ?? "",
         learningStatus: job?.status ?? "idle",

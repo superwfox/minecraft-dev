@@ -152,7 +152,9 @@ function addDependencyTerms(terms: Set<string>, value: unknown): void {
     if (coordinate.length >= 2 && coordinate[0] && coordinate[1]) {
         addQualifiedIdentifier(terms, coordinate[0]);
         addCandidateTerm(terms, coordinate[1], 4);
-    } else if (dependency.includes(".") || dependency.includes("/")) {
+        return;
+    }
+    if (dependency.includes(".") || dependency.includes("/")) {
         addQualifiedIdentifier(terms, dependency.replace(/[#:].*$/, ""));
     } else {
         addCandidateTerm(terms, dependency, 4);
@@ -194,15 +196,7 @@ function addKnowledgeNeedTerms(terms: Set<string>, need: KnowledgeNeed): void {
     if (/^[A-Za-z_$][A-Za-z0-9_$./:-]{3,}$/.test(need.claim.subject.trim())) {
         addDependencyTerms(terms, need.claim.subject);
     }
-    const strings: string[] = [];
-    const extractionOverflow = collectStrings({
-        claim: need.claim,
-        scope: need.scope,
-        searchQueries: need.searchQueries,
-        acceptanceCriteria: need.acceptanceCriteria,
-    }, strings);
-    if (extractionOverflow) storeTerm(terms, EXTRACTION_OVERFLOW);
-    for (const value of strings) scanCandidateIdentifiers(terms, value);
+    scanCandidateIdentifiers(terms, need.claim.subject);
 }
 
 export function sharedKnowledgeForbiddenTerms(input: {

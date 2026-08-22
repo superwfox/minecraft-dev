@@ -148,6 +148,52 @@ describe("learning source fetch safety", () => {
         expect(mirroredPom).toMatchObject({ sourceType: "artifact", authority: "secondary" });
     });
 
+    it("accepts the Paper repository POM MIME only for trusted .pom artifact URLs", async () => {
+        const need = makeNeed({
+            claim: {
+                subject: "io.papermc.paper:paper-api",
+                question: "Which stable coordinate replaces the invalid Paper 26.2 snapshot?",
+                answerType: "coordinate",
+            },
+            scope: {
+                dependency: "io.papermc.paper:paper-api:26.2-R0.1-SNAPSHOT",
+                packageName: undefined,
+                symbol: undefined,
+            },
+            sourcePolicy: "dependency",
+        });
+        const pomBody = [
+            "<project>",
+            "<groupId>io.papermc.paper</groupId>",
+            "<artifactId>paper-api</artifactId>",
+            "<version>26.2.build.112-stable</version>",
+            "</project>",
+        ].join("");
+        const accepted = await fetchLearningSource({
+            jobId: "learn-test",
+            need,
+            url: "https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/26.2.build.112-stable/paper-api-26.2.build.112-stable.pom",
+            fetchImpl: responseFetch(pomBody, "application/x-maven-pom+xml"),
+        });
+
+        expect(accepted).toMatchObject({
+            sourceType: "artifact",
+            authority: "official",
+        });
+        await expect(fetchLearningSource({
+            jobId: "learn-test",
+            need,
+            url: "https://example.com/paper-api-26.2.build.112-stable.pom",
+            fetchImpl: responseFetch(pomBody, "application/x-maven-pom+xml"),
+        })).rejects.toThrow("unsupported_content_type");
+        await expect(fetchLearningSource({
+            jobId: "learn-test",
+            need,
+            url: "https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/maven-metadata.xml",
+            fetchImpl: responseFetch(pomBody, "application/x-maven-pom+xml"),
+        })).rejects.toThrow("unsupported_content_type");
+    });
+
     it("does not promote SHA-shaped GitHub objects without trusted ref ancestry", async () => {
         const commit = "a".repeat(40);
         const officialCommit = await fetchAt(`https://github.com/PaperMC/Paper/blob/${commit}/README.md`);

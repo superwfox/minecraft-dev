@@ -62,6 +62,39 @@ const OFFICIAL_GITHUB_REPOSITORIES = new Set([
     "spigotmc/spigot-api",
 ]);
 
+export interface LearningSourceTrace {
+    detailCode: string;
+    httpStatus?: number;
+    contentType?: string;
+    byteCount?: number;
+    elapsedMs: number;
+}
+
+type LearningSourceError = Error & Partial<LearningSourceTrace>;
+
+function sourceError(
+    code: string,
+    details: Partial<Omit<LearningSourceTrace, "detailCode">> = {},
+): LearningSourceError {
+    return Object.assign(new Error(code), { detailCode: code, ...details });
+}
+
+function sourceErrorCode(error: unknown): string {
+    const detailCode = error && typeof error === "object"
+        ? String((error as { detailCode?: unknown }).detailCode || "")
+        : "";
+    const message = error instanceof Error ? error.message : "";
+    const code = detailCode || message || "source_fetch_failed";
+    return /^[A-Za-z0-9_.-]{1,100}$/.test(code) ? code : "source_fetch_failed";
+}
+
+function isAllowedContentType(url: URL, contentType: string): boolean {
+    if (ALLOWED_CONTENT_TYPES.includes(contentType)) return true;
+    return contentType === "application/x-maven-pom+xml"
+        && TRUSTED_ARTIFACT_HOSTS.has(url.hostname.toLowerCase())
+        && decodedPath(url).toLowerCase().endsWith(".pom");
+}
+
 function isIpLiteral(hostname: string): boolean {
     const normalized = hostname.replace(/^\[|\]$/g, "");
     if (normalized.includes(":")) return true;
@@ -283,7 +316,9 @@ async function sha256(value: string): Promise<string> {
 async function readLimitedBody(response: Response, controller: AbortController): Promise<Uint8Array> {
     if (!response.body) {
         const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength > MAX_BYTES) throw new Error("source_too_large");
+        if (bytes.byteLength > MAX_BYTES) throw sourceError("source_too_large", {
+            byteCount: bytes.byteLength,
+        });
         return bytes;
     }
 
@@ -299,7 +334,7 @@ async function readLimitedBody(response: Response, controller: AbortController):
             if (total > MAX_BYTES) {
                 controller.abort();
                 await reader.cancel("source_too_large").catch(() => undefined);
-                throw new Error("source_too_large");
+                throw sourceError("source_too_large", { byteCount: total });
             }
             chunks.push(value);
         }
@@ -320,33 +355,62 @@ async function fetchOne(
     initialUrl: string,
     fetchImpl: typeof fetch,
     controller: AbortController,
-): Promise<{ url: URL; contentType: string; text: string }> {
+): Promise<{ url: URL; contentType: string; text: string; httpStatus: number; byteCount: number }> {
     let url = validatePublicSourceUrl(initialUrl);
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
         const response = await fetchImpl(url.href, {
             method: "GET",
             redirect: "manual",
             headers: {
-                Accept: "text/html,text/plain,application/json,application/xml;q=0.8,text/xml;q=0.8",
+                Accept: "text/html,text/plain,application/json,application/xml;q=0.8,text/xml;q=0.8,application/x-maven-pom+xml;q=0.8",
                 "User-Agent": "TAHAI-Learning/1.0",
             },
             signal: controller.signal,
         });
         if (response.status >= 300 && response.status < 400) {
             const location = response.headers.get("Location");
-            if (!location || redirects >= MAX_REDIRECTS) throw new Error("redirect_limit");
+            if (!location || redirects >= MAX_REDIRECTS) {
+                throw sourceError("redirect_limit", { httpStatus: response.status });
+            }
             url = validatePublicSourceUrl(new URL(location, url).href);
             continue;
         }
-        if (!response.ok) throw new Error(`source_http_${response.status}`);
+        if (!response.ok) throw sourceError(`source_http_${response.status}`, {
+            httpStatus: response.status,
+            contentType: (response.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase(),
+        });
         const contentType = (response.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase();
-        if (!ALLOWED_CONTENT_TYPES.includes(contentType)) throw new Error("unsupported_content_type");
+        if (!isAllowedContentType(url, contentType)) throw sourceError("unsupported_content_type", {
+            httpStatus: response.status,
+            contentType,
+        });
         const declaredSize = Number(response.headers.get("Content-Length") || 0);
-        if (declaredSize > MAX_BYTES) throw new Error("source_too_large");
-        const bytes = await readLimitedBody(response, controller);
-        return { url, contentType, text: new TextDecoder().decode(bytes) };
+        if (declaredSize > MAX_BYTES) throw sourceError("source_too_large", {
+            httpStatus: response.status,
+            contentType,
+            byteCount: declaredSize,
+        });
+        let bytes: Uint8Array;
+        try {
+            bytes = await readLimitedBody(response, controller);
+        } catch (error) {
+            if (error && typeof error === "object") {
+                Object.assign(error, {
+                    httpStatus: response.status,
+                    contentType,
+                });
+            }
+            throw error;
+        }
+        return {
+            url,
+            contentType,
+            text: new TextDecoder().decode(bytes),
+            httpStatus: response.status,
+            byteCount: bytes.byteLength,
+        };
     }
-    throw new Error("redirect_limit");
+    throw sourceError("redirect_limit");
 }
 
 function ensureSourceDeadline(controller: AbortController, deadlineAt: number): void {
@@ -362,6 +426,7 @@ export async function fetchLearningSource(input: {
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
     now?: number;
+    onTrace?: (trace: LearningSourceTrace) => void;
 }): Promise<LearningSourceRecord> {
     const configuredTimeout = Number(input.timeoutMs);
     const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
@@ -370,8 +435,15 @@ export async function fetchLearningSource(input: {
     const deadlineAt = Date.now() + timeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+    let responseTrace: Partial<LearningSourceTrace> = {};
     try {
         const fetched = await fetchOne(input.url, input.fetchImpl ?? fetch, controller);
+        responseTrace = {
+            httpStatus: fetched.httpStatus,
+            contentType: fetched.contentType,
+            byteCount: fetched.byteCount,
+        };
         ensureSourceDeadline(controller, deadlineAt);
         const isHtml = fetched.contentType === "text/html";
         const normalized = isHtml
@@ -387,7 +459,7 @@ export async function fetchLearningSource(input: {
             sha256(JSON.stringify([input.jobId, input.need.id, canonicalUrl])),
         ]);
         ensureSourceDeadline(controller, deadlineAt);
-        return {
+        const source = {
             sourceId: `src_${sourceKey}`,
             jobId: input.jobId,
             needId: input.need.id,
@@ -401,6 +473,37 @@ export async function fetchLearningSource(input: {
             excerpt,
             verificationState: "pending",
         };
+        input.onTrace?.({
+            detailCode: "source_fetched",
+            httpStatus: fetched.httpStatus,
+            contentType: fetched.contentType,
+            byteCount: fetched.byteCount,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+        });
+        return source;
+    } catch (error) {
+        if (error && typeof error === "object") {
+            const elapsedMs = Math.max(0, Date.now() - startedAt);
+            Object.assign(error, {
+                ...responseTrace,
+                detailCode: sourceErrorCode(error),
+                elapsedMs,
+            });
+            input.onTrace?.({
+                detailCode: sourceErrorCode(error),
+                httpStatus: Number.isFinite(Number((error as LearningSourceError).httpStatus))
+                    ? Number((error as LearningSourceError).httpStatus)
+                    : undefined,
+                contentType: typeof (error as LearningSourceError).contentType === "string"
+                    ? (error as LearningSourceError).contentType
+                    : undefined,
+                byteCount: Number.isFinite(Number((error as LearningSourceError).byteCount))
+                    ? Number((error as LearningSourceError).byteCount)
+                    : undefined,
+                elapsedMs,
+            });
+        }
+        throw error;
     } finally {
         clearTimeout(timer);
     }
@@ -599,6 +702,7 @@ export async function fetchLearningSources(input: {
             if (outcome.status !== "discovered") continue;
             outcome.status = "skipped";
             outcome.rejectionCode = rejectionCode;
+            outcome.detailCode = rejectionCode;
         }
     };
     const finish = (skippedReason?: LearningSourceRejectionCode) => {
@@ -619,15 +723,18 @@ export async function fetchLearningSources(input: {
             const entry = queue.entries[queue.index++];
             const audit = outcomes[entry.outcomeIndex];
             telemetry.sourceAttempts++;
+            const attemptStartedAt = Date.now();
             let canonicalUrl: string;
             try {
                 canonicalUrl = validatePublicSourceUrl(entry.url).href;
                 audit.url = canonicalUrl;
-            } catch {
+            } catch (error) {
                 telemetry.sourceRejected++;
                 telemetry.sourceInvalid++;
                 audit.status = "rejected";
                 audit.rejectionCode = "invalid_url";
+                audit.detailCode = sourceErrorCode(error);
+                audit.elapsedMs = 0;
                 continue;
             }
             const candidateKey = `${queue.need.id}\n${canonicalUrl}`;
@@ -636,6 +743,8 @@ export async function fetchLearningSources(input: {
                 telemetry.sourceDeduplicated++;
                 audit.status = "rejected";
                 audit.rejectionCode = "duplicate";
+                audit.detailCode = "duplicate";
+                audit.elapsedMs = 0;
                 continue;
             }
             seenCandidates.add(candidateKey);
@@ -645,6 +754,7 @@ export async function fetchLearningSources(input: {
             const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
                 ? Math.min(DEFAULT_TIMEOUT_MS, Math.floor(configuredTimeout))
                 : DEFAULT_TIMEOUT_MS;
+            let trace: LearningSourceTrace | undefined;
             try {
                 const source = await fetchLearningSource({
                     jobId: input.jobId,
@@ -652,6 +762,7 @@ export async function fetchLearningSources(input: {
                     url: canonicalUrl,
                     fetchImpl: input.fetchImpl,
                     timeoutMs: Math.max(1, Math.min(timeoutMs, remaining)),
+                    onTrace: (value) => { trace = value; },
                 });
                 const sourceKey = `${queue.need.id}\n${source.canonicalUrl}`;
                 if (acceptedSources.has(sourceKey)) {
@@ -659,6 +770,11 @@ export async function fetchLearningSources(input: {
                     telemetry.sourceDeduplicated++;
                     audit.status = "rejected";
                     audit.rejectionCode = "duplicate";
+                    audit.detailCode = "duplicate";
+                    audit.httpStatus = trace?.httpStatus;
+                    audit.contentType = trace?.contentType;
+                    audit.byteCount = trace?.byteCount;
+                    audit.elapsedMs = trace?.elapsedMs;
                     return "attempted";
                 }
                 acceptedSources.add(sourceKey);
@@ -666,6 +782,11 @@ export async function fetchLearningSources(input: {
                 sources.push(source);
                 telemetry.sourceAccepted++;
                 audit.status = "fetched";
+                audit.detailCode = trace?.detailCode || "source_fetched";
+                audit.httpStatus = trace?.httpStatus;
+                audit.contentType = trace?.contentType;
+                audit.byteCount = trace?.byteCount;
+                audit.elapsedMs = trace?.elapsedMs;
                 audit.canonicalUrl = source.canonicalUrl;
                 audit.sourceId = source.sourceId;
                 audit.title = source.title;
@@ -675,6 +796,11 @@ export async function fetchLearningSources(input: {
             } catch (error) {
                 audit.status = "rejected";
                 audit.rejectionCode = recordSourceFailure(telemetry, error);
+                audit.detailCode = trace?.detailCode || sourceErrorCode(error);
+                audit.httpStatus = trace?.httpStatus;
+                audit.contentType = trace?.contentType;
+                audit.byteCount = trace?.byteCount;
+                audit.elapsedMs = trace?.elapsedMs ?? Math.max(0, Date.now() - attemptStartedAt);
                 return remainingMs() <= 0 ? budgetExhausted() : "attempted";
             }
         }

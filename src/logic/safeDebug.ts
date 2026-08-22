@@ -73,6 +73,36 @@ export type SafeDebugSource = Pick<GenTask,
     | "learningDebugDroppedEvents"
 >;
 
+export type SafeDebugLearningEvidenceInput = {
+    searchedSources?: unknown;
+    diagnostics?: unknown;
+};
+
+type SafeLearningEvidence = {
+    searchedSources: Array<{
+        url: string;
+        status: string;
+        rejectionCode?: string;
+        detailCode?: string;
+        httpStatus?: number;
+        contentType?: string;
+        byteCount?: number;
+        elapsedMs?: number;
+        sourceType?: string;
+        authority?: string;
+    }>;
+    diagnostics: Array<{
+        stage: string;
+        status: string;
+        code: string;
+        url?: string;
+        httpStatus?: number;
+        contentType?: string;
+        byteCount?: number;
+        elapsedMs?: number;
+    }>;
+};
+
 type SafeLearningEvent = Omit<LearningDebugEvent, "jobId" | "telemetry">;
 
 type NormalizedLearningEvent = SafeLearningEvent & {
@@ -159,9 +189,11 @@ export type SafeDebugExport = {
             totalNeeds: number;
             completedNeeds: number;
             sourceCount: number;
+            searchedSourceCount: number;
         };
         stages: SafeStageSummary[];
         events: SafeLearningEvent[];
+        evidence: SafeLearningEvidence;
     };
     build: {
         diagnostics: {
@@ -202,6 +234,84 @@ function safeReasonCode(value: unknown): LearningReasonCode | undefined {
     return typeof value === "string" && LEARNING_REASON_CODES.has(value as LearningReasonCode)
         ? value as LearningReasonCode
         : undefined;
+}
+
+function safeDiagnosticCode(value: unknown, max = 100): string {
+    return typeof value === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(value)
+        ? value.slice(0, max)
+        : "";
+}
+
+function safePublicUrl(value: unknown): string {
+    if (typeof value !== "string" || value.length > 2_000) return "";
+    try {
+        const url = new URL(value);
+        if (url.protocol !== "https:" || url.username || url.password) return "";
+        url.username = "";
+        url.password = "";
+        url.hash = "";
+        for (const key of [...url.searchParams.keys()]) {
+            if (/^(?:access_token|api_?key|auth(?:orization)?|key|password|signature|sig|token)$/i.test(key)) {
+                url.searchParams.delete(key);
+            }
+        }
+        return url.href.slice(0, 1_000);
+    } catch {
+        return "";
+    }
+}
+
+function normalizeSafeLearningEvidence(value: SafeDebugLearningEvidenceInput | undefined): SafeLearningEvidence {
+    const rawSources = Array.isArray(value?.searchedSources) ? value.searchedSources : [];
+    const rawDiagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : [];
+    const searchedSources: SafeLearningEvidence["searchedSources"] = [];
+    for (const candidate of rawSources.slice(0, 24)) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const raw = candidate as Record<string, unknown>;
+        const url = safePublicUrl(raw.canonicalUrl || raw.url);
+        const status = safeDiagnosticCode(raw.status, 40);
+        if (!url || !status) continue;
+        const item: SafeLearningEvidence["searchedSources"][number] = { url, status };
+        const rejectionCode = safeDiagnosticCode(raw.rejectionCode);
+        const detailCode = safeDiagnosticCode(raw.detailCode);
+        const httpStatus = optionalCount(raw.httpStatus, 999);
+        const contentType = typeof raw.contentType === "string" ? raw.contentType.trim().slice(0, 120) : "";
+        const byteCount = optionalCount(raw.byteCount);
+        const elapsedMs = optionalCount(raw.elapsedMs, 300_000);
+        const sourceType = safeDiagnosticCode(raw.sourceType, 80);
+        const authority = safeDiagnosticCode(raw.authority, 80);
+        if (rejectionCode) item.rejectionCode = rejectionCode;
+        if (detailCode) item.detailCode = detailCode;
+        if (httpStatus !== undefined) item.httpStatus = httpStatus;
+        if (contentType) item.contentType = contentType;
+        if (byteCount !== undefined) item.byteCount = byteCount;
+        if (elapsedMs !== undefined) item.elapsedMs = elapsedMs;
+        if (sourceType) item.sourceType = sourceType;
+        if (authority) item.authority = authority;
+        searchedSources.push(item);
+    }
+    const diagnostics: SafeLearningEvidence["diagnostics"] = [];
+    for (const candidate of rawDiagnostics.slice(-40)) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const raw = candidate as Record<string, unknown>;
+        const stage = safeDiagnosticCode(raw.stage, 40);
+        const status = safeDiagnosticCode(raw.status, 40);
+        const code = safeDiagnosticCode(raw.code);
+        if (!stage || !status || !code) continue;
+        const item: SafeLearningEvidence["diagnostics"][number] = { stage, status, code };
+        const url = safePublicUrl(raw.url);
+        const httpStatus = optionalCount(raw.httpStatus, 999);
+        const contentType = typeof raw.contentType === "string" ? raw.contentType.trim().slice(0, 120) : "";
+        const byteCount = optionalCount(raw.byteCount);
+        const elapsedMs = optionalCount(raw.elapsedMs, 300_000);
+        if (url) item.url = url;
+        if (httpStatus !== undefined) item.httpStatus = httpStatus;
+        if (contentType) item.contentType = contentType;
+        if (byteCount !== undefined) item.byteCount = byteCount;
+        if (elapsedMs !== undefined) item.elapsedMs = elapsedMs;
+        diagnostics.push(item);
+    }
+    return { searchedSources, diagnostics };
 }
 
 function normalizeTelemetry(value: unknown): LearningJobTelemetry {
@@ -407,7 +517,11 @@ function serializedBytes(value: unknown): number {
     return new TextEncoder().encode(JSON.stringify(value, null, 2)).byteLength;
 }
 
-export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()): SafeDebugExport {
+export function buildSafeDebugExport(
+    source: SafeDebugSource,
+    now = Date.now(),
+    learningEvidence?: SafeDebugLearningEvidenceInput,
+): SafeDebugExport {
     const rawLearningEvents = Array.isArray(source.learningDebugEvents) ? source.learningDebugEvents : [];
     const normalizedLearningEvents = rawLearningEvents
         .map(normalizeLearningEvent)
@@ -434,6 +548,7 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
     const phase = GENERATION_PHASES.has(source.phase) ? source.phase : "idle";
     const diagnostics = Array.isArray(source.buildDiagnostics) ? source.buildDiagnostics : [];
     const files = Array.isArray(source.files) ? source.files : [];
+    const evidence = normalizeSafeLearningEvidence(learningEvidence);
 
     const makePayload = (): SafeDebugExport => ({
         schemaVersion: "tahai.safe-debug.v1",
@@ -463,9 +578,11 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
                 totalNeeds: safeCount(progress.totalNeeds),
                 completedNeeds: safeCount(progress.completedNeeds),
                 sourceCount: safeCount(progress.sourceCount),
+                searchedSourceCount: safeCount(progress.searchedSourceCount),
             },
             stages,
             events,
+            evidence,
         },
         build: {
             diagnostics: summarizeBuildDiagnostics(diagnostics),
@@ -490,6 +607,18 @@ export function buildSafeDebugExport(source: SafeDebugSource, now = Date.now()):
     }
     while (events.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
         events.shift();
+        droppedEvents++;
+        truncated = true;
+        payload = makePayload();
+    }
+    while (evidence.diagnostics.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
+        evidence.diagnostics.shift();
+        droppedEvents++;
+        truncated = true;
+        payload = makePayload();
+    }
+    while (evidence.searchedSources.length && serializedBytes(payload) > SAFE_DEBUG_BYTE_LIMIT) {
+        evidence.searchedSources.pop();
         droppedEvents++;
         truncated = true;
         payload = makePayload();

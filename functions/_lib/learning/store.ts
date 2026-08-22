@@ -1131,10 +1131,18 @@ export async function getLearningEvidenceItems(
             const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
             const reason = publicLearningReason(payload);
             const recipe = publicImplementationRecipe(payload);
+            const answerType = payload.answerType === "signature"
+                || payload.answerType === "coordinate"
+                || payload.answerType === "behavior"
+                || payload.answerType === "migration"
+                || payload.answerType === "rule"
+                ? payload.answerType
+                : undefined;
             item = {
                 knowledgeId: row.knowledge_id,
                 summary: row.summary,
                 kind: row.kind,
+                ...(answerType ? { answerType } : {}),
                 confidence: Number(row.confidence) || 0,
                 status: knowledgeStatusAt({
                     status: row.status as KnowledgeStatus,

@@ -167,10 +167,33 @@ export interface LearningSearchedSource {
     reason: string;
     status: LearningSearchedSourceStatus;
     rejectionCode?: LearningSourceRejectionCode;
+    detailCode?: string;
+    httpStatus?: number;
+    contentType?: string;
+    byteCount?: number;
+    elapsedMs?: number;
     sourceId?: string;
     title?: string;
     sourceType?: string;
     authority?: string;
+}
+
+export type LearningDiagnosticStage = "discovery" | "fetch" | "privacy" | "verification" | "activation";
+export type LearningDiagnosticStatus = "info" | "success" | "warning" | "error" | "skipped";
+
+export interface LearningDiagnosticEvent {
+    at: number;
+    stage: LearningDiagnosticStage;
+    status: LearningDiagnosticStatus;
+    code: string;
+    message: string;
+    needId?: string;
+    query?: string;
+    url?: string;
+    httpStatus?: number;
+    contentType?: string;
+    byteCount?: number;
+    elapsedMs?: number;
 }
 
 export interface LearningJobTelemetry {
@@ -239,6 +262,7 @@ export interface LearningJobWork {
     currentNeed?: string;
     completedNeeds?: number;
     telemetry?: LearningJobTelemetry;
+    diagnostics?: LearningDiagnosticEvent[];
 }
 
 export interface LearningJobRecord {
@@ -355,6 +379,7 @@ export interface LearningEvidenceItem {
     knowledgeId: string;
     summary: string;
     kind: string;
+    answerType?: KnowledgeAnswerType;
     confidence: number;
     status: string;
     scope: string;
@@ -371,6 +396,11 @@ export interface PublicLearningSearchedSource {
     reason: string;
     status: LearningSearchedSourceStatus;
     rejectionCode?: LearningSourceRejectionCode;
+    detailCode?: string;
+    httpStatus?: number;
+    contentType?: string;
+    byteCount?: number;
+    elapsedMs?: number;
     title: string;
     sourceType: string;
     authority: string;
@@ -383,4 +413,5 @@ export interface PublicLearningEvidenceSnapshot {
     learningRevision: number;
     items: LearningEvidenceItem[];
     searchedSources: PublicLearningSearchedSource[];
+    diagnostics: LearningDiagnosticEvent[];
 }

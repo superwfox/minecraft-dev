@@ -13,7 +13,7 @@ import {
     learningVerificationFailureReason,
     refreshLearningInactivity,
 } from "../../_lib/learning/deadline";
-import { normalizeLearningTelemetry } from "../../_lib/learning/debug";
+import { learningReasonMessage, normalizeLearningTelemetry } from "../../_lib/learning/debug";
 import { learningJobAuthorizationFailure } from "../../_lib/learning/authorization";
 import {
     containsSharedKnowledgeForbiddenTerm,
@@ -40,6 +40,7 @@ import {
     type KnowledgeItemCreateInput,
 } from "../../_lib/learning/store";
 import type {
+    LearningDiagnosticEvent,
     LearningActiveStatus,
     ImplementationRecipeV1,
     KnowledgeNeed,
@@ -72,6 +73,87 @@ interface LearningStepSideEffects {
 }
 
 const MAX_VERIFICATION_ATTEMPTS = 2;
+const MAX_LEARNING_DIAGNOSTICS = 80;
+
+function appendDiagnostics(
+    work: LearningJobRecord["work"],
+    events: LearningDiagnosticEvent[],
+): LearningJobRecord["work"] {
+    if (!events.length) return work;
+    return {
+        ...work,
+        diagnostics: [...(work.diagnostics ?? []), ...events].slice(-MAX_LEARNING_DIAGNOSTICS),
+    };
+}
+
+function diagnosticEvent(
+    input: Omit<LearningDiagnosticEvent, "at"> & { at?: number },
+): LearningDiagnosticEvent {
+    return { ...input, at: input.at ?? Date.now() };
+}
+
+function boundedDiagnosticTerms(terms: string[]): string {
+    const visible = terms
+        .map((term) => term.trim().slice(0, 80))
+        .filter(Boolean)
+        .slice(0, 12);
+    const suffix = terms.length > visible.length ? `，另有 ${terms.length - visible.length} 项` : "";
+    return visible.length ? `${visible.join("、")}${suffix}` : "未记录具体词项";
+}
+
+function sourceDiagnosticEvents(sources: LearningSearchedSource[]): LearningDiagnosticEvent[] {
+    return sources.map((source) => diagnosticEvent({
+        stage: "fetch",
+        status: source.status === "fetched" || source.status === "supports"
+            ? "success"
+            : source.status === "skipped" ? "skipped" : "error",
+        code: source.detailCode || source.rejectionCode || `source_${source.status}`,
+        message: source.status === "fetched" || source.status === "supports"
+            ? "候选来源已抓取并进入证据验证"
+            : source.status === "skipped"
+                ? "候选来源未进入本轮抓取"
+                : "候选来源未通过抓取或内容校验",
+        needId: source.needId,
+        url: source.canonicalUrl || source.url,
+        httpStatus: source.httpStatus,
+        contentType: source.contentType,
+        byteCount: source.byteCount,
+        elapsedMs: source.elapsedMs,
+    }));
+}
+
+function terminalDiagnosticStage(status: LearningJobStatus): LearningDiagnosticEvent["stage"] {
+    if (status === "queued" || status === "discovering") return "discovery";
+    if (status === "fetching") return "fetch";
+    if (status === "verifying") return "verification";
+    return "activation";
+}
+
+function terminalDiagnosticStatus(
+    status: LearningJobStatus,
+): LearningDiagnosticEvent["status"] {
+    if (status === "ready") return "success";
+    if (status === "failed") return "error";
+    if (status === "cancelled") return "skipped";
+    return "warning";
+}
+
+function terminalDiagnosticMessage(
+    status: LearningJobStatus,
+    reasonCode: LearningReasonCode | undefined,
+    activeStatus: LearningJobStatus,
+): string {
+    const outcome = reasonCode
+        ? learningReasonMessage(reasonCode)
+        : status === "ready"
+            ? "联网查证完成，技术证据已准备就绪"
+            : status === "needs_review"
+                ? "联网查证完成，新结论等待审核"
+                : status === "cancelled"
+                    ? "联网查证已取消"
+                    : "联网查证已结束";
+    return `${outcome}；终止阶段=${activeStatus}`;
+}
 
 function learningStepLimitMs(status: LearningJobStatus): number {
     if (status === "discovering") return LEARNING_DISCOVERY_LIMIT_MS;
@@ -315,9 +397,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             const terminal = status === "ready" || status === "deferred" || status === "needs_review"
                 || status === "failed" || status === "cancelled";
-            let persistedWork = terminal && isLearningActiveStatus(leased!.status)
-                ? { ...work, lastActiveStatus: leased!.status }
+            let persistedWork = terminal
+                ? appendDiagnostics(work, [diagnosticEvent({
+                    stage: terminalDiagnosticStage(leased!.status),
+                    status: terminalDiagnosticStatus(status),
+                    code: reasonCode || `learning_${status}`,
+                    message: terminalDiagnosticMessage(status, reasonCode, leased!.status),
+                })])
                 : work;
+            if (terminal && isLearningActiveStatus(leased!.status)) {
+                persistedWork = { ...persistedWork, lastActiveStatus: leased!.status };
+            }
             const persistedAt = Date.now();
             if (progressed) persistedWork = refreshLearningInactivity(persistedWork, persistedAt);
             const completed = await completeLearningJobStep(context.env, {
@@ -384,8 +474,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     };
 
     if (leased.status === "queued") {
+        const queryDiagnostics = leased.needs.flatMap((need) => need.searchQueries.map((query) =>
+            diagnosticEvent({
+                stage: "discovery",
+                status: "info",
+                code: "search_query",
+                message: "准备将该查询提交给联网资料发现服务",
+                needId: need.id,
+                query: query.trim().replace(/\s+/g, " ").slice(0, 500),
+            }),
+        ));
         return persist("discovering", {
-            ...leased.work,
+            ...appendDiagnostics(leased.work, queryDiagnostics),
             currentNeed: leased.needs[0]?.claim.question,
             completedNeeds: 0,
             telemetry: normalizeLearningTelemetry(leased.work.telemetry),
@@ -415,8 +515,44 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 learningJobNeedsFinalization(leased) ? "job_deadline" : "internal_error");
         }
         applyDiscoveryTelemetry(telemetry, discovery);
+        const discoveryValidationCodes = Array.isArray((discovery as any).validationCodes)
+            ? (discovery as any).validationCodes
+                .filter((code: unknown): code is string => typeof code === "string")
+                .slice(0, 20)
+            : [];
+        const discoveryDiagnostics: LearningDiagnosticEvent[] = [
+            ...discovery.attempts.map((attempt, attemptIndex) => diagnosticEvent({
+                stage: "discovery",
+                status: attempt.reasonCode ? "error" : attempt.detailCode ? "warning" : "success",
+                code: (attempt as { detailCode?: string }).detailCode
+                    || attempt.reasonCode
+                    || "discovery_completed",
+                message: attempt.reasonCode
+                    ? `资料发现第 ${attemptIndex + 1} 次调用未形成可用候选`
+                    : `资料发现第 ${attemptIndex + 1} 次调用完成`,
+                httpStatus: attempt.httpStatus,
+                elapsedMs: attempt.elapsedMs,
+            })),
+            ...discoveryValidationCodes.map((code: string) => diagnosticEvent({
+                stage: "discovery",
+                status: "warning",
+                code,
+                message: "发现结果触发了有界格式兼容处理，未直接丢弃整轮结果",
+            })),
+            ...discovery.candidates.flatMap((candidate) => candidateSources(candidate).map((source) =>
+                diagnosticEvent({
+                    stage: "discovery",
+                    status: "success",
+                    code: "candidate_url",
+                    message: source.reason,
+                    needId: candidate.needId,
+                    url: publicLearningCandidateUrl(source.url),
+                }),
+            )),
+        ];
+        const discoveryWork = appendDiagnostics(leased.work, discoveryDiagnostics);
 
-        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        authorizationResponse = await revalidateAuthorization({ ...discoveryWork, telemetry });
         if (authorizationResponse) return authorizationResponse;
 
         let quotaExhausted = false;
@@ -424,23 +560,23 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             quotaExhausted = await charge(discovery.usageEntries);
         } catch (error) {
             console.warn("learning discovery charge failed", error);
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "storage_unavailable");
+            return persist("deferred", { ...discoveryWork, telemetry }, leased.resultIds, "storage_unavailable");
         }
-        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        authorizationResponse = await revalidateAuthorization({ ...discoveryWork, telemetry });
         if (authorizationResponse) return authorizationResponse;
         if (quotaExhausted) {
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "quota_exhausted");
+            return persist("deferred", { ...discoveryWork, telemetry }, leased.resultIds, "quota_exhausted");
         }
         if (discovery.ok === false) {
             const reasonCode = discovery.reasonCode === "discovery_timeout"
                 && discoveryBudget.clippedByJobDeadline
                 ? "job_deadline"
                 : discovery.reasonCode;
-            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, reasonCode);
+            return persist("deferred", { ...discoveryWork, telemetry }, leased.resultIds, reasonCode);
         }
 
         const work = {
-            ...leased.work,
+            ...discoveryWork,
             candidates: discovery.candidates,
             searchedSources: discoveredSources(discovery.candidates),
             telemetry,
@@ -486,7 +622,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const accumulatedSources = fetched.sources;
         const sourceEffects: LearningStepSideEffects = { sources: fetched.sources };
         const work = {
-            ...leased.work,
+            ...appendDiagnostics(leased.work, sourceDiagnosticEvents(fetched.outcomes)),
             searchedSources: fetched.outcomes,
             sourceIds: accumulatedSources.map((source) => source.sourceId),
             telemetry,
@@ -551,7 +687,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const needSources = allSources.filter((source) => source.needId === need.id);
         if (!needSources.length) {
             telemetry.verificationFailures++;
-            return advanceVerification(leased.resultIds, leased.work, index + 1);
+            return advanceVerification(leased.resultIds, appendDiagnostics(leased.work, [diagnosticEvent({
+                stage: "verification",
+                status: "error",
+                code: "verification_no_sources",
+                message: "当前技术缺口没有已抓取来源，验证阶段已跳过",
+                needId: need.id,
+            })]), index + 1);
         }
         const verifierForbiddenTerms = unprovenSharedKnowledgeForbiddenTerms(
             forbiddenTerms,
@@ -560,7 +702,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (containsSharedKnowledgeForbiddenTerm(need, verifierForbiddenTerms)) {
             telemetry.verificationFailures++;
             telemetry.verificationInvalidResponses++;
-            return advanceVerification(leased.resultIds, leased.work, index + 1);
+            return advanceVerification(leased.resultIds, appendDiagnostics(leased.work, [diagnosticEvent({
+                stage: "privacy",
+                status: "error",
+                code: "privacy_need_blocked",
+                message: `隐私过滤在调用验证器前阻止了该缺口；命中词项：${boundedDiagnosticTerms(verifierForbiddenTerms)}`,
+                needId: need.id,
+            })]), index + 1);
         }
 
         const verificationBudget = learningStageBudget(leased, LEARNING_VERIFIER_LIMIT_MS);
@@ -619,6 +767,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         if (verified.ok === false) {
             applyVerificationFailureTelemetry(telemetry, verified);
+            const verificationFailureWork = appendDiagnostics(leased.work, [diagnosticEvent({
+                stage: "verification",
+                status: "error",
+                code: (verified as { detailCode?: string }).detailCode || verified.reasonCode,
+                message: `验证器第 ${verificationAttempt} 次调用失败；retryable=${verified.retryable}`,
+                needId: need.id,
+                httpStatus: verified.httpStatus,
+                elapsedMs: verified.elapsedMs,
+            })]);
             const reasonCode = learningVerificationFailureReason(
                 verified.reasonCode,
                 verificationBudget.clippedByJobDeadline,
@@ -629,13 +786,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const retryBlockedByDeadline = canRetry && learningJobNeedsFinalization(leased);
             if (canRetry && !retryBlockedByDeadline) {
                 return persist("verifying", {
-                    ...leased.work,
+                    ...verificationFailureWork,
                     verificationAttemptsByNeed,
                     telemetry,
                 }, leased.resultIds, undefined, {}, true);
             }
             return persist("deferred", {
-                ...leased.work,
+                ...verificationFailureWork,
                 verificationAttemptsByNeed,
                 telemetry,
             }, leased.resultIds, reasonCode);
@@ -655,6 +812,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         if (!resultIds.includes(knowledgeId)) resultIds.push(knowledgeId);
         const learningReason = learningReasonFor(need, verified.verification.recipe);
         const payload = {
+            answerType: need.claim.answerType,
             claim: verified.verification.normalizedClaim ?? {},
             ...(learningReason ? { learningReason } : {}),
             ...(verified.verification.recipe ? { recipe: verified.verification.recipe } : {}),
@@ -674,10 +832,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }, commitForbiddenTerms)) {
             telemetry.verificationFailures++;
             telemetry.verificationInvalidResponses++;
-            return advanceVerification(leased.resultIds, {
+            return advanceVerification(leased.resultIds, appendDiagnostics({
                 ...leased.work,
                 verificationAttemptsByNeed,
-            }, index + 1);
+            }, [diagnosticEvent({
+                stage: "privacy",
+                status: "error",
+                code: "privacy_result_blocked",
+                message: `验证结论在写入前被隐私过滤阻止；命中词项：${boundedDiagnosticTerms(commitForbiddenTerms)}`,
+                needId: need.id,
+            })]), index + 1);
         }
         const knowledge: KnowledgeItemCreateInput & { knowledgeId: string } = {
             knowledgeId,
@@ -714,7 +878,26 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         return persist(nextStatus, {
-            ...leased.work,
+            ...appendDiagnostics(leased.work, [
+                diagnosticEvent({
+                    stage: "verification",
+                    status: verified.verification.verdict === "supported" ? "success" : "warning",
+                    code: `verification_${verified.verification.verdict}`,
+                    message: `验证完成，confidence=${verified.verification.confidence.toFixed(3)}，answerType=${need.claim.answerType}`,
+                    needId: need.id,
+                    elapsedMs: verified.elapsedMs,
+                    httpStatus: verified.httpStatus,
+                }),
+                diagnosticEvent({
+                    stage: "activation",
+                    status: activation.status === "active" ? "success" : "warning",
+                    code: `knowledge_${activation.status}`,
+                    message: activation.status === "active"
+                        ? "结论已通过权威来源与风险门槛并注入生成上下文"
+                        : "结论已保存但未达到自动采用门槛",
+                    needId: need.id,
+                }),
+            ]),
             searchedSources: applyEvidenceRelations(
                 leased.work.searchedSources,
                 verified.verification,

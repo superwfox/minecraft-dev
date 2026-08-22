@@ -92,6 +92,7 @@ describe("learning evidence cache state", () => {
         expect(result.identityMatches).toBe(true);
         expect(result.cache).toBe(true);
         expect(result.searchedSources).toEqual([]);
+        expect(result.diagnostics).toEqual([]);
         expect(result.items).toHaveLength(1);
         expect(result.items[0]).toMatchObject({
             knowledgeId: "know-1",
@@ -120,6 +121,7 @@ describe("learning evidence cache state", () => {
             identityMatches: false,
             items: [],
             searchedSources: [],
+            diagnostics: [],
             cache: false,
         });
     });
@@ -139,6 +141,32 @@ describe("learning evidence cache state", () => {
             ...searchedSource,
             canonicalUrl: undefined,
         }]);
+    });
+
+    it("keeps bounded structured diagnostics for the matching job", () => {
+        const result = resolveLearningEvidenceResult(
+            [],
+            "deferred",
+            identity,
+            identity,
+            [],
+            [{
+                at: 1_700_000_000_000,
+                stage: "verification",
+                status: "error",
+                code: "verification_evidence",
+                message: "The verifier excerpt did not match the fetched source.",
+                httpStatus: 200,
+                elapsedMs: 42,
+            }],
+        );
+
+        expect(result.diagnostics).toEqual([expect.objectContaining({
+            stage: "verification",
+            code: "verification_evidence",
+            httpStatus: 200,
+            elapsedMs: 42,
+        })]);
     });
 
     it("drops unsafe evidence links and unknown URL audit states", () => {

@@ -97,6 +97,31 @@ describe("shared learning knowledge privacy", () => {
         expect(terms).not.toContain("serverplayer");
     });
 
+    it("does not treat public Maven diagnostics and search criteria as task-private identifiers", () => {
+        const need = makeNeed({
+            claim: {
+                subject: "io.papermc.paper:paper-api",
+                question: "What is the correct Maven coordinate and version for io.papermc.paper:paper-api targeting Minecraft Paper 26.2? The current pom uses 26.2-R0.1-SNAPSHOT and fails with DependencyResolutionException.",
+                answerType: "coordinate",
+            },
+            scope: {
+                dependency: "io.papermc.paper:paper-api:26.2-R0.1-SNAPSHOT",
+                packageName: undefined,
+                symbol: undefined,
+            },
+            sourcePolicy: "dependency",
+            searchQueries: ["official Paper 26.2 Maven metadata stable coordinate"],
+            acceptanceCriteria: ["Official metadata proves the replacement for the invalid snapshot."],
+        });
+
+        const terms = sharedKnowledgeForbiddenTerms({ knowledgeNeeds: [need] });
+
+        expect(terms).not.toContain("dependencyresolutionexception");
+        expect(terms).not.toContain("official");
+        expect(terms).not.toContain("snapshot");
+        expect(containsSharedKnowledgeForbiddenTerm(need, terms)).toBe(false);
+    });
+
     it("fails closed when recursive task metadata exceeds the extraction limit", () => {
         const terms = sharedKnowledgeForbiddenTerms({
             clarifyRounds: [{

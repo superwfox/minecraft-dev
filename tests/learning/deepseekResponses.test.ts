@@ -4,6 +4,7 @@ import failedFixture from "../fixtures/deepseek-responses/failed.json";
 import incompleteFixture from "../fixtures/deepseek-responses/incomplete.json";
 import {
     discoverLearningSources,
+    extractResponsesCitationUrls,
     normalizeResponsesUsage,
     parseLearningCandidates,
     parseResponsesResult,
@@ -32,7 +33,8 @@ describe("DeepSeek Responses adapter", () => {
         expect(parseResponsesResult({ status: "cancelled" }).status).toBe("failed");
     });
 
-    it("accepts URL reasons, canonicalizes duplicates, and keeps legacy urls compatible", () => {
+    it("accepts URL reasons, canonicalizes duplicates, and repairs short reasons", () => {
+        const validationCodes: string[] = [];
         const candidates = parseLearningCandidates(`\n\`\`\`json
             {"candidates":[
                 {"needId":"need-api","sources":[
@@ -42,7 +44,7 @@ describe("DeepSeek Responses adapter", () => {
                     {"url":"https://example.com/c","reason":"Check the release-specific implementation contract."}
                 ]}
             ]}
-        \`\`\``, [makeNeed()]);
+        \`\`\``, [makeNeed()], validationCodes);
 
         expect(candidates).toEqual([{
             needId: "need-api",
@@ -52,11 +54,17 @@ describe("DeepSeek Responses adapter", () => {
                     reason: "Check the official versioned API signature.",
                 },
                 {
+                    url: "https://example.com/b",
+                    reason: "联网发现服务未提供完整搜索理由",
+                },
+                {
                     url: "https://example.com/c",
                     reason: "Check the release-specific implementation contract.",
                 },
             ],
         }]);
+        expect(validationCodes).toContain("discovery_duplicate_url_rejected");
+        expect(validationCodes).toContain("discovery_reason_short_defaulted");
 
         expect(parseLearningCandidates(JSON.stringify({
             candidates: [{
@@ -72,7 +80,8 @@ describe("DeepSeek Responses adapter", () => {
         }]);
     });
 
-    it("rejects overlong URL reasons instead of truncating and accepting them", () => {
+    it("truncates overlong URL reasons without discarding the source", () => {
+        const validationCodes: string[] = [];
         expect(parseLearningCandidates(JSON.stringify({
             candidates: [{
                 needId: "need-api",
@@ -81,24 +90,56 @@ describe("DeepSeek Responses adapter", () => {
                     reason: "x".repeat(241),
                 }],
             }],
-        }), [makeNeed()])).toEqual([]);
+        }), [makeNeed()], validationCodes)).toEqual([{
+            needId: "need-api",
+            sources: [{
+                url: "https://example.com/overlong",
+                reason: "x".repeat(240),
+            }],
+        }]);
+        expect(validationCodes).toContain("discovery_reason_truncated");
     });
 
-    it("rejects candidate and source arrays beyond the declared schema limits", () => {
+    it("bounds oversized candidate and source arrays without discarding valid URLs", () => {
         const sources = ["a", "b", "c", "d"].map((suffix) => ({
             url: `https://example.com/${suffix}`,
             reason: `Check official source ${suffix} for the exact API contract.`,
         }));
 
-        expect(() => parseLearningCandidates(JSON.stringify({
+        const sourceCodes: string[] = [];
+        expect(parseLearningCandidates(JSON.stringify({
             candidates: [{ needId: "need-api", sources }],
-        }), [makeNeed()])).toThrow("discovery_source_bounds");
-        expect(() => parseLearningCandidates(JSON.stringify({
+        }), [makeNeed()], sourceCodes)[0].sources).toHaveLength(3);
+        expect(sourceCodes).toContain("discovery_source_limit_trimmed");
+
+        const candidateCodes: string[] = [];
+        expect(parseLearningCandidates(JSON.stringify({
             candidates: [
                 { needId: "need-api", sources: sources.slice(0, 1) },
                 { needId: "need-api", sources: sources.slice(1, 2) },
             ],
-        }), [makeNeed()])).toThrow("discovery_candidate_bounds");
+        }), [makeNeed()], candidateCodes)).toHaveLength(1);
+        expect(candidateCodes).toContain("discovery_duplicate_need_rejected");
+    });
+
+    it("extracts bounded HTTPS citations from web search response metadata", () => {
+        expect(extractResponsesCitationUrls({
+            type: "response.completed",
+            response: {
+                status: "completed",
+                output: [{
+                    type: "message",
+                    content: [{
+                        type: "output_text",
+                        text: "{}",
+                        annotations: [
+                            { type: "url_citation", url: "https://repo.papermc.io/a#fragment" },
+                            { type: "url_citation", url: "http://example.com/not-https" },
+                        ],
+                    }],
+                }],
+            },
+        })).toEqual(["https://repo.papermc.io/a"]);
     });
 
     it("normalizes usage without allowing cached tokens to exceed input", () => {
@@ -152,9 +193,9 @@ describe("DeepSeek Responses adapter", () => {
                                     minItems: 1,
                                     maxItems: 3,
                                     items: {
-                                        required: ["url", "reason"],
+                                        required: ["url"],
                                         properties: {
-                                            reason: { minLength: 8, maxLength: 240 },
+                                            reason: { maxLength: 1_000 },
                                         },
                                     },
                                 },
@@ -226,6 +267,7 @@ describe("DeepSeek Responses adapter", () => {
             expect(result.attempts).toHaveLength(2);
             expect(result.attempts[0]).toMatchObject({
                 reasonCode: "discovery_invalid_response",
+                detailCode: "discovery_candidates_json_parse",
                 providerStatus: "completed",
                 retryable: true,
             });

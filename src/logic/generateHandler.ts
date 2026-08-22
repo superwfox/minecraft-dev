@@ -14,6 +14,7 @@ import {
     isUnconfirmedLearningProgress,
     shouldResumeLearningProgress,
     recordLearningDebugEvent,
+    appendGenLog,
 } from "./generateState";
 import type {
     FixResumeStage,
@@ -97,7 +98,7 @@ function markInterrupted(from: GenPhase | "" = genTask.phase) {
     genTask.streamingPhase = "";
     genTask.streamingFile = "";
     genTask.streamingContent = "";
-    genTask.logs.push("■ 当前任务已中断，返回后不会自动继续");
+    appendGenLog("■ 当前任务已中断，返回后不会自动继续");
     persistGenTaskNow();
 }
 
@@ -231,7 +232,7 @@ function setPhase(phase: GenPhase, log?: string) {
         }
         genTask.preflightStage = preflightStage;
     }
-    if (log) genTask.logs.push(log);
+    if (log) appendGenLog(log);
 }
 
 function isGeneratingPhase(phase: GenPhase) {
@@ -277,7 +278,7 @@ async function post(url: string, body: any, maxRetries = 3) {
             if (isInterrupt(e) || signal.aborted || runId !== generationRunId) throw generationAbortError();
             if (e?.noRetry || attempt >= maxRetries) throw e;
             const delay = 2000 * Math.pow(2, attempt);
-            genTask.logs.push(`! 请求失败，${delay / 1000}s 后重试 (${attempt + 1}/${maxRetries})...`);
+            appendGenLog(`! 请求失败，${delay / 1000}s 后重试 (${attempt + 1}/${maxRetries})...`);
             await waitWithAbort(delay, signal);
         }
     }
@@ -343,7 +344,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 throw error;
             }
             if (!announcedWait) {
-                genTask.logs.push("· Planner 已在服务端执行，等待现有结果...");
+                appendGenLog("· Planner 已在服务端执行，等待现有结果...");
                 announcedWait = true;
             }
             const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
@@ -370,7 +371,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                     throw error;
                 }
                 const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
-                genTask.logs.push("! Planner 响应超时，使用同一请求 ID 重试一次...");
+                appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
                 await waitWithAbort(retrySeconds * 1000, signal);
                 continue;
             }
@@ -390,7 +391,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 if (error?.noRetry || error?.terminal) throw error;
                 if (Date.now() >= deadline || failures++ >= 3) throw error;
                 const delay = 2000 * Math.pow(2, failures - 1);
-                genTask.logs.push(`! Planner 连接中断，${delay / 1000}s 后继续等待 (${failures}/3)...`);
+                appendGenLog(`! Planner 连接中断，${delay / 1000}s 后继续等待 (${failures}/3)...`);
                 await waitWithAbort(delay, signal);
                 continue;
             }
@@ -406,7 +407,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 const code = typeof streamed.code === "string" ? streamed.code : "";
                 if (code === "PLANNER_IN_PROGRESS" && Date.now() < deadline) {
                     if (!announcedWait) {
-                        genTask.logs.push("· Planner 已在服务端执行，等待现有结果...");
+                        appendGenLog("· Planner 已在服务端执行，等待现有结果...");
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
@@ -423,7 +424,7 @@ async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
                 }
                 if (Date.now() >= deadline || failures++ >= 3) throw plannerError;
                 const delay = 2000 * Math.pow(2, failures - 1);
-                genTask.logs.push(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/3)...`);
+                appendGenLog(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/3)...`);
                 await waitWithAbort(delay, signal);
                 continue;
             }
@@ -718,6 +719,86 @@ interface FixRepairAuthorization {
     repairAttempts: number;
 }
 
+function boundedLearningLogText(value: unknown, max = 600): string {
+    return typeof value === "string"
+        ? value.replace(/[\x00-\x1f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max)
+        : "";
+}
+
+function learningDiagnosticUrl(value: unknown): string {
+    const raw = boundedLearningLogText(value, 2_000);
+    if (!raw) return "";
+    try {
+        const url = new URL(raw);
+        return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
+    } catch {
+        return "";
+    }
+}
+
+function learningDiagnosticMeta(value: any): string {
+    const values = [
+        Number.isFinite(Number(value?.httpStatus)) ? `HTTP ${Math.max(0, Math.floor(Number(value.httpStatus)))}` : "",
+        boundedLearningLogText(value?.contentType, 120),
+        Number.isFinite(Number(value?.byteCount)) ? `${Math.max(0, Math.floor(Number(value.byteCount)))} B` : "",
+        Number.isFinite(Number(value?.elapsedMs)) ? `${Math.max(0, Math.floor(Number(value.elapsedMs)))} ms` : "",
+    ].filter(Boolean);
+    return values.length ? ` | ${values.join(" | ")}` : "";
+}
+
+async function appendLearningTerminalDiagnostics(stage: LearningStage): Promise<void> {
+    const progress = genTask.learningProgress;
+    if (!genTask.taskId || !progress.jobId || progress.stage !== stage) return;
+    const identity = {
+        taskId: genTask.taskId,
+        jobId: progress.jobId,
+        revision: progress.revision,
+    };
+    const identityStillCurrent = () => {
+        const current = genTask.learningProgress;
+        return genTask.taskId === identity.taskId
+            && current.jobId === identity.jobId
+            && current.stage === stage
+            && current.revision === identity.revision;
+    };
+    const marker = `Learning 详细诊断 ${progress.jobId}@${progress.revision}`;
+    if (genTask.logs.some((line) => line.includes(`▸ ${marker} | status=`))) return;
+    try {
+        const params = new URLSearchParams({
+            taskId: identity.taskId,
+            jobId: identity.jobId,
+            stage,
+            revision: String(identity.revision),
+        });
+        const response = await fetchWithByokFallback(`/api/learning/evidence?${params.toString()}`);
+        await rejectAccessResponse(response);
+        if (!identityStillCurrent()) return;
+        if (!response.ok) {
+            appendGenLog(`! ${marker}读取失败 | HTTP ${response.status}`);
+            return;
+        }
+        const payload = await response.json() as any;
+        if (!identityStillCurrent()) return;
+        appendGenLog(`▸ ${marker} | status=${progress.status}${progress.reasonCode ? ` | reason=${progress.reasonCode}` : ""}`);
+        for (const event of (Array.isArray(payload?.diagnostics) ? payload.diagnostics : []).slice(-40)) {
+            const stageLabel = boundedLearningLogText(event?.stage, 30) || "unknown";
+            const code = boundedLearningLogText(event?.code, 100) || "unknown";
+            const message = boundedLearningLogText(event?.message, 600);
+            const query = boundedLearningLogText(event?.query, 500);
+            const url = learningDiagnosticUrl(event?.url);
+            appendGenLog(`· Learning [${stageLabel}/${code}] ${message || "无说明"}${query ? ` | query=${query}` : ""}${url ? ` | ${url}` : ""}${learningDiagnosticMeta(event)}`);
+        }
+        for (const source of (Array.isArray(payload?.searchedSources) ? payload.searchedSources : []).slice(0, 20)) {
+            const url = learningDiagnosticUrl(source?.canonicalUrl || source?.url);
+            const status = boundedLearningLogText(source?.status, 30) || "unknown";
+            const code = boundedLearningLogText(source?.detailCode || source?.rejectionCode, 100);
+            appendGenLog(`· Learning URL [${status}${code ? `/${code}` : ""}] ${url || "URL 未通过公开展示校验"}${learningDiagnosticMeta(source)}`);
+        }
+    } catch (error: any) {
+        appendGenLog(`! ${marker}读取失败 | ${boundedLearningLogText(error?.message, 240) || "client_error"}`);
+    }
+}
+
 function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | null {
     const runId = Number(value?.runId);
     const repairAttempts = Number(value?.repairAttempts);
@@ -756,6 +837,7 @@ async function runLearning(
     if (resumeRequested
         && LEARNING_TERMINAL.has(restoredProgress.status)
         && !unconfirmedLocalLearning) {
+        await appendLearningTerminalDiagnostics(stage);
         return;
     }
     const canResumeExactJob = shouldResumeLearningProgress(
@@ -818,7 +900,7 @@ async function runLearning(
         }
         const message = genTask.learningProgress.message;
         if (message && message !== lastMessage) {
-            genTask.logs.push(`▸ ${message}`);
+            appendGenLog(`▸ ${message}`);
             lastMessage = message;
         }
     };
@@ -902,14 +984,17 @@ async function runLearning(
             reasonCode,
         });
         if (message !== lastMessage) {
-            genTask.logs.push(`! ${message}`);
+            appendGenLog(`! ${message}`);
             lastMessage = message;
         }
     };
 
     if (jobId) {
         await reconcile(jobId, 2);
-        if (isTerminal()) return;
+        if (isTerminal()) {
+            await appendLearningTerminalDiagnostics(stage);
+            return;
+        }
         if (stopRetrying && lastFailureHttpStatus === 404) {
             stopRetrying = false;
             lastFailureHttpStatus = 0;
@@ -933,6 +1018,7 @@ async function runLearning(
             persistGenTaskNow();
         } else if (stopRetrying) {
             markClientDeferred(lastFailureReason);
+            await appendLearningTerminalDiagnostics(stage);
             return;
         }
     }
@@ -959,7 +1045,10 @@ async function runLearning(
                 attempt,
             });
             if (result.snapshot?.learningProgress) announce(result.snapshot);
-            if (isTerminal()) return;
+            if (isTerminal()) {
+                await appendLearningTerminalDiagnostics(stage);
+                return;
+            }
             jobId = genTask.learningProgress.jobId;
             if (jobId) break;
             if (result.httpStatus === 429) {
@@ -1050,9 +1139,13 @@ async function runLearning(
         }
     }
 
-    if (isTerminal()) return;
+    if (isTerminal()) {
+        await appendLearningTerminalDiagnostics(stage);
+        return;
+    }
     if (stopRetrying) {
         markClientDeferred(lastFailureReason);
+        await appendLearningTerminalDiagnostics(stage);
         return;
     }
 
@@ -1103,7 +1196,10 @@ async function runLearning(
         if (!await waitForLearningDelay(finalDeadline(), delayMs)) break;
     }
 
-    if (isTerminal()) return;
+    if (isTerminal()) {
+        await appendLearningTerminalDiagnostics(stage);
+        return;
+    }
     if (!stopRetrying && Date.now() < outboundDeadline()) {
         await runLearning(toolRequestId, {
             ...options,
@@ -1112,6 +1208,7 @@ async function runLearning(
         return;
     }
     markClientDeferred(Date.now() >= jobDeadline ? "client_deadline" : lastFailureReason);
+    await appendLearningTerminalDiagnostics(stage);
 }
 
 async function runModelLearningToolRequests(
@@ -1129,7 +1226,7 @@ async function runModelLearningToolRequests(
         const question = Array.isArray(request.questions)
             ? request.questions.find((item: unknown) => typeof item === "string")
             : "";
-        genTask.logs.push(`▸ DS 主动调用 Learning${question ? `：${question}` : ""}`);
+        appendGenLog(`▸ DS 主动调用 Learning${question ? `：${question}` : ""}`);
         await runLearning(requestId);
         if (genTask.learningProgress.jobId) {
             jobIds[requestId] = genTask.learningProgress.jobId;
@@ -1318,11 +1415,11 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                             break;
                         }
                         case "log":
-                            genTask.logs.push(evt.msg);
+                            appendGenLog(evt.msg);
                             break;
                         case "error":
                             streamError = evt;
-                            genTask.logs.push(`× ${evt.error || evt.message || "流式阶段出错"}`);
+                            appendGenLog(`× ${evt.error || evt.message || "流式阶段出错"}`);
                             break;
                         case "file_done": {
                             const f = findFile(evt.path);
@@ -1644,7 +1741,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             }
             failures++;
             const delay = 2000 * Math.pow(2, failures - 1);
-            genTask.logs.push(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
+            appendGenLog(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
             await waitForNextAttempt(Math.min(delay, retryRemainingMs));
         };
 
@@ -1689,14 +1786,14 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                         requestId = activeRequestId;
                         payload = null;
                         config.onRecoverRequestId(activeRequestId);
-                        genTask.logs.push(`↻ ${config.label}已切换到服务端现有 requestId，继续恢复原操作`);
+                        appendGenLog(`↻ ${config.label}已切换到服务端现有 requestId，继续恢复原操作`);
                         continue;
                     }
                 }
                 if ((apiError.code === config.inProgressCode || apiError.code === "TASK_OPERATION_IN_PROGRESS")
                     && Date.now() < deadline) {
                     if (!announcedWait) {
-                        genTask.logs.push(`· ${config.label}已在服务端执行，等待现有结果...`);
+                        appendGenLog(`· ${config.label}已在服务端执行，等待现有结果...`);
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(response.headers.get("Retry-After")) || 2);
@@ -1770,7 +1867,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 if ((code === config.inProgressCode || code === "TASK_OPERATION_IN_PROGRESS")
                     && Date.now() < deadline) {
                     if (!announcedWait) {
-                        genTask.logs.push(`· ${config.label}已在服务端执行，等待现有结果...`);
+                        appendGenLog(`· ${config.label}已在服务端执行，等待现有结果...`);
                         announcedWait = true;
                     }
                     const retrySeconds = Math.max(1, Number(result.retryAfter) || 2);
@@ -1987,13 +2084,13 @@ function repairedFileCount(result: any): number {
 
 async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise<void> {
     if (stage === "rebuilding") {
-        genTask.logs.push("↻ 页面恢复：继续修复后的重新构建");
+        appendGenLog("↻ 页面恢复：继续修复后的重新构建");
         await buildWithRetry();
         return;
     }
 
     if (stage === "inspecting") {
-        genTask.logs.push("↻ 页面恢复：重新读取最终构建诊断");
+        appendGenLog("↻ 页面恢复：重新读取最终构建诊断");
         const inspection = await streamBuildFix(taskId, "inspect");
         genTask.fixResumeStage = "";
         persistGenTaskNow();
@@ -2002,17 +2099,17 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
 
     let fixResult: any;
     if (stage === "repairing") {
-        genTask.logs.push("↻ 页面恢复：等待自动修复写回");
+        appendGenLog("↻ 页面恢复：等待自动修复写回");
         fixResult = await recoverBuildRepair(taskId);
     } else {
-        genTask.logs.push("↻ 页面恢复：重新读取构建诊断并复核学习条件");
+        appendGenLog("↻ 页面恢复：重新读取构建诊断并复核学习条件");
         const diagnosis = await streamBuildFix(taskId, "diagnose");
         const repairAuthorization = normalizeFixRepairAuthorization(diagnosis?.repairAuthorization);
         if (!repairAuthorization) {
             throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
         }
         if (stage === "learning") {
-            genTask.logs.push("↻ 页面恢复：旧版预判学习阶段已迁移为 DS 工具调用，继续修复");
+            appendGenLog("↻ 页面恢复：旧版预判学习阶段已迁移为 DS 工具调用，继续修复");
         }
 
         genTask.fixResumeStage = "repairing";
@@ -2026,7 +2123,7 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
     }
     genTask.fixResumeStage = "rebuilding";
     persistGenTaskNow();
-    genTask.logs.push(`● 已恢复 ${changed} 个文件的修复结果，开始重新构建验证...`);
+    appendGenLog(`● 已恢复 ${changed} 个文件的修复结果，开始重新构建验证...`);
     await buildWithRetry();
 }
 
@@ -2109,7 +2206,7 @@ async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
         }
 
         if (clarifyResult.done) {
-            genTask.logs.push("● 澄清阶段完成");
+            appendGenLog("● 澄清阶段完成");
             genTask.clarifyTodos = [];
             setPhase("grading");
             persistGenTaskNow();
@@ -2267,7 +2364,7 @@ export function retryGenerate() {
         if (resumePhase) {
             genTask.phase = resumePhase;
             clearGenerateError();
-            genTask.logs.push("↻ 使用现有任务恢复 FileGen 前置阶段，不重复创建任务");
+            appendGenLog("↻ 使用现有任务恢复 FileGen 前置阶段，不重复创建任务");
             persistGenTaskNow();
             startGenerate(params.userPrompt, params.coreType, params.version, { resumePrepared: true }).catch(() => { });
         } else {
@@ -2315,7 +2412,7 @@ export async function resumeGenerate() {
     if (!genTask.files.length
         && ["clarifying", "awaiting_input", "grading", "confirming", "planning"].includes(p)
         && genTask.userPrompt) {
-        genTask.logs.push(p === "planning"
+        appendGenLog(p === "planning"
             ? "↻ 页面恢复：继续联网查证与项目规划"
             : "↻ 页面恢复：使用原 taskId 与前置 requestId 继续对账");
         await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
@@ -2331,7 +2428,7 @@ export async function resumeGenerate() {
             return;
         }
         setGenerateError(error);
-        genTask.logs.push("× " + genTask.error);
+        appendGenLog("× " + genTask.error);
         persistGenTaskNow();
     };
 
@@ -2383,7 +2480,7 @@ export async function resumeGenerate() {
 
     // 生成/校验阶段（plan 已完成、有 files）：续跑桶循环（后端 fileStatuses 天然可续）→ 校验 → 构建
     try {
-        genTask.logs.push("↻ 从刷新中断处继续生成…");
+        appendGenLog("↻ 从刷新中断处继续生成…");
         setPhase("generating", "从中断处继续生成…");
 
         const bucketMap = new Map<number, number>();
@@ -2449,7 +2546,7 @@ export async function resumeGenerate() {
             await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
             setPhase("generating");
             for (const mp of missingList) {
-                genTask.logs.push(`↻ 补生成 ${mp}`);
+                appendGenLog(`↻ 补生成 ${mp}`);
                 const fileResult = await streamFileGeneration(genTask.taskId);
                 if (!fileResult || fileResult.done) break;
             }
@@ -2499,7 +2596,7 @@ export async function startGenerate(
                 return;
             }
             setGenerateError(e);
-            genTask.logs.push("× " + genTask.error);
+            appendGenLog("× " + genTask.error);
             return;
         }
     }
@@ -2520,7 +2617,7 @@ export async function startGenerate(
                 return;
             }
             setGenerateError(e);
-            genTask.logs.push("× " + genTask.error);
+            appendGenLog("× " + genTask.error);
             persistGenTaskNow();
             return;
         }
@@ -2543,7 +2640,7 @@ export async function startGenerate(
             }
             // 未收到明确 terminal result 时禁止静默跳过分级进入 Planner。
             setGenerateError(e);
-            genTask.logs.push("× " + genTask.error);
+            appendGenLog("× " + genTask.error);
             persistGenTaskNow();
             return;
         }
@@ -2564,7 +2661,7 @@ export async function startGenerate(
     for (let replanAttempt = firstPlannerAttempt; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
         try {
             if (replanAttempt > 0) {
-                genTask.logs.push(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
+                appendGenLog(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
                 genTask.files = [];
                 genTask.currentIndex = 0;
                 clearGenerateError();
@@ -2623,7 +2720,7 @@ export async function startGenerate(
             genTask.plannerRequestId = "";
             genTask.plannerReplan = false;
             genTask.plannerAttempt = 0;
-            genTask.logs.push(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
+            appendGenLog(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
             persistGenTaskNow();
 
             setPhase("generating");
@@ -2661,7 +2758,7 @@ export async function startGenerate(
                             if (isInterrupt(be)) throw be;
                             if (be?.noRetry || be?.terminal) throw be;
                             const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
-                            genTask.logs.push(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
+                            appendGenLog(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
                             bucketResult = null;
                         }
                     }
@@ -2669,13 +2766,13 @@ export async function startGenerate(
                         // 流被切断不等于生成失败；直接重试同一阶段，禁止用重新规划覆盖已有进度。
                         if (doneCount() > doneBefore) {
                             noProgress = 0;
-                            genTask.logs.push(`· 桶 #${bucketIndex} 连接中断但已落地文件，继续恢复...`);
+                            appendGenLog(`· 桶 #${bucketIndex} 连接中断但已落地文件，继续恢复...`);
                             continue;
                         }
                         if (++noProgress >= 5) {
                             throw new Error(`桶 #${bucketIndex} 连续连接中断，阶段进度已保存，请稍后重试`);
                         }
-                        genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段无返回（${noProgress}/5），继续恢复...`);
+                        appendGenLog(`· 桶 #${bucketIndex} 当前阶段无返回（${noProgress}/5），继续恢复...`);
                         await waitWithAbort(1_500, generationSignal());
                         continue;
                     }
@@ -2699,7 +2796,7 @@ export async function startGenerate(
                             throw new Error(`桶 #${bucketIndex} 连续未推进，阶段进度已保存，请稍后重试`);
                         }
                         const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
-                        genTask.logs.push(`· 桶 #${bucketIndex} 当前阶段暂未推进（${noProgress}/5），稍后重试...`);
+                        appendGenLog(`· 桶 #${bucketIndex} 当前阶段暂未推进（${noProgress}/5），稍后重试...`);
                         await waitWithAbort(retryAfterMs, generationSignal());
                         continue;
                     }
@@ -2722,12 +2819,12 @@ export async function startGenerate(
 
             for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
                 const missingList = verifyResult.missing as string[];
-                genTask.logs.push(`! 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
+                appendGenLog(`! 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
                 await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
 
                 setPhase("generating");
                 for (const mp of missingList) {
-                    genTask.logs.push(`↻ 补生成 ${mp}`);
+                    appendGenLog(`↻ 补生成 ${mp}`);
                     const fileResult = await streamFileGeneration(genTask.taskId);
                     if (!fileResult || fileResult.done) break;
                 }
@@ -2739,7 +2836,7 @@ export async function startGenerate(
             if (!verifyResult.verified) {
                 throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
             }
-            genTask.logs.push(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
+            appendGenLog(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
 
             // Build with fix-retry loop
             await buildWithRetry();
@@ -2752,13 +2849,13 @@ export async function startGenerate(
             }
             if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
                 setGenerateError(e);
-                genTask.logs.push("× " + genTask.error);
+                appendGenLog("× " + genTask.error);
                 return;
             }
             // If error is not from replan, don't retry
             if (!e.message?.includes("重新规划")) {
                 setGenerateError(e);
-                genTask.logs.push("× " + genTask.error);
+                appendGenLog("× " + genTask.error);
                 return;
             }
         }
@@ -2783,14 +2880,14 @@ async function buildWithRetry(
         let buildResult: any = null;
         if (reuseExisting && genTask.buildRequestId) {
             setPhase("uploading", "正在恢复已有构建启动请求...");
-            genTask.logs.push("↻ 页面恢复：使用原 build request ID 对账，不重复触发 workflow");
+            appendGenLog("↻ 页面恢复：使用原 build request ID 对账，不重复触发 workflow");
             buildResult = await post("/api/generate/build", {
                 taskId: genTask.taskId,
                 buildRequestId: genTask.buildRequestId,
             });
         } else if (reuseExisting) {
             setPhase("building", "正在恢复已有构建的状态...");
-            genTask.logs.push("↻ 页面恢复：继续等待已有构建，不重复触发 workflow");
+            appendGenLog("↻ 页面恢复：继续等待已有构建，不重复触发 workflow");
         } else {
             setPhase("uploading", "正在上传到 GitHub 并触发构建...");
             const buildRequestId = createBuildRequestId();
@@ -2818,7 +2915,7 @@ async function buildWithRetry(
             if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
             if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
             if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
-            genTask.logs.push(`构建已确认 (run #${buildResult.runId || "pending"})`);
+            appendGenLog(`构建已确认 (run #${buildResult.runId || "pending"})`);
         }
 
         setPhase("building", "正在等待 GitHub Actions 构建...");
@@ -2829,7 +2926,7 @@ async function buildWithRetry(
         // 每次失败都抓取结构化诊断；最后一次只检查、不再调用模型修改。
         const canRepair = attempt < MAX_FIX_ATTEMPTS;
         if (canRepair) {
-            genTask.logs.push(`! 构建失败，尝试自动修复 (第${attempt + 1}次)...`);
+            appendGenLog(`! 构建失败，尝试自动修复 (第${attempt + 1}次)...`);
             setPhase("fixing", "正在分析编译错误并修复...");
         } else {
             setPhase("fixing", "正在获取最终构建诊断...");
@@ -2865,7 +2962,7 @@ async function buildWithRetry(
         }
         genTask.fixResumeStage = "rebuilding";
         persistGenTaskNow();
-        genTask.logs.push(`● 已修改 ${changed} 个文件，开始重新构建验证...`);
+        appendGenLog(`● 已修改 ${changed} 个文件，开始重新构建验证...`);
     }
 }
 
@@ -2891,7 +2988,7 @@ async function pollBuildStatus(): Promise<boolean> {
             return false;
         }
         if (i % 3 === 0) {
-            genTask.logs.push(`构建中... (${result.runStatus || "queued"})`);
+            appendGenLog(`构建中... (${result.runStatus || "queued"})`);
         }
         i++;
     }
@@ -2921,7 +3018,7 @@ export async function startBuildFromIDE(
             return;
         }
         setGenerateError(e);
-        genTask.logs.push("× " + genTask.error);
+        appendGenLog("× " + genTask.error);
     }
 }
 
@@ -3036,7 +3133,7 @@ export async function appendFeature(appendText: string) {
         const existing = new Set(genTask.files.map(f => f.path));
         const parsed = parseResponse(full, existing);
         if (!parsed.files.length) {
-            genTask.logs.push("! 追加需求未产出文件改动" + (parsed.reply ? `：${parsed.reply.slice(0, 80)}` : ""));
+            appendGenLog("! 追加需求未产出文件改动" + (parsed.reply ? `：${parsed.reply.slice(0, 80)}` : ""));
             setPhase("done", "● 无改动");
             return;
         }
@@ -3045,7 +3142,7 @@ export async function appendFeature(appendText: string) {
             if (exist) {
                 exist.content = fa.content;
                 exist.status = "done";
-                genTask.logs.push(`✎ 修改 ${fa.path}`);
+                appendGenLog(`✎ 修改 ${fa.path}`);
             } else {
                 genTask.files.push({
                     path: fa.path,
@@ -3053,7 +3150,7 @@ export async function appendFeature(appendText: string) {
                     content: fa.content,
                     status: "done",
                 });
-                genTask.logs.push(`＋ 新增 ${fa.path}`);
+                appendGenLog(`＋ 新增 ${fa.path}`);
             }
         }
 
@@ -3077,6 +3174,6 @@ export async function appendFeature(appendText: string) {
         genTask.streamingPhase = "";
         genTask.streamingContent = "";
         setGenerateError(e);
-        genTask.logs.push("× 追加失败：" + genTask.error);
+        appendGenLog("× 追加失败：" + genTask.error);
     }
 }

@@ -732,6 +732,35 @@ function formatBlueprintForMain(bp: MainBlueprint): string {
     ].join("\n");
 }
 
+function pomCoreRules(ctx: { coreType: string; version: string }): {
+    dependencyRule: string;
+    repositoryRule: string;
+} {
+    const coreType = ctx.coreType.trim();
+    const normalizedCore = coreType.toLowerCase();
+    if (normalizedCore === "paper") {
+        return {
+            dependencyRule: /^26\./.test(ctx.version)
+                ? ctx.version === "26.2"
+                    ? "Paper 26.x 使用官方 Maven metadata 中带 build 号的 stable 版本；Paper 26.2 当前已核验为 io.papermc.paper:paper-api:26.2.build.112-stable。禁止拼接 -R0.1-SNAPSHOT"
+                    : `Paper 26.x 使用官方 Maven metadata 中与 ${ctx.version} 对应的最新 <version>.build.<number>-stable 完整版本。必须以 https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/maven-metadata.xml 为准，禁止拼接 -R0.1-SNAPSHOT`
+                : `Paper 1.x 使用传统版本 io.papermc.paper:paper-api:${ctx.version}-R0.1-SNAPSHOT`,
+            repositoryRule: "Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/，禁止使用已返回 403 的旧地址 https://papermc.io/repo/repository/maven-public/",
+        };
+    }
+    if (normalizedCore === "spigot") {
+        return {
+            dependencyRule: `Spigot 使用 org.spigotmc:spigot-api 与 MC ${ctx.version} 匹配的官方版本`,
+            repositoryRule: "Spigot 仓库使用 https://hub.spigotmc.org/nexus/content/repositories/snapshots/",
+        };
+    }
+    const label = coreType || "当前核心";
+    return {
+        dependencyRule: `${label} 使用其官方构建体系中与 MC ${ctx.version} 匹配的依赖坐标；不得套用 Paper 或 Spigot API 坐标`,
+        repositoryRule: `${label} 只使用该核心官方文档指定的仓库；不得无条件加入 Paper 或 Spigot 仓库`,
+    };
+}
+
 /** 根据文件类型 + 蓝图切片产出附加在 system prompt 末尾的"专项规则" */
 function specializationBlock(
     file: PlanFileItem,
@@ -866,12 +895,13 @@ function specializationBlock(
         case "FileRelatedGen": {
             const lower = file.path.toLowerCase();
             if (lower.endsWith("pom.xml")) {
+                const { dependencyRule, repositoryRule } = pomCoreRules(ctx);
                 return [
                     "═══ FileRelatedGen / pom.xml 专项规则 ═══",
                     `- groupId 取自包名前两段（如 ${ctx.packageName.split(".").slice(0, 2).join(".")}），artifactId=${ctx.projectName}`,
                     `- maven-compiler-plugin 的 source/target 设为 ${ctx.javaVersion}`,
-                    `- 加入 ${ctx.coreType.toLowerCase()}-api 依赖，version 与 MC ${ctx.version} 匹配（Paper 推荐 io.papermc.paper:paper-api:${ctx.version}-R0.1-SNAPSHOT，Spigot 推荐 org.spigotmc:spigot-api 对应版本）；scope 为 provided`,
-                    "- 加入 papermc / spigotmc 仓库（按 coreType）；Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/，禁止使用已返回 403 的旧地址 https://papermc.io/repo/repository/maven-public/",
+                    `- ${dependencyRule}；scope 为 provided`,
+                    `- ${repositoryRule}`,
                     "- 配置 maven-shade-plugin 输出 shaded jar（artifactId 名）",
                 ].join("\n");
             }
@@ -1027,8 +1057,9 @@ export function buildFixPrompt(
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
     const isPom = filePath.toLowerCase().endsWith("pom.xml");
+    const pomRules = pomCoreRules(ctx);
     const fileRules = isPom
-        ? `这是 Maven pom.xml。只修正仓库、依赖、版本或构建插件配置，不得输出 Java。Paper 仓库必须使用 https://repo.papermc.io/repository/maven-public/。`
+        ? `这是 Maven pom.xml。只修正仓库、依赖、版本或构建插件配置，不得输出 Java。${pomRules.dependencyRule}；${pomRules.repositoryRule}。`
         : `你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
 禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
 文件职责：${fileRole || "未提供显式颜色例外"}

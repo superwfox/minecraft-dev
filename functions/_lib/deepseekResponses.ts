@@ -16,6 +16,7 @@ const QUICK_FAILURE_MS = 5_000;
 const MIN_RETRY_BUDGET_MS = 6_000;
 const MIN_MODEL_RESULT_RETRY_BUDGET_MS = 15_000;
 const MAX_ATTEMPTS = 2;
+const MAX_RAW_CANDIDATES = 12;
 const MAX_RAW_SOURCES_PER_NEED = 12;
 
 function discoveryTextFormat(needs: KnowledgeNeed[]) {
@@ -44,9 +45,9 @@ function discoveryTextFormat(needs: KnowledgeNeed[]) {
                                     additionalProperties: false,
                                     properties: {
                                         url: { type: "string" },
-                                        reason: { type: "string", minLength: 8, maxLength: 240 },
+                                        reason: { type: "string", maxLength: 1_000 },
                                     },
-                                    required: ["url", "reason"],
+                                    required: ["url"],
                                 },
                             },
                         },
@@ -68,6 +69,7 @@ export interface DeepSeekResponsesResult {
 
 export interface DiscoveryAttemptTelemetry {
     reasonCode?: LearningReasonCode;
+    detailCode?: string;
     elapsedMs: number;
     httpStatus: number;
     providerStatus: LearningProviderStatus;
@@ -78,6 +80,7 @@ interface DiscoveryResultBase {
     attempts: DiscoveryAttemptTelemetry[];
     elapsedMs: number;
     usageEntries: UsageCostEntry[];
+    validationCodes: string[];
 }
 
 export type LearningDiscoveryResult = DiscoveryResultBase & (
@@ -175,17 +178,40 @@ function candidateUrlKey(raw: string): string {
     }
 }
 
-export function parseLearningCandidates(content: string, needs: KnowledgeNeed[]): LearningCandidate[] {
+function discoveryCandidateParseDetailCode(error: unknown): string {
+    const code = error instanceof Error ? error.message : "";
+    return /^discovery_[A-Za-z0-9_.-]{1,80}$/.test(code)
+        ? code
+        : "discovery_candidates_json_parse";
+}
+
+export function parseLearningCandidates(
+    content: string,
+    needs: KnowledgeNeed[],
+    validationCodes: string[] = [],
+): LearningCandidate[] {
     const parsed = JSON.parse(stripFences(content)) as any;
     const allowedIds = new Set(needs.map((need) => need.id));
     if (!Array.isArray(parsed?.candidates)) throw new Error("discovery_candidates");
     const candidates = parsed.candidates;
-    if (candidates.length > Math.min(3, allowedIds.size)) throw new Error("discovery_candidate_bounds");
+    if (candidates.length > MAX_RAW_CANDIDATES) throw new Error("discovery_candidate_bounds");
+    const maxCandidates = Math.min(3, allowedIds.size);
     const seenNeeds = new Set<string>();
     const out: LearningCandidate[] = [];
     for (const candidate of candidates) {
         const needId = typeof candidate?.needId === "string" ? candidate.needId.trim() : "";
-        if (!allowedIds.has(needId) || seenNeeds.has(needId)) continue;
+        if (!allowedIds.has(needId)) {
+            validationCodes.push("discovery_need_id_rejected");
+            continue;
+        }
+        if (seenNeeds.has(needId)) {
+            validationCodes.push("discovery_duplicate_need_rejected");
+            continue;
+        }
+        if (out.length >= maxCandidates) {
+            validationCodes.push("discovery_candidate_limit_trimmed");
+            break;
+        }
         const rawSources = Array.isArray(candidate?.sources)
             ? candidate.sources
             : Array.isArray(candidate?.urls)
@@ -194,17 +220,40 @@ export function parseLearningCandidates(content: string, needs: KnowledgeNeed[])
                     reason: "旧版发现结果未记录该 URL 的搜索理由",
                 }))
                 : [];
-        if (rawSources.length > MAX_RAW_SOURCES_PER_NEED) throw new Error("discovery_source_bounds");
+        if (rawSources.length > MAX_RAW_SOURCES_PER_NEED) {
+            validationCodes.push("discovery_source_payload_too_large");
+        }
         const seenUrls = new Set<string>();
         const sources: NonNullable<LearningCandidate["sources"]> = [];
-        for (const raw of rawSources) {
+        for (const raw of rawSources.slice(0, MAX_RAW_SOURCES_PER_NEED)) {
+            if (sources.length >= 3) {
+                validationCodes.push("discovery_source_limit_trimmed");
+                break;
+            }
             const url = typeof raw?.url === "string" ? raw.url.trim() : "";
-            const reason = typeof raw?.reason === "string"
+            let reason = typeof raw?.reason === "string"
                 ? raw.reason.trim().replace(/\s+/g, " ")
                 : "";
             const urlKey = candidateUrlKey(url);
-            if (!url || url.length > 2_000 || reason.length < 8 || reason.length > 240 || seenUrls.has(urlKey)) continue;
-            if (sources.length >= 3) throw new Error("discovery_source_bounds");
+            if (!url) {
+                validationCodes.push("discovery_url_missing");
+                continue;
+            }
+            if (url.length > 2_000) {
+                validationCodes.push("discovery_url_too_long");
+                continue;
+            }
+            if (seenUrls.has(urlKey)) {
+                validationCodes.push("discovery_duplicate_url_rejected");
+                continue;
+            }
+            if (reason.length < 8) {
+                validationCodes.push(reason ? "discovery_reason_short_defaulted" : "discovery_reason_missing_defaulted");
+                reason = "联网发现服务未提供完整搜索理由";
+            } else if (reason.length > 240) {
+                validationCodes.push("discovery_reason_truncated");
+                reason = reason.slice(0, 240);
+            }
             seenUrls.add(urlKey);
             sources.push({ url, reason });
         }
@@ -213,6 +262,40 @@ export function parseLearningCandidates(content: string, needs: KnowledgeNeed[])
         out.push({ needId, sources });
     }
     return out;
+}
+
+export function extractResponsesCitationUrls(value: unknown): string[] {
+    const response = responseEnvelope(value as any);
+    const urls: string[] = [];
+    const seen = new Set<string>();
+    const add = (raw: unknown) => {
+        if (typeof raw !== "string" || raw.length > 2_000) return;
+        try {
+            const url = new URL(raw);
+            if (url.protocol !== "https:" || url.username || url.password) return;
+            url.hash = "";
+            const key = url.href;
+            if (!seen.has(key) && urls.length < 12) {
+                seen.add(key);
+                urls.push(key);
+            }
+        } catch { /* ignore malformed provider citations */ }
+    };
+    for (const item of Array.isArray(response?.output) ? response.output : []) {
+        if (item?.type === "web_search_call") {
+            const pools = [item?.action?.sources, item?.action?.results, item?.results, item?.sources];
+            for (const pool of pools) {
+                for (const source of Array.isArray(pool) ? pool : []) add(source?.url);
+            }
+        }
+        if (item?.type !== "message") continue;
+        for (const block of Array.isArray(item.content) ? item.content : []) {
+            for (const annotation of Array.isArray(block?.annotations) ? block.annotations : []) {
+                if (annotation?.type === "url_citation" || annotation?.url) add(annotation?.url);
+            }
+        }
+    }
+    return urls;
 }
 
 function discoveryPrompt(needs: KnowledgeNeed[]): string {
@@ -249,6 +332,7 @@ function failureResult(
     httpStatus = 0,
     providerStatus: LearningProviderStatus = "unknown",
     retryable = false,
+    validationCodes: string[] = [],
 ): LearningDiscoveryResult {
     return {
         ok: false,
@@ -260,6 +344,7 @@ function failureResult(
         attempts,
         elapsedMs: elapsedSince(startedAt),
         usageEntries,
+        validationCodes: [...new Set(validationCodes)].slice(0, 20),
     };
 }
 
@@ -273,6 +358,7 @@ export async function discoverLearningSources(input: {
     const startedAt = Date.now();
     const attempts: DiscoveryAttemptTelemetry[] = [];
     const usageEntries: UsageCostEntry[] = [];
+    const validationCodes: string[] = [];
     if (!input.apiKey) {
         return failureResult(startedAt, attempts, usageEntries, "responses_not_configured");
     }
@@ -298,6 +384,7 @@ export async function discoverLearningSources(input: {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), remainingMs);
         let reasonCode: LearningReasonCode | undefined;
+        let detailCode: string | undefined;
         let httpStatus = 0;
         let providerStatus: LearningProviderStatus = "unknown";
         let retryable = false;
@@ -328,33 +415,72 @@ export async function discoverLearningSources(input: {
             const text = await response.text();
             if (!response.ok) {
                 reasonCode = "discovery_http";
+                detailCode = `discovery_http_${response.status}`;
                 retryable = retryableHttpStatus(response.status);
             } else {
                 try {
-                    parsedResponse = parseResponsesResult(JSON.parse(text));
+                    const responsePayload = JSON.parse(text);
+                    parsedResponse = parseResponsesResult(responsePayload);
+                    const citationUrls = extractResponsesCitationUrls(responsePayload);
                     providerStatus = parsedResponse.status;
                     if (parsedResponse.usage) {
                         usageEntries.push({ model: parsedResponse.model, usage: parsedResponse.usage });
                     }
                     if (parsedResponse.status === "incomplete") {
                         reasonCode = "discovery_provider_incomplete";
+                        detailCode = "discovery_provider_incomplete";
                         retryable = true;
                     } else if (parsedResponse.status === "failed") {
                         reasonCode = "discovery_provider_failed";
+                        detailCode = "discovery_provider_failed";
                         retryable = true;
                     } else {
                         try {
-                            candidates = parseLearningCandidates(parsedResponse.content, input.needs);
+                            const attemptValidationCodes: string[] = [];
+                            candidates = parseLearningCandidates(parsedResponse.content, input.needs, attemptValidationCodes);
+                            validationCodes.push(...attemptValidationCodes);
+                            if (input.needs.length === 1 && citationUrls.length) {
+                                const needId = input.needs[0].id;
+                                const existing = candidates.find((candidate) => candidate.needId === needId);
+                                const sources = existing?.sources ?? [];
+                                const known = new Set(sources.map((source) => candidateUrlKey(source.url)));
+                                for (const url of citationUrls) {
+                                    if (sources.length >= 3) break;
+                                    const key = candidateUrlKey(url);
+                                    if (known.has(key)) continue;
+                                    sources.push({
+                                        url,
+                                        reason: "联网发现服务在搜索结果中引用的公开来源",
+                                    });
+                                    known.add(key);
+                                    validationCodes.push("discovery_citation_fallback_used");
+                                }
+                                if (sources.length && !existing) candidates.push({ needId, sources });
+                            }
                             if (!candidates.length) {
                                 reasonCode = "no_candidate_sources";
+                                detailCode = "discovery_candidates_empty";
                                 retryable = true;
                             }
-                        } catch {
-                            reasonCode = "discovery_invalid_response";
-                            retryable = true;
+                        } catch (error) {
+                            detailCode = discoveryCandidateParseDetailCode(error);
+                            if (input.needs.length === 1 && citationUrls.length) {
+                                candidates = [{
+                                    needId: input.needs[0].id,
+                                    sources: citationUrls.slice(0, 3).map((url) => ({
+                                        url,
+                                        reason: "结构化结果无效，使用联网搜索引用作为有界回退来源",
+                                    })),
+                                }];
+                                validationCodes.push(detailCode, "discovery_citation_fallback_used");
+                            } else {
+                                reasonCode = "discovery_invalid_response";
+                                retryable = true;
+                            }
                         }
                     }
                 } catch {
+                    detailCode = "discovery_response_json_parse";
                     reasonCode = "discovery_invalid_response";
                     retryable = true;
                 }
@@ -362,8 +488,12 @@ export async function discoverLearningSources(input: {
         } catch (error) {
             if (isAbortError(error) || controller.signal.aborted) {
                 reasonCode = "discovery_timeout";
+                detailCode = "discovery_timeout";
             } else {
                 reasonCode = "discovery_network";
+                detailCode = error instanceof Error && error.message
+                    ? `discovery_network_${error.message.slice(0, 80).replace(/[^A-Za-z0-9_.-]+/g, "_")}`
+                    : "discovery_network";
                 retryable = true;
             }
         } finally {
@@ -373,6 +503,7 @@ export async function discoverLearningSources(input: {
         const attemptElapsedMs = elapsedSince(attemptStartedAt);
         attempts.push({
             reasonCode,
+            detailCode,
             elapsedMs: attemptElapsedMs,
             httpStatus,
             providerStatus,
@@ -387,6 +518,7 @@ export async function discoverLearningSources(input: {
                 attempts,
                 elapsedMs: elapsedSince(startedAt),
                 usageEntries,
+                validationCodes: [...new Set(validationCodes)].slice(0, 20),
             };
         }
 
@@ -398,6 +530,7 @@ export async function discoverLearningSources(input: {
             httpStatus,
             providerStatus,
             retryable,
+            validationCodes,
         ) as Extract<LearningDiscoveryResult, { ok: false }>;
         const remainingAfterAttempt = deadline - Date.now();
         const modelResultCanRetry = reasonCode === "discovery_invalid_response"

@@ -233,6 +233,45 @@ describe("safe Debug export", () => {
         expect(json).not.toContain("private-current-need-sentinel");
     });
 
+    it("includes sanitized public Learning URLs and exact validation codes", () => {
+        const payload = buildSafeDebugExport(makeSource(), 1_700_000_000_000, {
+            searchedSources: [{
+                url: "https://user:secret@repo.papermc.io/a.pom?token=private&view=raw#fragment",
+                canonicalUrl: "https://repo.papermc.io/a.pom?token=private&view=raw#fragment",
+                status: "rejected",
+                rejectionCode: "unsupported_type",
+                detailCode: "unsupported_content_type",
+                httpStatus: 200,
+                contentType: "application/octet-stream",
+                byteCount: 128,
+                elapsedMs: 42,
+                reason: "search-reason-sentinel",
+            }],
+            diagnostics: [{
+                stage: "verification",
+                status: "error",
+                code: "verification_evidence",
+                message: "private-diagnostic-message-sentinel",
+                query: "private-query-sentinel",
+            }],
+        });
+        const json = JSON.stringify(payload);
+
+        expect(payload.learning.evidence.searchedSources).toEqual([expect.objectContaining({
+            url: "https://repo.papermc.io/a.pom?view=raw",
+            detailCode: "unsupported_content_type",
+            httpStatus: 200,
+        })]);
+        expect(payload.learning.evidence.diagnostics).toEqual([{
+            stage: "verification",
+            status: "error",
+            code: "verification_evidence",
+        }]);
+        expect(json).not.toContain("private");
+        expect(json).not.toContain("search-reason-sentinel");
+        expect(json).not.toContain("private-query-sentinel");
+    });
+
     it("clears an earlier failure reason after a newer successful status", () => {
         const events: LearningDebugEvent[] = [
             {
