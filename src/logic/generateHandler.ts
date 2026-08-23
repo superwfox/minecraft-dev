@@ -300,8 +300,7 @@ function createBuildRequestId(): string {
     return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-// 单次等待匹配服务端代理窗口；5s 动态 watchdog 可提前刷新静默链路，总恢复窗口放宽到 30 分钟。
-const PLANNER_CLIENT_WAIT_MS = 1_800_000;
+// 单次等待匹配服务端代理窗口；5s 动态 watchdog 负责刷新静默链路，不设置前端总等待上限。
 const PLANNER_ATTEMPT_MS = 120_000;
 const PLANNER_TRANSPORT_IDLE_MS = 5_000;
 const PLANNER_CONNECTION_RETRIES = 3;
@@ -316,23 +315,13 @@ class PlannerTransportTimeoutError extends Error {
     }
 }
 
-type PlannerDeadlineKind = "attempt_deadline" | "overall_deadline";
-
 class PlannerDeadlineTimeoutError extends Error {
-    readonly code: "PLANNER_ATTEMPT_TIMEOUT" | "PLANNER_OVERALL_TIMEOUT";
-    readonly retryable: boolean;
-    readonly timeoutKind: PlannerDeadlineKind;
+    readonly code = "PLANNER_ATTEMPT_TIMEOUT";
+    readonly retryable = true;
 
-    constructor(kind: PlannerDeadlineKind) {
-        super(kind === "attempt_deadline"
-            ? "Planner 单次连接超过前端等待上限"
-            : "Planner 超过前端总等待上限，请重试");
+    constructor() {
+        super("Planner 单次连接超过前端等待上限");
         this.name = "PlannerDeadlineTimeoutError";
-        this.code = kind === "attempt_deadline"
-            ? "PLANNER_ATTEMPT_TIMEOUT"
-            : "PLANNER_OVERALL_TIMEOUT";
-        this.retryable = kind === "attempt_deadline";
-        this.timeoutKind = kind;
     }
 }
 
@@ -350,37 +339,32 @@ function isPlannerTimeout(code: string, status: number): boolean {
         || status === 524;
 }
 
-async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<any> {
+async function postPlanner(body: any): Promise<any> {
     const signal = generationSignal();
     const runId = generationRunId;
-    const deadline = Date.now() + waitMs;
     let announcedWait = false;
     let failures = 0;
     let timeoutRetries = 0;
     const waitForPlannerRetry = async (delayMs: number) => {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) throw new PlannerDeadlineTimeoutError("overall_deadline");
-        await waitWithAbort(Math.min(delayMs, remainingMs), signal);
+        await waitWithAbort(delayMs, signal);
+    };
+    const refreshPlannerConnection = async () => {
+        appendGenLog("↻ Planner 单次连接已轮换，继续等待服务端结果...");
+        await waitForPlannerRetry(1_000);
     };
 
     while (true) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) throw new PlannerDeadlineTimeoutError("overall_deadline");
         const attemptController = new AbortController();
         const unlinkGenerationAbort = linkGenerationAbort(attemptController);
         let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
         let attemptDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
         let lastTransportActivity = 0;
 
-        const attemptBudgetMs = Math.min(PLANNER_ATTEMPT_MS, remainingMs);
-        const attemptDeadlineKind: PlannerDeadlineKind = attemptBudgetMs >= remainingMs
-            ? "overall_deadline"
-            : "attempt_deadline";
         attemptDeadlineTimer = setTimeout(() => {
             if (!attemptController.signal.aborted) {
-                attemptController.abort(new PlannerDeadlineTimeoutError(attemptDeadlineKind));
+                attemptController.abort(new PlannerDeadlineTimeoutError());
             }
-        }, attemptBudgetMs);
+        }, PLANNER_ATTEMPT_MS);
 
         const clearTransportIdleTimer = () => {
             if (transportIdleTimer) clearTimeout(transportIdleTimer);
@@ -418,9 +402,11 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                 if (signal.aborted || runId !== generationRunId) throw generationAbortError();
                 const attemptError = plannerAttemptAbortError(attemptController) || error;
                 if (isInterrupt(attemptError)) throw generationAbortError();
-                if (attemptError instanceof PlannerDeadlineTimeoutError
-                    && attemptError.timeoutKind === "overall_deadline") throw attemptError;
-                if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
+                if (attemptError instanceof PlannerDeadlineTimeoutError) {
+                    await refreshPlannerConnection();
+                    continue;
+                }
+                if (failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
                 await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
                 continue;
             }
@@ -437,7 +423,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
             }
             if (resp.status === 409) {
                 const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-                if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
+                if (payload?.code !== "PLANNER_IN_PROGRESS") {
                     const error = new Error(payload?.error || "Planner 状态冲突");
                     (error as any).code = payload?.code || "PLANNER_CONFLICT";
                     (error as any).status = resp.status;
@@ -462,7 +448,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
             if (!resp.ok) {
                 const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
                 if (isPlannerTimeout(apiError.code, resp.status)) {
-                    if (Date.now() >= deadline || timeoutRetries++ >= 1) {
+                    if (timeoutRetries++ >= 1) {
                         const error = new Error(apiError.message);
                         (error as any).code = apiError.code;
                         (error as any).status = resp.status;
@@ -473,7 +459,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                     await waitForPlannerRetry(retrySeconds * 1000);
                     continue;
                 }
-                if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                if (failures++ >= PLANNER_CONNECTION_RETRIES) {
                     throw new Error(apiError.message);
                 }
                 await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
@@ -494,18 +480,18 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                     if (signal.aborted || runId !== generationRunId) throw generationAbortError();
                     const attemptError = plannerAttemptAbortError(attemptController) || error;
                     if (isInterrupt(attemptError)) throw generationAbortError();
-                    if (attemptError instanceof PlannerDeadlineTimeoutError
-                        && attemptError.timeoutKind === "overall_deadline") throw attemptError;
                     if (attemptError?.noRetry || attemptError?.terminal) throw attemptError;
-                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                    if (attemptError instanceof PlannerDeadlineTimeoutError) {
+                        await refreshPlannerConnection();
+                        continue;
+                    }
+                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
                         throw attemptError;
                     }
                     const delay = 2000 * Math.pow(2, failures - 1);
                     const reason = attemptError instanceof PlannerTransportTimeoutError
                         ? "链路静默，正在刷新连接"
-                        : attemptError instanceof PlannerDeadlineTimeoutError
-                            ? "单次等待到期，正在刷新连接"
-                            : "连接中断";
+                        : "连接中断";
                     appendGenLog(`! Planner ${reason}，${delay / 1000}s 后继续等待 (${failures}/${PLANNER_CONNECTION_RETRIES})...`);
                     await waitForPlannerRetry(delay);
                     continue;
@@ -513,7 +499,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                     clearTransportIdleTimer();
                 }
                 if (!streamed) {
-                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
                         throw new Error("Planner 流已结束，但未返回结果");
                     }
                     await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
@@ -522,7 +508,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                 if (streamed.error) {
                     const status = Number(streamed.status) || 0;
                     const code = typeof streamed.code === "string" ? streamed.code : "";
-                    if (code === "PLANNER_IN_PROGRESS" && Date.now() < deadline) {
+                    if (code === "PLANNER_IN_PROGRESS") {
                         if (!announcedWait) {
                             appendGenLog("· Planner 已在服务端执行，等待现有结果...");
                             announcedWait = true;
@@ -536,7 +522,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                     (plannerError as any).code = code;
                     (plannerError as any).status = status;
                     if (isPlannerTimeout(code, status)) {
-                        if (Date.now() >= deadline || timeoutRetries++ >= 1) throw plannerError;
+                        if (timeoutRetries++ >= 1) throw plannerError;
                         const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 1);
                         appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
                         await waitForPlannerRetry(retrySeconds * 1000);
@@ -546,7 +532,7 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
                         (plannerError as any).noRetry = true;
                         throw plannerError;
                     }
-                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
                         throw plannerError;
                     }
                     const delay = 2000 * Math.pow(2, failures - 1);
@@ -560,6 +546,15 @@ async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<
             const result = await resp.json();
             assertGenerationRun(runId);
             return result;
+        } catch (error: any) {
+            if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+            if (error?.noRetry || error?.terminal) throw error;
+            const attemptError = plannerAttemptAbortError(attemptController);
+            if (attemptError instanceof PlannerDeadlineTimeoutError) {
+                await refreshPlannerConnection();
+                continue;
+            }
+            throw error;
         } finally {
             clearTransportIdleTimer();
             if (attemptDeadlineTimer) clearTimeout(attemptDeadlineTimer);
@@ -1707,12 +1702,11 @@ async function streamBucketGeneration(
 
 // The server allows up to 360s of work plus bounded finalization. A 400s client
 // attempt leaves network margin for terminal events while the server renews its 120s lease.
-const PREFLIGHT_WAIT_MS = 900_000;
 const PREFLIGHT_ATTEMPT_MS = 400_000;
 const PREFLIGHT_TRANSPORT_IDLE_MS = 5_000;
 const PREFLIGHT_RETRIES = 3;
 
-type PreflightTimeoutKind = "transport_idle" | "attempt_deadline" | "overall_deadline";
+type PreflightTimeoutKind = "transport_idle" | "attempt_deadline";
 
 class PreflightTimeoutError extends Error {
     readonly code: string;
@@ -1722,16 +1716,12 @@ class PreflightTimeoutError extends Error {
     constructor(label: string, kind: PreflightTimeoutKind) {
         const message = kind === "transport_idle"
             ? `${label}连接长时间未收到数据`
-            : kind === "attempt_deadline"
-                ? `${label}单次请求超过前端等待上限`
-                : `${label}超过前端总等待上限，请重试`;
+            : `${label}单次请求超过前端等待上限`;
         super(message);
         this.name = "PreflightTimeoutError";
         this.code = kind === "transport_idle"
             ? "PREFLIGHT_TRANSPORT_TIMEOUT"
-            : kind === "attempt_deadline"
-                ? "PREFLIGHT_ATTEMPT_TIMEOUT"
-                : "PREFLIGHT_OVERALL_TIMEOUT";
+            : "PREFLIGHT_ATTEMPT_TIMEOUT";
         this.timeoutKind = kind;
     }
 }
@@ -1805,7 +1795,6 @@ function attachApiError(
 async function streamPreflightRequest(config: PreflightRequestConfig): Promise<any> {
     const rootSignal = generationSignal();
     const runId = generationRunId;
-    const deadline = Date.now() + PREFLIGHT_WAIT_MS;
     const leaseLostCode = config.stage === "clarify" ? "CLARIFY_LEASE_LOST" : "GRADE_LEASE_LOST";
     let failures = 0;
     let announcedWait = false;
@@ -1813,10 +1802,6 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
     let payload: Record<string, unknown> | null = config.payload;
 
     while (true) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-            throw new PreflightTimeoutError(config.label, "overall_deadline");
-        }
         const controller = new AbortController();
         const unlinkRootAbort = linkGenerationAbort(controller);
         config.setController(controller);
@@ -1834,11 +1819,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 controller.abort(new PreflightTimeoutError(config.label, kind));
             }
         };
-        const attemptBudgetMs = Math.min(PREFLIGHT_ATTEMPT_MS, remainingMs);
-        const attemptTimeoutKind: PreflightTimeoutKind = attemptBudgetMs >= remainingMs
-            ? "overall_deadline"
-            : "attempt_deadline";
-        attemptTimer = setTimeout(() => abortForTimeout(attemptTimeoutKind), attemptBudgetMs);
+        attemptTimer = setTimeout(() => abortForTimeout("attempt_deadline"), PREFLIGHT_ATTEMPT_MS);
         const recordTransportActivity = () => {
             if (controller.signal.aborted) return;
             if (transportIdleTimer) clearTimeout(transportIdleTimer);
@@ -1849,29 +1830,24 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
         };
         const waitForNextAttempt = async (delayMs: number) => {
             clearAttemptTimers();
-            const waitRemainingMs = deadline - Date.now();
-            if (waitRemainingMs <= 0) {
-                throw new PreflightTimeoutError(config.label, "overall_deadline");
-            }
-            await waitWithAbort(Math.min(delayMs, waitRemainingMs), rootSignal);
+            await waitWithAbort(delayMs, rootSignal);
         };
 
         const retry = async (error: any, reason: string) => {
             if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
-            if (error instanceof PreflightTimeoutError && error.timeoutKind === "overall_deadline") {
-                throw error;
-            }
-            const retryRemainingMs = deadline - Date.now();
-            if (retryRemainingMs <= 0 || failures >= PREFLIGHT_RETRIES) {
-                if (retryRemainingMs <= 0) {
-                    throw new PreflightTimeoutError(config.label, "overall_deadline");
-                }
-                throw error;
-            }
+            if (failures >= PREFLIGHT_RETRIES) throw error;
             failures++;
             const delay = 2000 * Math.pow(2, failures - 1);
             appendGenLog(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
-            await waitForNextAttempt(Math.min(delay, retryRemainingMs));
+            await waitForNextAttempt(delay);
+        };
+        const handlePreflightTimeout = async (error: PreflightTimeoutError) => {
+            if (error.timeoutKind === "attempt_deadline") {
+                appendGenLog(`↻ ${config.label}单次连接已轮换，继续等待服务端结果...`);
+                await waitForNextAttempt(1_000);
+                return;
+            }
+            await retry(error, "连接静默");
         };
 
         try {
@@ -1893,7 +1869,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 const abortError = preflightAbortError(controller);
                 if (abortError) {
                     if (abortError instanceof PreflightTimeoutError) {
-                        await retry(abortError, abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时");
+                        await handlePreflightTimeout(abortError);
                         continue;
                     }
                     throw abortError;
@@ -1918,8 +1894,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                         continue;
                     }
                 }
-                if ((apiError.code === config.inProgressCode || apiError.code === "TASK_OPERATION_IN_PROGRESS")
-                    && Date.now() < deadline) {
+                if (apiError.code === config.inProgressCode || apiError.code === "TASK_OPERATION_IN_PROGRESS") {
                     if (!announcedWait) {
                         appendGenLog(`· ${config.label}已在服务端执行，等待现有结果...`);
                         announcedWait = true;
@@ -1928,7 +1903,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     await waitForNextAttempt(retrySeconds * 1000);
                     continue;
                 }
-                if (apiError.code === leaseLostCode && Date.now() < deadline) {
+                if (apiError.code === leaseLostCode) {
                     const leaseError = attachApiError(apiError.message, {
                         code: apiError.code,
                         status: response.status,
@@ -1976,7 +1951,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 const abortError = preflightAbortError(controller);
                 if (abortError) {
                     if (abortError instanceof PreflightTimeoutError) {
-                        await retry(abortError, abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时");
+                        await handlePreflightTimeout(abortError);
                         continue;
                     }
                     throw abortError;
@@ -1993,8 +1968,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             }
             if (result.error) {
                 const code = typeof result.code === "string" ? result.code : "";
-                if ((code === config.inProgressCode || code === "TASK_OPERATION_IN_PROGRESS")
-                    && Date.now() < deadline) {
+                if (code === config.inProgressCode || code === "TASK_OPERATION_IN_PROGRESS") {
                     if (!announcedWait) {
                         appendGenLog(`· ${config.label}已在服务端执行，等待现有结果...`);
                         announcedWait = true;
@@ -2029,10 +2003,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
             const abortError = preflightAbortError(controller);
             if (abortError instanceof PreflightTimeoutError) {
-                await retry(
-                    abortError,
-                    abortError.timeoutKind === "transport_idle" ? "连接静默" : "请求超时",
-                );
+                await handlePreflightTimeout(abortError);
                 continue;
             }
             if (abortError) throw abortError;
