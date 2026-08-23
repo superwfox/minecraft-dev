@@ -39,7 +39,6 @@ import {
     isPreflightTimeout,
     PREFLIGHT_LEASE_MS,
     PREFLIGHT_LEASE_RENEW_MS,
-    PREFLIGHT_OPERATION_MS,
     PREFLIGHT_STATE_FINALIZE_MS,
     PREFLIGHT_TERMINAL_WRITE_MS,
     PREFLIGHT_HEARTBEAT_MS,
@@ -952,11 +951,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         context.request.signal,
         "Clarify client disconnected",
     );
-    const operationDeadline = createPreflightDeadline(
-        PREFLIGHT_OPERATION_MS,
-        CLARIFY_TIMEOUT_MESSAGE,
-        operationAbort.signal,
-    );
+    const operationDeadline: PreflightDeadline = {
+        signal: operationAbort.signal,
+        dispose() { /* lifetime is owned by operationAbort */ },
+    };
     let operationHandedOff = false;
     let operationDisposed = false;
     const disposeOperation = () => {

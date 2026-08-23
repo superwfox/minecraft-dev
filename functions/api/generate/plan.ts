@@ -58,15 +58,13 @@ import {
     linkClientAbortSignal,
 } from "../../_lib/clientAbort";
 
-export const PLANNER_PREPARATION_TIMEOUT_MS = 20_000;
 // 首段推理允许较长冷启动；一旦开始流式返回，连续静默 5s 即视为上游链路失活。
 export const PLANNER_UPSTREAM_TIMEOUT_MS = 30_000;
 export const PLANNER_UPSTREAM_IDLE_MS = 5_000;
 export const PLANNER_HEARTBEAT_MS = 2_000;
-// Cloudflare 代理读取窗口约 125s；动态空闲检测负责提前识别停滞并触发下一次恢复。
-export const PLANNER_OPERATION_TIMEOUT_MS = 110_000;
-// 租约需覆盖整次服务端操作，同时保留返回终态和释放执行权的时间。
+// 长任务通过周期续租维持独占执行权，不再依赖整体处理时限兜底。
 export const PLANNER_LEASE_MS = 120_000;
+export const PLANNER_LEASE_RENEW_MS = 30_000;
 
 interface Env {
     DB?: D1Database;
@@ -487,6 +485,13 @@ class PlannerTimeoutError extends Error {
     }
 }
 
+class PlannerLeaseLostError extends Error {
+    constructor() {
+        super("Planner execution lease was lost");
+        this.name = "PlannerLeaseLostError";
+    }
+}
+
 function plannerTimeoutResponse(): Response {
     return new Response(JSON.stringify({
         error: "Planner 处理超时，请重试",
@@ -524,27 +529,6 @@ function plannerSettlementPendingResponse(): Response {
             "Retry-After": "2",
         },
     });
-}
-
-function createPlannerDeadline(timeoutMs: number, message: string, parent?: AbortSignal) {
-    const controller = new AbortController();
-    const abortFromParent = () => {
-        if (!controller.signal.aborted) {
-            controller.abort(parent?.reason instanceof Error ? parent.reason : new PlannerTimeoutError(message));
-        }
-    };
-    if (parent?.aborted) abortFromParent();
-    else parent?.addEventListener("abort", abortFromParent, { once: true });
-    const timer = setTimeout(() => {
-        if (!controller.signal.aborted) controller.abort(new PlannerTimeoutError(message));
-    }, timeoutMs);
-    return {
-        signal: controller.signal,
-        dispose() {
-            clearTimeout(timer);
-            parent?.removeEventListener("abort", abortFromParent);
-        },
-    };
 }
 
 function createPlannerIdleDeadline(
@@ -777,6 +761,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         });
     }
     if (!leaseMode) return plannerBusyResponse();
+    const leaseAcquiredAt = Date.now();
 
     const operationAbort = new AbortController();
     const disposeClientAbort = linkClientAbortSignal(
@@ -784,20 +769,79 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         context.request.signal,
         "Planner client disconnected",
     );
-    const operationDeadline = createPlannerDeadline(
-        PLANNER_OPERATION_TIMEOUT_MS,
-        "Planner 整体处理超时",
-        operationAbort.signal,
-    );
-    const preparationDeadline = createPlannerDeadline(
-        PLANNER_PREPARATION_TIMEOUT_MS,
-        "Planner 上下文准备超时",
-        operationDeadline.signal,
-    );
+    const operationDeadline = {
+        signal: operationAbort.signal,
+        dispose() { /* lifetime is owned by operationAbort */ },
+    };
+    const preparationDeadline = operationDeadline;
     let streamOwnsLease = false;
     let leaseReleased = false;
+    let leaseRenewalStopped = false;
+    let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+    let leaseExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+    let leaseRenewalPromise: Promise<void> | null = null;
+
+    const markLeaseLost = () => {
+        if (!operationAbort.signal.aborted) operationAbort.abort(new PlannerLeaseLostError());
+    };
+    const armLeaseExpiry = (leaseStartedAt: number) => {
+        if (leaseExpiryTimer) clearTimeout(leaseExpiryTimer);
+        const remainingMs = Math.max(1, leaseStartedAt + PLANNER_LEASE_MS - Date.now());
+        leaseExpiryTimer = setTimeout(() => {
+            if (!leaseRenewalStopped && !leaseReleased) markLeaseLost();
+        }, remainingMs);
+    };
+    const renewLease = (): Promise<void> => {
+        if (leaseRenewalStopped || leaseReleased || operationAbort.signal.aborted) return Promise.resolve();
+        if (leaseRenewalPromise) return leaseRenewalPromise;
+        const renewalStartedAt = Date.now();
+        const renewal = (async () => {
+            try {
+                const renewed = await withPlannerDeadline(
+                    () => renewTaskPlannerLease(context.env, taskId, uid, leaseToken, PLANNER_LEASE_MS),
+                    operationAbort.signal,
+                    "续订 Planner 执行权失败",
+                );
+                if (!renewed) throw new PlannerLeaseLostError();
+                if (leaseRenewalStopped || leaseReleased || operationAbort.signal.aborted) return;
+                armLeaseExpiry(renewalStartedAt);
+            } catch (error) {
+                if (leaseRenewalStopped || leaseReleased || operationAbort.signal.aborted) return;
+                console.warn("planner lease renewal failed", error);
+                markLeaseLost();
+                throw new PlannerLeaseLostError();
+            }
+        })();
+        leaseRenewalPromise = renewal;
+        renewal.then(
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+            () => { if (leaseRenewalPromise === renewal) leaseRenewalPromise = null; },
+        );
+        return renewal;
+    };
+    const startLeaseRenewal = async () => {
+        armLeaseExpiry(leaseAcquiredAt);
+        await renewLease();
+        if (leaseRenewalStopped || leaseReleased || operationAbort.signal.aborted) return;
+        leaseRenewalTimer = setInterval(() => {
+            void renewLease().catch(() => { /* operation signal carries lease loss */ });
+        }, PLANNER_LEASE_RENEW_MS);
+    };
+    const stopLeaseRenewal = () => {
+        leaseRenewalStopped = true;
+        if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
+        if (leaseExpiryTimer) clearTimeout(leaseExpiryTimer);
+        leaseRenewalTimer = null;
+        leaseExpiryTimer = null;
+    };
+    const waitForLeaseRenewal = async () => {
+        const pending = leaseRenewalPromise;
+        if (!pending) return;
+        try { await pending; } catch { /* operation signal carries lease loss */ }
+    };
 
     try {
+        await startLeaseRenewal();
         const latestAfterLeaseRaw = await withPlannerDeadline(
             () => getOwnedTask(context.env, taskId, uid),
             preparationDeadline.signal,
@@ -1047,14 +1091,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             knowledge.context,
             skillCtx,
         );
-
-        const renewed = await withPlannerDeadline(
-            () => renewTaskPlannerLease(context.env, taskId, uid, leaseToken, PLANNER_LEASE_MS),
-            preparationDeadline.signal,
-            "续订 Planner 租约超时",
-        );
-        if (!renewed) return plannerBusyResponse();
-        preparationDeadline.dispose();
 
         const plannerMessages: ModelChatMessage[] = plannerContinuationMessages ?? [
             { role: "system", content: system },
@@ -1664,20 +1700,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
                 const timedOut = isPlannerTimeout(error)
                     || isPlannerTimeout(operationDeadline.signal.reason);
+                const leaseLost = error instanceof PlannerLeaseLostError
+                    || operationAbort.signal.reason instanceof PlannerLeaseLostError;
                 const settlementPending = resultCommitted || attemptBillingCommitted;
                 const message = timedOut
                     ? "Planner 处理超时，请重试"
+                    : leaseLost
+                        ? "Planner 执行权已失效，正在对账现有请求"
                     : (error?.message || String(error));
                 await writePlannerError(
                     writer,
                     encoder,
                     settlementPending ? "Planner 用量已记录，额度结算暂未完成，请重试当前请求" : message,
-                    settlementPending ? "PLANNER_SETTLEMENT_PENDING" : (timedOut ? "PLANNER_TIMEOUT" : "PLANNER_FAILED"),
-                    settlementPending ? 503 : (timedOut ? 504 : 500),
-                    settlementPending ? { retryable: true, retryAfter: 2 } : {},
+                    settlementPending
+                        ? "PLANNER_SETTLEMENT_PENDING"
+                        : leaseLost
+                            ? "PLANNER_IN_PROGRESS"
+                            : (timedOut ? "PLANNER_TIMEOUT" : "PLANNER_FAILED"),
+                    settlementPending ? 503 : (leaseLost ? 409 : (timedOut ? 504 : 500)),
+                    settlementPending || leaseLost ? { retryable: true, retryAfter: 2 } : {},
                     operationAbort,
                 );
             } finally {
+                stopLeaseRenewal();
+                await waitForLeaseRenewal();
                 clearInterval(heartbeat);
                 try { await writer.write(encoder.encode("data: [DONE]\n\n")); } catch { /* disconnected */ }
                 try { await writer.close(); } catch { /* already disconnected */ }
@@ -1704,6 +1750,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             },
         });
     } catch (error) {
+        if (error instanceof PlannerLeaseLostError
+            || operationAbort.signal.reason instanceof PlannerLeaseLostError) {
+            return plannerBusyResponse();
+        }
         if (isClientCancelled(error)
             || isClientCancelled(operationAbort.signal.reason)
             || isClientCancelled(operationDeadline.signal.reason)
@@ -1719,6 +1769,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     } finally {
         preparationDeadline.dispose();
         if (!streamOwnsLease) {
+            stopLeaseRenewal();
+            await waitForLeaseRenewal();
             disposeClientAbort();
             operationDeadline.dispose();
             if (!leaseReleased) {

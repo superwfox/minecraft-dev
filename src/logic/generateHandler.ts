@@ -38,6 +38,7 @@ import { parseResponse } from "../ide/composables/useIDEChat";
 import { readApiError as readBaseApiError, responseError } from "../api/apiError";
 import {actionMessageMetaForError} from "./actionMessages";
 import type {ActionMessageKind} from "./actionMessages";
+import {recordPromptHistory} from "./promptHistory";
 
 const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -300,8 +301,7 @@ function createBuildRequestId(): string {
     return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-// 单次等待匹配服务端代理窗口；5s 动态 watchdog 负责刷新静默链路，不设置前端总等待上限。
-const PLANNER_ATTEMPT_MS = 120_000;
+// 仅按 SSE 传输活动判断连接是否失活；不设置固定单次或总等待上限。
 const PLANNER_TRANSPORT_IDLE_MS = 5_000;
 const PLANNER_CONNECTION_RETRIES = 3;
 
@@ -315,20 +315,9 @@ class PlannerTransportTimeoutError extends Error {
     }
 }
 
-class PlannerDeadlineTimeoutError extends Error {
-    readonly code = "PLANNER_ATTEMPT_TIMEOUT";
-    readonly retryable = true;
-
-    constructor() {
-        super("Planner 单次连接超过前端等待上限");
-        this.name = "PlannerDeadlineTimeoutError";
-    }
-}
-
 function plannerAttemptAbortError(controller: AbortController): Error | null {
     if (!controller.signal.aborted) return null;
     return controller.signal.reason instanceof PlannerTransportTimeoutError
-        || controller.signal.reason instanceof PlannerDeadlineTimeoutError
         ? controller.signal.reason
         : null;
 }
@@ -348,23 +337,11 @@ async function postPlanner(body: any): Promise<any> {
     const waitForPlannerRetry = async (delayMs: number) => {
         await waitWithAbort(delayMs, signal);
     };
-    const refreshPlannerConnection = async () => {
-        appendGenLog("↻ Planner 单次连接已轮换，继续等待服务端结果...");
-        await waitForPlannerRetry(1_000);
-    };
-
     while (true) {
         const attemptController = new AbortController();
         const unlinkGenerationAbort = linkGenerationAbort(attemptController);
         let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
-        let attemptDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
         let lastTransportActivity = 0;
-
-        attemptDeadlineTimer = setTimeout(() => {
-            if (!attemptController.signal.aborted) {
-                attemptController.abort(new PlannerDeadlineTimeoutError());
-            }
-        }, PLANNER_ATTEMPT_MS);
 
         const clearTransportIdleTimer = () => {
             if (transportIdleTimer) clearTimeout(transportIdleTimer);
@@ -402,10 +379,6 @@ async function postPlanner(body: any): Promise<any> {
                 if (signal.aborted || runId !== generationRunId) throw generationAbortError();
                 const attemptError = plannerAttemptAbortError(attemptController) || error;
                 if (isInterrupt(attemptError)) throw generationAbortError();
-                if (attemptError instanceof PlannerDeadlineTimeoutError) {
-                    await refreshPlannerConnection();
-                    continue;
-                }
                 if (failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
                 await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
                 continue;
@@ -481,10 +454,6 @@ async function postPlanner(body: any): Promise<any> {
                     const attemptError = plannerAttemptAbortError(attemptController) || error;
                     if (isInterrupt(attemptError)) throw generationAbortError();
                     if (attemptError?.noRetry || attemptError?.terminal) throw attemptError;
-                    if (attemptError instanceof PlannerDeadlineTimeoutError) {
-                        await refreshPlannerConnection();
-                        continue;
-                    }
                     if (failures++ >= PLANNER_CONNECTION_RETRIES) {
                         throw attemptError;
                     }
@@ -546,18 +515,8 @@ async function postPlanner(body: any): Promise<any> {
             const result = await resp.json();
             assertGenerationRun(runId);
             return result;
-        } catch (error: any) {
-            if (signal.aborted || runId !== generationRunId) throw generationAbortError();
-            if (error?.noRetry || error?.terminal) throw error;
-            const attemptError = plannerAttemptAbortError(attemptController);
-            if (attemptError instanceof PlannerDeadlineTimeoutError) {
-                await refreshPlannerConnection();
-                continue;
-            }
-            throw error;
         } finally {
             clearTransportIdleTimer();
-            if (attemptDeadlineTimer) clearTimeout(attemptDeadlineTimer);
             unlinkGenerationAbort();
         }
     }
@@ -1700,29 +1659,17 @@ async function streamBucketGeneration(
     return await readSSE(resp, { runId });
 }
 
-// The server allows up to 360s of work plus bounded finalization. A 400s client
-// attempt leaves network margin for terminal events while the server renews its 120s lease.
-const PREFLIGHT_ATTEMPT_MS = 400_000;
+// 仅按 SSE 传输活动判断连接是否失活；服务端负责上游首块和内容空闲检测。
 const PREFLIGHT_TRANSPORT_IDLE_MS = 5_000;
 const PREFLIGHT_RETRIES = 3;
 
-type PreflightTimeoutKind = "transport_idle" | "attempt_deadline";
-
 class PreflightTimeoutError extends Error {
-    readonly code: string;
+    readonly code = "PREFLIGHT_TRANSPORT_TIMEOUT";
     readonly retryable = true;
-    readonly timeoutKind: PreflightTimeoutKind;
 
-    constructor(label: string, kind: PreflightTimeoutKind) {
-        const message = kind === "transport_idle"
-            ? `${label}连接长时间未收到数据`
-            : `${label}单次请求超过前端等待上限`;
-        super(message);
+    constructor(label: string) {
+        super(`${label}连接长时间未收到数据`);
         this.name = "PreflightTimeoutError";
-        this.code = kind === "transport_idle"
-            ? "PREFLIGHT_TRANSPORT_TIMEOUT"
-            : "PREFLIGHT_ATTEMPT_TIMEOUT";
-        this.timeoutKind = kind;
     }
 }
 
@@ -1805,26 +1752,22 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
         const controller = new AbortController();
         const unlinkRootAbort = linkGenerationAbort(controller);
         config.setController(controller);
-        let attemptTimer: ReturnType<typeof setTimeout> | undefined;
         let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
 
         const clearAttemptTimers = () => {
-            if (attemptTimer) clearTimeout(attemptTimer);
             if (transportIdleTimer) clearTimeout(transportIdleTimer);
-            attemptTimer = undefined;
             transportIdleTimer = undefined;
         };
-        const abortForTimeout = (kind: PreflightTimeoutKind) => {
+        const abortForTransportIdle = () => {
             if (!controller.signal.aborted) {
-                controller.abort(new PreflightTimeoutError(config.label, kind));
+                controller.abort(new PreflightTimeoutError(config.label));
             }
         };
-        attemptTimer = setTimeout(() => abortForTimeout("attempt_deadline"), PREFLIGHT_ATTEMPT_MS);
         const recordTransportActivity = () => {
             if (controller.signal.aborted) return;
             if (transportIdleTimer) clearTimeout(transportIdleTimer);
             transportIdleTimer = setTimeout(
-                () => abortForTimeout("transport_idle"),
+                abortForTransportIdle,
                 PREFLIGHT_TRANSPORT_IDLE_MS,
             );
         };
@@ -1841,15 +1784,6 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             appendGenLog(`· ${config.label}${reason}，${delay / 1000}s 后继续对账 (${failures}/${PREFLIGHT_RETRIES})...`);
             await waitForNextAttempt(delay);
         };
-        const handlePreflightTimeout = async (error: PreflightTimeoutError) => {
-            if (error.timeoutKind === "attempt_deadline") {
-                appendGenLog(`↻ ${config.label}单次连接已轮换，继续等待服务端结果...`);
-                await waitForNextAttempt(1_000);
-                return;
-            }
-            await retry(error, "连接静默");
-        };
-
         try {
             let response: Response;
             try {
@@ -1869,7 +1803,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 const abortError = preflightAbortError(controller);
                 if (abortError) {
                     if (abortError instanceof PreflightTimeoutError) {
-                        await handlePreflightTimeout(abortError);
+                        await retry(abortError, "连接静默");
                         continue;
                     }
                     throw abortError;
@@ -1951,7 +1885,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 const abortError = preflightAbortError(controller);
                 if (abortError) {
                     if (abortError instanceof PreflightTimeoutError) {
-                        await handlePreflightTimeout(abortError);
+                        await retry(abortError, "连接静默");
                         continue;
                     }
                     throw abortError;
@@ -2003,7 +1937,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
             const abortError = preflightAbortError(controller);
             if (abortError instanceof PreflightTimeoutError) {
-                await handlePreflightTimeout(abortError);
+                await retry(abortError, "连接静默");
                 continue;
             }
             if (abortError) throw abortError;
@@ -2677,6 +2611,8 @@ export async function startGenerate(
 
     if (!resumePrepared) {
         lastGenParams = { userPrompt, coreType, version };
+        const skillIds = [...selected];
+        recordPromptHistory({prompt: userPrompt, coreType, version, skillIds});
 
         resetGenTask();
         genTask.userPrompt = userPrompt;
@@ -2686,7 +2622,7 @@ export async function startGenerate(
         // ── Phase 1: create taskId (mode1, only for a genuinely new task) ──
         try {
             setPhase("planning", "正在创建任务...");
-            const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds: [...selected] });
+            const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds });
             genTask.taskId = initResult.taskId;
             fetchMe(); // 扣费后刷新顶栏剩余额度
         } catch (e: any) {

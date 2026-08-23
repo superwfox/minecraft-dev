@@ -70,6 +70,12 @@ export function removeSkill(id: string) {
     if (i >= 0) { selected.splice(i, 1); persist(); }
 }
 
+export function setSelectedSkills(ids: string[]) {
+    const next = [...new Set(ids.filter(id => typeof id === "string" && !!id.trim()).map(id => id.trim()))];
+    selected.splice(0, selected.length, ...next);
+    persist();
+}
+
 export function toggleSkill(id: string) {
     if (isSelected(id)) removeSkill(id); else addSkill(id);
 }

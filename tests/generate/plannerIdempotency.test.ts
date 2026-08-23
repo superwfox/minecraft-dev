@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { getSkillBundles } from "../../functions/_lib/skills";
 import {
     PLANNER_LEASE_MS,
-    PLANNER_OPERATION_TIMEOUT_MS,
-    PLANNER_PREPARATION_TIMEOUT_MS,
+    PLANNER_LEASE_RENEW_MS,
     PLANNER_UPSTREAM_TIMEOUT_MS,
     shouldReusePersistedPlannerResult,
 } from "../../functions/api/generate/plan";
@@ -73,12 +72,10 @@ describe("Planner refresh resume state", () => {
     });
 });
 
-describe("Planner Skill deadline", () => {
-    it("returns before Cloudflare's proxy read timeout and keeps the lease longer", () => {
-        expect(PLANNER_PREPARATION_TIMEOUT_MS).toBeLessThan(PLANNER_OPERATION_TIMEOUT_MS);
-        expect(PLANNER_UPSTREAM_TIMEOUT_MS).toBeLessThan(PLANNER_OPERATION_TIMEOUT_MS);
-        expect(PLANNER_OPERATION_TIMEOUT_MS).toBeLessThan(125_000);
-        expect(PLANNER_LEASE_MS).toBeGreaterThan(PLANNER_OPERATION_TIMEOUT_MS);
+describe("Planner dynamic deadlines", () => {
+    it("renews the execution lease before it expires", () => {
+        expect(PLANNER_LEASE_RENEW_MS).toBeLessThan(PLANNER_LEASE_MS);
+        expect(PLANNER_UPSTREAM_TIMEOUT_MS).toBeLessThan(PLANNER_LEASE_MS);
         expect(PLANNER_LEASE_MS).toBeLessThan(125_000);
     });
 

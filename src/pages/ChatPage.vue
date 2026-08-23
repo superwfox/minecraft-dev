@@ -211,6 +211,56 @@
                 @click="undoFormattedPrompt"
               ><Undo2 :size="16"/></button>
               <div class="composer-spacer"></div>
+              <div ref="promptHistoryRootEl" class="prompt-history-control">
+                <button
+                  type="button"
+                  class="action-btn icon-action history-trigger"
+                  :class="{ on: promptHistoryOpen }"
+                  :disabled="!canOpenPromptHistory"
+                  :title="promptHistoryTriggerTitle"
+                  aria-label="提示词历史"
+                  :aria-expanded="promptHistoryOpen"
+                  @click="togglePromptHistory"
+                ><Clock3 :size="16"/></button>
+                <Transition name="prompt-history-popover">
+                  <section v-if="promptHistoryOpen" class="prompt-history-menu" aria-label="提示词历史">
+                    <div class="prompt-history-head">
+                      <strong>提示词历史</strong>
+                      <span>{{ promptHistory.length }} 条</span>
+                    </div>
+                    <div class="prompt-history-list">
+                      <div v-for="entry in promptHistory" :key="entry.id" class="prompt-history-row">
+                        <button
+                          type="button"
+                          class="prompt-history-main"
+                          title="载入此提示词"
+                          @click="loadHistoryPrompt(entry)"
+                        >
+                          <span class="prompt-history-text">{{ entry.prompt }}</span>
+                          <span class="prompt-history-meta">{{ promptHistoryMeta(entry) }}</span>
+                        </button>
+                        <div class="prompt-history-actions">
+                          <button
+                            type="button"
+                            class="prompt-history-icon"
+                            :disabled="!canReplayPromptHistory"
+                            :title="canReplayPromptHistory ? '重新调用' : '请先重置当前任务'"
+                            aria-label="重新调用"
+                            @click="replayHistoryPrompt(entry)"
+                          ><Play :size="15"/></button>
+                          <button
+                            type="button"
+                            class="prompt-history-icon"
+                            title="删除记录"
+                            aria-label="删除记录"
+                            @click="deleteHistoryPrompt(entry.id)"
+                          ><X :size="15"/></button>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </Transition>
+              </div>
               <button class="action-btn icon-action refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部" aria-label="重置全部">
                 <RotateCcw :size="16"/>
               </button>
@@ -282,7 +332,7 @@ import ClarifyCards from "../components/ClarifyCards.vue";
 import MarkdownComposer from "../components/MarkdownComposer.vue";
 import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
-import {selectedBriefs, removeSkill, selected, trayOpen, toggleTray} from "../logic/skills";
+import {selectedBriefs, removeSkill, selected, setSelectedSkills, trayOpen, toggleTray} from "../logic/skills";
 import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting, restoreGenTask} from "../logic/generateState";
 import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
@@ -291,6 +341,12 @@ import {hasDeepSeekKey, openDeepSeekKeyModal} from "../logic/byok";
 import type {ActionMessageKind, ActionMessageMeta} from "../logic/actionMessages";
 import {clearSession, persistSession} from "../logic/sessionPersist";
 import {
+    loadPromptHistory,
+    promptHistory,
+    removePromptHistoryEntry,
+} from "../logic/promptHistory";
+import type {PromptHistoryEntry} from "../logic/promptHistory";
+import {
     ArrowDownToLine,
     Blocks,
     BrainCircuit,
@@ -298,6 +354,7 @@ import {
     ChevronUp,
     CircleAlert,
     CircleCheck,
+    Clock3,
     Info,
     KeyRound,
     Layers3,
@@ -325,7 +382,9 @@ const lastSubmitted = ref(""); // 记住上次提交的需求，ESC 中断后恢
 const sending = ref(false);
 const composerEl = ref<{ focusEnd: () => void } | null>(null);
 const liveBodyEl = ref<HTMLElement | null>(null);
+const promptHistoryRootEl = ref<HTMLElement | null>(null);
 const livePinned = ref(true);
+const promptHistoryOpen = ref(false);
 const showResetModal = ref(false);
 const resetting = ref(false);
 const resetError = ref("");
@@ -696,6 +755,17 @@ const composerDisabled = computed(() =>
     || !!selectingBlock.value
     || generationWorkActive.value
 );
+const canOpenPromptHistory = computed(() => !composerDisabled.value && promptHistory.length > 0);
+const canReplayPromptHistory = computed(() =>
+    canOpenPromptHistory.value
+    && genTask.phase === "idle"
+    && !genTask.taskId
+    && !activeDraft.value
+    && !selectingBlock.value
+);
+const promptHistoryTriggerTitle = computed(() =>
+    promptHistory.length > 0 ? "提示词历史" : "暂无提示词历史"
+);
 const composerPlaceholder = computed(() =>
     composerDisabled.value
         ? (clarifyWaiting.value || pathGateWaiting.value || genTask.phase === "awaiting_input"
@@ -811,8 +881,17 @@ watch(
 );
 
 watch(composerDisabled, (disabled) => {
-    if (disabled) trayOpen.value = false;
+    if (disabled) {
+        trayOpen.value = false;
+        promptHistoryOpen.value = false;
+    }
 }, { immediate: true });
+
+loadPromptHistory();
+
+watch(trayOpen, (open) => {
+    if (open) promptHistoryOpen.value = false;
+});
 
 const canRefresh = computed(() => !showResetModal.value && !resetting.value);
 
@@ -938,6 +1017,7 @@ async function send() {
     if (!text || composerDisabled.value) return;
     resetFormatOffer(true, true);
     trayOpen.value = false;
+    promptHistoryOpen.value = false;
     lastSubmitted.value = text;
     inputText.value = "";
     sending.value = true;
@@ -952,6 +1032,58 @@ async function send() {
     } finally {
         sending.value = false;
     }
+}
+
+const historyTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+});
+
+function promptHistoryMeta(entry: PromptHistoryEntry): string {
+    const parts = [entry.coreType, entry.version];
+    if (entry.skillIds.length > 0) parts.push(`${entry.skillIds.length} 个技能`);
+    parts.push(historyTimeFormatter.format(entry.lastUsedAt));
+    return parts.join(" · ");
+}
+
+function togglePromptHistory() {
+    if (!canOpenPromptHistory.value) return;
+    trayOpen.value = false;
+    promptHistoryOpen.value = !promptHistoryOpen.value;
+}
+
+function loadHistoryPrompt(entry: PromptHistoryEntry) {
+    if (composerDisabled.value) return;
+    promptHistoryOpen.value = false;
+    resetFormatOffer(true, true);
+    inputText.value = entry.prompt;
+    nextTick(() => composerEl.value?.focusEnd());
+}
+
+function replayHistoryPrompt(entry: PromptHistoryEntry) {
+    if (!canReplayPromptHistory.value) return;
+    promptHistoryOpen.value = false;
+    trayOpen.value = false;
+    resetFormatOffer(true, true);
+    inputText.value = "";
+    lastSubmitted.value = entry.prompt;
+    setSelectedSkills(entry.skillIds);
+    startGenerate(entry.prompt, entry.coreType, entry.version).catch(() => {});
+}
+
+function deleteHistoryPrompt(id: string) {
+    removePromptHistoryEntry(id);
+    if (promptHistory.length === 0) promptHistoryOpen.value = false;
+}
+
+function onDocumentPointerDown(event: PointerEvent) {
+    if (!promptHistoryOpen.value) return;
+    const target = event.target;
+    if (target instanceof Node && promptHistoryRootEl.value?.contains(target)) return;
+    promptHistoryOpen.value = false;
 }
 
 function sendExtra() {
@@ -1051,6 +1183,11 @@ function onTrayEscapeCapture(e: KeyboardEvent) {
 // ── ESC 撤回中断：覆盖 Chat 分析与完整生成链路 ──
 function onKeydown(e: KeyboardEvent) {
     if (e.key !== "Escape") return;
+    if (promptHistoryOpen.value) {
+        e.preventDefault();
+        promptHistoryOpen.value = false;
+        return;
+    }
     if (trayOpen.value) {
         e.preventDefault();
         trayOpen.value = false;
@@ -1076,6 +1213,7 @@ onMounted(() => {
     window.addEventListener("keydown", onTrayEscapeCapture, true);
     window.addEventListener("keydown", onKeydown);
     window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("pointerdown", onDocumentPointerDown);
 
     if (genTask.phase === "idle" && !genTask.taskId) {
         restoreGenTask();
@@ -1090,6 +1228,7 @@ onBeforeUnmount(() => {
     window.removeEventListener("keydown", onTrayEscapeCapture, true);
     window.removeEventListener("keydown", onKeydown);
     window.removeEventListener("pagehide", onPageHide);
+    document.removeEventListener("pointerdown", onDocumentPointerDown);
     trayOpen.value = false;
     cancelCurrentWork();
     persistSession();
@@ -1497,6 +1636,148 @@ watch(() => genTask.phase, (p) => {
   border-top: 1px solid rgba(232, 227, 217, 0.09);
 }
 .composer-spacer { flex: 1; }
+
+.prompt-history-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+.history-trigger.on {
+  border-color: rgba(198, 176, 125, 0.66);
+  background: rgba(198, 176, 125, 0.08);
+  color: #d5c9ac;
+}
+.prompt-history-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  z-index: 60;
+  width: min(460px, calc(100vw - 64px));
+  max-height: min(370px, calc(100vh - 220px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(232, 227, 217, 0.22);
+  border-radius: 8px;
+  background: rgba(14, 14, 12, 0.98);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.52);
+}
+.prompt-history-head {
+  flex: 0 0 auto;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(232, 227, 217, 0.1);
+}
+.prompt-history-head strong {
+  color: rgba(244, 241, 236, 0.94);
+  font-size: 13px;
+  font-weight: 700;
+}
+.prompt-history-head span {
+  color: rgba(232, 227, 217, 0.48);
+  font-size: 11px;
+}
+.prompt-history-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.prompt-history-row {
+  min-height: 78px;
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid rgba(232, 227, 217, 0.075);
+}
+.prompt-history-row:last-child {
+  border-bottom: 0;
+}
+.prompt-history-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 12px 11px 14px;
+  border: 0;
+  background: transparent;
+  color: rgba(244, 241, 236, 0.88);
+  text-align: left;
+  cursor: pointer;
+}
+.prompt-history-main:hover {
+  background: rgba(232, 227, 217, 0.045);
+}
+.prompt-history-main:focus-visible,
+.prompt-history-icon:focus-visible {
+  outline: 2px solid rgba(213, 201, 172, 0.72);
+  outline-offset: -2px;
+}
+.prompt-history-text {
+  width: 100%;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.prompt-history-meta {
+  max-width: 100%;
+  overflow: hidden;
+  color: rgba(232, 227, 217, 0.46);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prompt-history-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 10px 10px 0;
+}
+.prompt-history-icon {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(232, 227, 217, 0.14);
+  border-radius: 5px;
+  background: rgba(5, 5, 4, 0.62);
+  color: rgba(232, 227, 217, 0.66);
+  cursor: pointer;
+}
+.prompt-history-icon:hover:not(:disabled) {
+  border-color: rgba(209, 200, 182, 0.46);
+  background: rgba(209, 200, 182, 0.07);
+  color: #f4f1ec;
+}
+.prompt-history-icon:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.prompt-history-popover-enter-active,
+.prompt-history-popover-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  transform-origin: right bottom;
+}
+.prompt-history-popover-enter-from,
+.prompt-history-popover-leave-to {
+  opacity: 0;
+  transform: translateY(6px) scale(0.985);
+}
 
 .composer-mode {
   display: inline-flex;

@@ -5,7 +5,6 @@ import { isClientCancelled } from "./clientAbort";
 export const PREFLIGHT_UPSTREAM_FIRST_CHUNK_MS = 30_000;
 export const PREFLIGHT_UPSTREAM_IDLE_MS = 5_000;
 export const PREFLIGHT_HEARTBEAT_MS = 2_000;
-export const PREFLIGHT_OPERATION_MS = 360_000;
 export const PREFLIGHT_STATE_FINALIZE_MS = 5_000;
 export const PREFLIGHT_TERMINAL_WRITE_MS = 3_000;
 export const PREFLIGHT_LEASE_MS = 120_000;
