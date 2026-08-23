@@ -18,6 +18,11 @@
         </span>
       </div>
       <div class="toolbar-right" v-if="!blueprint">
+        <button type="button" class="tb-btn export" :disabled="!state.files.length || exportState === 'packing'"
+                @click="exportRawZip" :title="exportTitle">
+          <Download :size="14" :stroke-width="1.8" aria-hidden="true"/>
+          <span>下载</span>
+        </button>
         <button class="tb-btn" :disabled="!dirtyCount" @click="onSave" title="保存全部 (⌘S)">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
             <path d="M11 2H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V5l-3-3Zm0 2.5L13.5 7H10V4.5h1ZM4 4h5v3a1 1 0 0 0 1 1h3v4H4V4Zm2 6h6v1H6v-1Zm0-2h6v1H6V8Z"/>
@@ -114,6 +119,7 @@
 <script setup lang="ts">
 import {onMounted, onBeforeUnmount, computed, ref} from "vue";
 import {useRoute, useRouter} from "vue-router";
+import {Download} from "lucide-vue-next";
 import FileTree from "../components/FileTree.vue";
 import EditorPanel from "../components/EditorPanel.vue";
 import TabBar from "../components/TabBar.vue";
@@ -146,6 +152,81 @@ const langLabel = computed(() => {
     const ext = (currentFile.value?.path || "").split(".").pop()?.toUpperCase() || "TXT";
     return ext;
 });
+
+type ExportState = "idle" | "packing" | "done" | "error";
+const exportState = ref<ExportState>("idle");
+const exportTitle = computed(() => {
+    if (exportState.value === "packing") return "正在打包 raw.zip";
+    if (exportState.value === "done") return "已导出 raw.zip";
+    if (exportState.value === "error") return "项目导出失败，请重试";
+    return "导出当前项目源码为 raw.zip";
+});
+let exportFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+function safeZipEntryPath(input: string): string {
+    const normalized = input.replace(/\\/g, "/");
+    if (!normalized || normalized.includes("\0") || normalized.startsWith("/") || /^[a-z]:\//i.test(normalized)) {
+        throw new Error(`无法导出非法项目路径：${input}`);
+    }
+    const segments = normalized.split("/");
+    if (segments.some(segment => !segment || segment === "." || segment === "..")) {
+        throw new Error(`无法导出非法项目路径：${input}`);
+    }
+    return segments.join("/");
+}
+
+function showExportFeedback(stateValue: Exclude<ExportState, "idle" | "packing">) {
+    if (exportFeedbackTimer) clearTimeout(exportFeedbackTimer);
+    exportState.value = stateValue;
+    exportFeedbackTimer = setTimeout(() => {
+        exportState.value = "idle";
+        exportFeedbackTimer = undefined;
+    }, stateValue === "done" ? 1_600 : 3_000);
+}
+
+async function exportRawZip() {
+    if (!state.files.length || exportState.value === "packing") return;
+    if (exportFeedbackTimer) clearTimeout(exportFeedbackTimer);
+    exportFeedbackTimer = undefined;
+    exportState.value = "packing";
+
+    try {
+        const {default: JSZip} = await import("jszip");
+        const zip = new JSZip();
+        const paths = new Set<string>();
+        for (const file of state.files) {
+            const path = safeZipEntryPath(file.path);
+            const pathKey = path.toLocaleLowerCase("en-US");
+            if (paths.has(pathKey)) throw new Error(`项目包含重复文件路径：${file.path}`);
+            paths.add(pathKey);
+            zip.file(path, file.content, {
+                createFolders: true,
+                date: new Date(file.updatedAt || Date.now()),
+            });
+        }
+        const blob = await zip.generateAsync({
+            type: "blob",
+            compression: "DEFLATE",
+            compressionOptions: {level: 6},
+            platform: "UNIX",
+        });
+        const url = URL.createObjectURL(blob);
+        try {
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = "raw.zip";
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+        } finally {
+            setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        }
+        showExportFeedback("done");
+    } catch (error) {
+        console.error("IDE project export failed", error);
+        showExportFeedback("error");
+    }
+}
 
 // ---- 动态补全：pom.xml 检测 + JAR 拉取 ----
 const pomStatus = ref<LoadStatus | null>(null);
@@ -258,6 +339,7 @@ onBeforeUnmount(() => {
     window.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mousemove", onResizeMove);
     document.removeEventListener("mouseup", stopResize);
+    if (exportFeedbackTimer) clearTimeout(exportFeedbackTimer);
 });
 
 function onKey(e: KeyboardEvent) {

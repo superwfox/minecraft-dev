@@ -59,12 +59,14 @@ import {
 } from "../../_lib/clientAbort";
 
 export const PLANNER_PREPARATION_TIMEOUT_MS = 20_000;
-export const PLANNER_UPSTREAM_TIMEOUT_MS = 100_000;
-// Cloudflare 代理默认约 125s 无响应会返回 524；整体 deadline 需预留足够时间返回结构化 504。
+// 首段推理允许较长冷启动；一旦开始流式返回，连续静默 5s 即视为上游链路失活。
+export const PLANNER_UPSTREAM_TIMEOUT_MS = 30_000;
+export const PLANNER_UPSTREAM_IDLE_MS = 5_000;
+export const PLANNER_HEARTBEAT_MS = 2_000;
+// Cloudflare 代理读取窗口约 125s；动态空闲检测负责提前识别停滞并触发下一次恢复。
 export const PLANNER_OPERATION_TIMEOUT_MS = 110_000;
-// 整段 deadline 必须短于租约；即使后台释放失败，重试也只需等待短暂的剩余租期。
+// 租约需覆盖整次服务端操作，同时保留返回终态和释放执行权的时间。
 export const PLANNER_LEASE_MS = 120_000;
-const PLANNER_UPSTREAM_IDLE_MS = PLANNER_UPSTREAM_TIMEOUT_MS;
 
 interface Env {
     DB?: D1Database;
@@ -248,6 +250,7 @@ async function consumePlannerChatStream(
             .trim();
         if (!payload) return;
         if (payload === "[DONE]") {
+            callbacks.onActivity?.();
             upstreamDone = true;
             return;
         }
@@ -268,6 +271,7 @@ async function consumePlannerChatStream(
             throw new Error(message || "Model stream failed");
         }
         if (chunk?.usage) {
+            callbacks.onActivity?.();
             usage = chunk.usage as UsageBreakdown;
             await callbacks.onUsage?.(usage);
         }
@@ -281,15 +285,20 @@ async function consumePlannerChatStream(
         );
         const outputDelta = plannerStreamText(delta.content);
         if (thinkingDelta) {
+            callbacks.onActivity?.();
             thinking += thinkingDelta;
             await callbacks.onThinking?.(thinkingDelta);
         }
         if (outputDelta) {
+            callbacks.onActivity?.();
             content += outputDelta;
             await callbacks.onOutput?.(outputDelta);
         }
 
         const rawCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+        if (rawCalls.length > 0 || chunk?.choices?.[0]?.finish_reason != null) {
+            callbacks.onActivity?.();
+        }
         for (let fallbackIndex = 0; fallbackIndex < rawCalls.length; fallbackIndex++) {
             const rawCall = rawCalls[fallbackIndex];
             const parsedIndex = Number(rawCall?.index);
@@ -330,7 +339,6 @@ async function consumePlannerChatStream(
         while (!upstreamDone) {
             const { value, done } = await reader.read();
             if (done) break;
-            callbacks.onActivity?.();
             buffer += decoder.decode(value, { stream: true });
             await consumeBufferedEvents();
         }
@@ -539,7 +547,12 @@ function createPlannerDeadline(timeoutMs: number, message: string, parent?: Abor
     };
 }
 
-function createPlannerIdleDeadline(timeoutMs: number, message: string, parent?: AbortSignal) {
+function createPlannerIdleDeadline(
+    firstChunkTimeoutMs: number,
+    idleTimeoutMs: number,
+    message: string,
+    parent?: AbortSignal,
+) {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abortFromParent = () => {
@@ -547,7 +560,7 @@ function createPlannerIdleDeadline(timeoutMs: number, message: string, parent?: 
             controller.abort(parent?.reason instanceof Error ? parent.reason : new PlannerTimeoutError(message));
         }
     };
-    const arm = () => {
+    const armFor = (timeoutMs: number) => {
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
             if (!controller.signal.aborted) controller.abort(new PlannerTimeoutError(message));
@@ -555,10 +568,12 @@ function createPlannerIdleDeadline(timeoutMs: number, message: string, parent?: 
     };
     if (parent?.aborted) abortFromParent();
     else parent?.addEventListener("abort", abortFromParent, { once: true });
-    arm();
+    armFor(firstChunkTimeoutMs);
     return {
         signal: controller.signal,
-        arm,
+        arm() {
+            armFor(idleTimeoutMs);
+        },
         dispose() {
             if (timer) clearTimeout(timer);
             parent?.removeEventListener("abort", abortFromParent);
@@ -1060,7 +1075,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     try { abortOnWriteFailure(operationAbort, error, "Planner client disconnected"); }
                     catch { /* operation signal carries the cancellation */ }
                 });
-            }, 12000);
+            }, PLANNER_HEARTBEAT_MS);
             let resultCommitted = false;
             let attemptBillingCommitted = false;
             let knownUsage: UsageBreakdown | undefined;
@@ -1123,6 +1138,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     operationAbort,
                 );
                 const upstreamDeadline = createPlannerIdleDeadline(
+                    PLANNER_UPSTREAM_TIMEOUT_MS,
                     PLANNER_UPSTREAM_IDLE_MS,
                     "Planner 模型响应空闲超时",
                     operationDeadline.signal,
@@ -1164,7 +1180,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         );
                         return;
                     }
-                    upstreamDeadline.arm();
                     streamed = await withPlannerDeadline(
                         () => consumePlannerChatStream(resp, {
                             onActivity: upstreamDeadline.arm,

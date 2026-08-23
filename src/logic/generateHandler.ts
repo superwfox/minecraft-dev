@@ -300,140 +300,271 @@ function createBuildRequestId(): string {
     return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-async function postPlanner(body: any, waitMs = 390_000): Promise<any> {
+// 单次等待匹配服务端代理窗口；5s 动态 watchdog 可提前刷新静默链路，总恢复窗口放宽到 30 分钟。
+const PLANNER_CLIENT_WAIT_MS = 1_800_000;
+const PLANNER_ATTEMPT_MS = 120_000;
+const PLANNER_TRANSPORT_IDLE_MS = 5_000;
+const PLANNER_CONNECTION_RETRIES = 3;
+
+class PlannerTransportTimeoutError extends Error {
+    readonly code = "PLANNER_TRANSPORT_TIMEOUT";
+    readonly retryable = true;
+
+    constructor() {
+        super("Planner SSE 连接 5 秒未收到任何数据");
+        this.name = "PlannerTransportTimeoutError";
+    }
+}
+
+type PlannerDeadlineKind = "attempt_deadline" | "overall_deadline";
+
+class PlannerDeadlineTimeoutError extends Error {
+    readonly code: "PLANNER_ATTEMPT_TIMEOUT" | "PLANNER_OVERALL_TIMEOUT";
+    readonly retryable: boolean;
+    readonly timeoutKind: PlannerDeadlineKind;
+
+    constructor(kind: PlannerDeadlineKind) {
+        super(kind === "attempt_deadline"
+            ? "Planner 单次连接超过前端等待上限"
+            : "Planner 超过前端总等待上限，请重试");
+        this.name = "PlannerDeadlineTimeoutError";
+        this.code = kind === "attempt_deadline"
+            ? "PLANNER_ATTEMPT_TIMEOUT"
+            : "PLANNER_OVERALL_TIMEOUT";
+        this.retryable = kind === "attempt_deadline";
+        this.timeoutKind = kind;
+    }
+}
+
+function plannerAttemptAbortError(controller: AbortController): Error | null {
+    if (!controller.signal.aborted) return null;
+    return controller.signal.reason instanceof PlannerTransportTimeoutError
+        || controller.signal.reason instanceof PlannerDeadlineTimeoutError
+        ? controller.signal.reason
+        : null;
+}
+
+function isPlannerTimeout(code: string, status: number): boolean {
+    return code === "PLANNER_TIMEOUT"
+        || code === "CLOUDFLARE_TIMEOUT"
+        || status === 524;
+}
+
+async function postPlanner(body: any, waitMs = PLANNER_CLIENT_WAIT_MS): Promise<any> {
     const signal = generationSignal();
     const runId = generationRunId;
     const deadline = Date.now() + waitMs;
     let announcedWait = false;
     let failures = 0;
     let timeoutRetries = 0;
+    const waitForPlannerRetry = async (delayMs: number) => {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw new PlannerDeadlineTimeoutError("overall_deadline");
+        await waitWithAbort(Math.min(delayMs, remainingMs), signal);
+    };
 
     while (true) {
-        let resp: Response;
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw new PlannerDeadlineTimeoutError("overall_deadline");
+        const attemptController = new AbortController();
+        const unlinkGenerationAbort = linkGenerationAbort(attemptController);
+        let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
+        let attemptDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+        let lastTransportActivity = 0;
+
+        const attemptBudgetMs = Math.min(PLANNER_ATTEMPT_MS, remainingMs);
+        const attemptDeadlineKind: PlannerDeadlineKind = attemptBudgetMs >= remainingMs
+            ? "overall_deadline"
+            : "attempt_deadline";
+        attemptDeadlineTimer = setTimeout(() => {
+            if (!attemptController.signal.aborted) {
+                attemptController.abort(new PlannerDeadlineTimeoutError(attemptDeadlineKind));
+            }
+        }, attemptBudgetMs);
+
+        const clearTransportIdleTimer = () => {
+            if (transportIdleTimer) clearTimeout(transportIdleTimer);
+            transportIdleTimer = undefined;
+        };
+        const scheduleTransportIdleCheck = () => {
+            clearTransportIdleTimer();
+            const elapsed = Date.now() - lastTransportActivity;
+            const remaining = Math.max(1, PLANNER_TRANSPORT_IDLE_MS - elapsed);
+            transportIdleTimer = setTimeout(() => {
+                if (attemptController.signal.aborted) return;
+                if (Date.now() - lastTransportActivity < PLANNER_TRANSPORT_IDLE_MS) {
+                    scheduleTransportIdleCheck();
+                    return;
+                }
+                attemptController.abort(new PlannerTransportTimeoutError());
+            }, remaining);
+        };
+        const recordTransportActivity = () => {
+            if (attemptController.signal.aborted) return;
+            lastTransportActivity = Date.now();
+            scheduleTransportIdleCheck();
+        };
+
         try {
-            resp = await fetchWithByokFallback("/api/generate/plan", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-                signal,
-            });
-        } catch (error) {
-            if (signal.aborted || runId !== generationRunId || isInterrupt(error)) throw generationAbortError();
-            if (Date.now() >= deadline || failures++ >= 3) throw error;
-            await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
-            continue;
-        }
-
-        assertGenerationRun(runId);
-
-        await rejectAccessResponse(resp);
-        if (resp.status === 429) {
-            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-            throw noRetry(payload?.error || "请求过于频繁", {
-                code: payload?.code || "RATE_LIMITED",
-                status: resp.status,
-            });
-        }
-        if (resp.status === 409) {
-            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-            if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
-                const error = new Error(payload?.error || "Planner 状态冲突");
-                (error as any).code = payload?.code || "PLANNER_CONFLICT";
-                (error as any).status = resp.status;
-                (error as any).noRetry = true;
-                throw error;
+            let resp: Response;
+            try {
+                resp = await fetchWithByokFallback("/api/generate/plan", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                    signal: attemptController.signal,
+                });
+            } catch (error) {
+                if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+                const attemptError = plannerAttemptAbortError(attemptController) || error;
+                if (isInterrupt(attemptError)) throw generationAbortError();
+                if (attemptError instanceof PlannerDeadlineTimeoutError
+                    && attemptError.timeoutKind === "overall_deadline") throw attemptError;
+                if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
+                await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
+                continue;
             }
-            if (!announcedWait) {
-                appendGenLog("· Planner 已在服务端执行，等待现有结果...");
-                announcedWait = true;
+
+            assertGenerationRun(runId);
+
+            await rejectAccessResponse(resp);
+            if (resp.status === 429) {
+                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
+                throw noRetry(payload?.error || "请求过于频繁", {
+                    code: payload?.code || "RATE_LIMITED",
+                    status: resp.status,
+                });
             }
-            const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
-            await waitWithAbort(retrySeconds * 1000, signal);
-            continue;
-        }
-        if (resp.status === 400) {
-            const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-            throw noRetry(payload?.error || "Planner 请求无效", {
-                code: payload?.code || "PLANNER_REQUEST_INVALID",
-                status: resp.status,
-            });
-        }
-        if (!resp.ok) {
-            const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
-            const plannerTimedOut = apiError.code === "PLANNER_TIMEOUT"
-                || apiError.code === "CLOUDFLARE_TIMEOUT"
-                || resp.status === 524;
-            if (plannerTimedOut) {
-                if (Date.now() >= deadline || timeoutRetries++ >= 1) {
-                    const error = new Error(apiError.message);
-                    (error as any).code = apiError.code;
+            if (resp.status === 409) {
+                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
+                if (payload?.code !== "PLANNER_IN_PROGRESS" || Date.now() >= deadline) {
+                    const error = new Error(payload?.error || "Planner 状态冲突");
+                    (error as any).code = payload?.code || "PLANNER_CONFLICT";
                     (error as any).status = resp.status;
+                    (error as any).noRetry = true;
                     throw error;
                 }
-                const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
-                appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
-                await waitWithAbort(retrySeconds * 1000, signal);
-                continue;
-            }
-            if (Date.now() >= deadline || failures++ >= 3) throw new Error(apiError.message);
-            await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
-            continue;
-        }
-        const contentType = resp.headers.get("Content-Type") || "";
-        if (contentType.includes("text/event-stream")) {
-            let streamed: any;
-            try {
-                streamed = await readSSE(resp, { preflightStage: "plan", requireDone: true, runId });
-            } catch (error: any) {
-                if (isInterrupt(error) || signal.aborted || runId !== generationRunId) {
-                    throw generationAbortError();
+                if (!announcedWait) {
+                    appendGenLog("· Planner 已在服务端执行，等待现有结果...");
+                    announcedWait = true;
                 }
-                if (error?.noRetry || error?.terminal) throw error;
-                if (Date.now() >= deadline || failures++ >= 3) throw error;
-                const delay = 2000 * Math.pow(2, failures - 1);
-                appendGenLog(`! Planner 连接中断，${delay / 1000}s 后继续等待 (${failures}/3)...`);
-                await waitWithAbort(delay, signal);
+                const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
+                await waitForPlannerRetry(retrySeconds * 1000);
                 continue;
             }
-            if (!streamed) {
-                if (Date.now() >= deadline || failures++ >= 3) {
-                    throw new Error("Planner 流已结束，但未返回结果");
-                }
-                await waitWithAbort(2000 * Math.pow(2, failures - 1), signal);
-                continue;
+            if (resp.status === 400) {
+                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
+                throw noRetry(payload?.error || "Planner 请求无效", {
+                    code: payload?.code || "PLANNER_REQUEST_INVALID",
+                    status: resp.status,
+                });
             }
-            if (streamed.error) {
-                const status = Number(streamed.status) || 0;
-                const code = typeof streamed.code === "string" ? streamed.code : "";
-                if (code === "PLANNER_IN_PROGRESS" && Date.now() < deadline) {
-                    if (!announcedWait) {
-                        appendGenLog("· Planner 已在服务端执行，等待现有结果...");
-                        announcedWait = true;
+            if (!resp.ok) {
+                const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
+                if (isPlannerTimeout(apiError.code, resp.status)) {
+                    if (Date.now() >= deadline || timeoutRetries++ >= 1) {
+                        const error = new Error(apiError.message);
+                        (error as any).code = apiError.code;
+                        (error as any).status = resp.status;
+                        throw error;
                     }
-                    const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
-                    await waitWithAbort(retrySeconds * 1000, signal);
+                    const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
+                    appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
+                    await waitForPlannerRetry(retrySeconds * 1000);
                     continue;
                 }
-
-                const plannerError = new Error(String(streamed.error));
-                (plannerError as any).code = code;
-                (plannerError as any).status = status;
-                if (status >= 400 && status < 500) {
-                    (plannerError as any).noRetry = true;
-                    throw plannerError;
+                if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                    throw new Error(apiError.message);
                 }
-                if (Date.now() >= deadline || failures++ >= 3) throw plannerError;
-                const delay = 2000 * Math.pow(2, failures - 1);
-                appendGenLog(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/3)...`);
-                await waitWithAbort(delay, signal);
+                await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
                 continue;
             }
+            const contentType = resp.headers.get("Content-Type") || "";
+            if (contentType.includes("text/event-stream")) {
+                let streamed: any;
+                recordTransportActivity();
+                try {
+                    streamed = await readSSE(resp, {
+                        preflightStage: "plan",
+                        requireDone: true,
+                        runId,
+                        onActivity: recordTransportActivity,
+                    });
+                } catch (error: any) {
+                    if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+                    const attemptError = plannerAttemptAbortError(attemptController) || error;
+                    if (isInterrupt(attemptError)) throw generationAbortError();
+                    if (attemptError instanceof PlannerDeadlineTimeoutError
+                        && attemptError.timeoutKind === "overall_deadline") throw attemptError;
+                    if (attemptError?.noRetry || attemptError?.terminal) throw attemptError;
+                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                        throw attemptError;
+                    }
+                    const delay = 2000 * Math.pow(2, failures - 1);
+                    const reason = attemptError instanceof PlannerTransportTimeoutError
+                        ? "链路静默，正在刷新连接"
+                        : attemptError instanceof PlannerDeadlineTimeoutError
+                            ? "单次等待到期，正在刷新连接"
+                            : "连接中断";
+                    appendGenLog(`! Planner ${reason}，${delay / 1000}s 后继续等待 (${failures}/${PLANNER_CONNECTION_RETRIES})...`);
+                    await waitForPlannerRetry(delay);
+                    continue;
+                } finally {
+                    clearTransportIdleTimer();
+                }
+                if (!streamed) {
+                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                        throw new Error("Planner 流已结束，但未返回结果");
+                    }
+                    await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
+                    continue;
+                }
+                if (streamed.error) {
+                    const status = Number(streamed.status) || 0;
+                    const code = typeof streamed.code === "string" ? streamed.code : "";
+                    if (code === "PLANNER_IN_PROGRESS" && Date.now() < deadline) {
+                        if (!announcedWait) {
+                            appendGenLog("· Planner 已在服务端执行，等待现有结果...");
+                            announcedWait = true;
+                        }
+                        const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
+                        await waitForPlannerRetry(retrySeconds * 1000);
+                        continue;
+                    }
+
+                    const plannerError = new Error(String(streamed.error));
+                    (plannerError as any).code = code;
+                    (plannerError as any).status = status;
+                    if (isPlannerTimeout(code, status)) {
+                        if (Date.now() >= deadline || timeoutRetries++ >= 1) throw plannerError;
+                        const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 1);
+                        appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
+                        await waitForPlannerRetry(retrySeconds * 1000);
+                        continue;
+                    }
+                    if (status >= 400 && status < 500) {
+                        (plannerError as any).noRetry = true;
+                        throw plannerError;
+                    }
+                    if (Date.now() >= deadline || failures++ >= PLANNER_CONNECTION_RETRIES) {
+                        throw plannerError;
+                    }
+                    const delay = 2000 * Math.pow(2, failures - 1);
+                    appendGenLog(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/${PLANNER_CONNECTION_RETRIES})...`);
+                    await waitForPlannerRetry(delay);
+                    continue;
+                }
+                assertGenerationRun(runId);
+                return streamed;
+            }
+            const result = await resp.json();
             assertGenerationRun(runId);
-            return streamed;
+            return result;
+        } finally {
+            clearTransportIdleTimer();
+            if (attemptDeadlineTimer) clearTimeout(attemptDeadlineTimer);
+            unlinkGenerationAbort();
         }
-        const result = await resp.json();
-        assertGenerationRun(runId);
-        return result;
     }
 }
 
@@ -1578,7 +1709,7 @@ async function streamBucketGeneration(
 // attempt leaves network margin for terminal events while the server renews its 120s lease.
 const PREFLIGHT_WAIT_MS = 900_000;
 const PREFLIGHT_ATTEMPT_MS = 400_000;
-const PREFLIGHT_TRANSPORT_IDLE_MS = 45_000;
+const PREFLIGHT_TRANSPORT_IDLE_MS = 5_000;
 const PREFLIGHT_RETRIES = 3;
 
 type PreflightTimeoutKind = "transport_idle" | "attempt_deadline" | "overall_deadline";
@@ -1716,8 +1847,6 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                 PREFLIGHT_TRANSPORT_IDLE_MS,
             );
         };
-        recordTransportActivity();
-
         const waitForNextAttempt = async (delayMs: number) => {
             clearAttemptTimers();
             const waitRemainingMs = deadline - Date.now();
@@ -1758,7 +1887,6 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     }),
                     signal: controller.signal,
                 });
-                recordTransportActivity();
                 assertGenerationRun(runId);
             } catch (error: any) {
                 if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
@@ -1835,6 +1963,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
             }
 
             let result: any;
+            recordTransportActivity();
             try {
                 result = await readSSE(response, {
                     preflightStage: config.stage,

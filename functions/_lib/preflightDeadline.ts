@@ -2,7 +2,9 @@ import { isClientCancelled } from "./clientAbort";
 
 // Long-running preflight streams stay bounded by semantic idle detection while
 // their shorter execution lease is renewed independently.
-export const PREFLIGHT_UPSTREAM_IDLE_MS = 90_000;
+export const PREFLIGHT_UPSTREAM_FIRST_CHUNK_MS = 30_000;
+export const PREFLIGHT_UPSTREAM_IDLE_MS = 5_000;
+export const PREFLIGHT_HEARTBEAT_MS = 2_000;
 export const PREFLIGHT_OPERATION_MS = 360_000;
 export const PREFLIGHT_STATE_FINALIZE_MS = 5_000;
 export const PREFLIGHT_TERMINAL_WRITE_MS = 3_000;
@@ -55,7 +57,8 @@ export function createPreflightDeadline(
 }
 
 export function createPreflightIdleDeadline(
-    timeoutMs: number,
+    firstChunkTimeoutMs: number,
+    idleTimeoutMs: number,
     message: string,
     parent?: AbortSignal,
 ): PreflightIdleDeadline {
@@ -64,7 +67,7 @@ export function createPreflightIdleDeadline(
     const abortFromParent = () => {
         if (!controller.signal.aborted) controller.abort(deadlineReason(parent!, message));
     };
-    const arm = () => {
+    const armFor = (timeoutMs: number) => {
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
             if (!controller.signal.aborted) controller.abort(new PreflightTimeoutError(message));
@@ -72,10 +75,12 @@ export function createPreflightIdleDeadline(
     };
     if (parent?.aborted) abortFromParent();
     else parent?.addEventListener("abort", abortFromParent, { once: true });
-    arm();
+    armFor(firstChunkTimeoutMs);
     return {
         signal: controller.signal,
-        arm,
+        arm() {
+            armFor(idleTimeoutMs);
+        },
         dispose() {
             if (timer) clearTimeout(timer);
             parent?.removeEventListener("abort", abortFromParent);

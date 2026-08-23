@@ -42,6 +42,8 @@ import {
     PREFLIGHT_OPERATION_MS,
     PREFLIGHT_STATE_FINALIZE_MS,
     PREFLIGHT_TERMINAL_WRITE_MS,
+    PREFLIGHT_HEARTBEAT_MS,
+    PREFLIGHT_UPSTREAM_FIRST_CHUNK_MS,
     PREFLIGHT_UPSTREAM_IDLE_MS,
     type PreflightDeadline,
     withPreflightDeadline,
@@ -120,6 +122,7 @@ async function callReasoner(
     const ctrl = new AbortController();
     const unlinkParent = linkAbortSignal(ctrl, parentSignal);
     const idleDeadline = createPreflightIdleDeadline(
+        PREFLIGHT_UPSTREAM_FIRST_CHUNK_MS,
         PREFLIGHT_UPSTREAM_IDLE_MS,
         "需求确认模型长时间无有效输出",
         ctrl.signal,
@@ -143,7 +146,6 @@ async function callReasoner(
             idleDeadline.signal,
             "读取需求确认模型错误响应超时",
         );
-        idleDeadline.arm();
         const streamed = await withPreflightDeadline(() => consumeOpenAIChatStream(resp, {
             requireUsage,
             onThinking: async content => {
@@ -626,7 +628,7 @@ async function handleClarifyRequest(
                     operationAbort,
                     operationDeadline.signal,
                 ).catch(() => { /* operation signal carries timeout or cancellation */ });
-            }, 12_000);
+            }, PREFLIGHT_HEARTBEAT_MS);
             let resultCommitted = false;
             let resultCommitPending = false;
             let usage: UsageBreakdown | undefined;

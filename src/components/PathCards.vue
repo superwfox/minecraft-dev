@@ -252,6 +252,8 @@ async function ensureMermaid() {
     const m = (await import("mermaid")).default;
     m.initialize({
         startOnLoad: false, theme: "dark", securityLevel: "strict",
+        // Mermaid 11 的通用节点渲染器读取顶层配置；否则会生成随后被安全清理移除的 foreignObject 标签。
+        htmlLabels: false,
         flowchart: { useMaxWidth: false, htmlLabels: false, curve: "basis" },
     });
     mermaidMod = m;
@@ -611,6 +613,9 @@ onUnmounted(() => {
     will-change: transform;
 }
 .pc-preview-content :deep(svg) { max-width: none !important; height: auto; display: block; }
+.pc-preview-content :deep(svg text) {
+    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+}
 /* 强制节点文字白色 + 黑描边，保证 AI 给节点上的任何高亮色背景上都可读 */
 .pc-preview-content :deep(.nodeLabel),
 .pc-preview-content :deep(.node foreignObject div),
