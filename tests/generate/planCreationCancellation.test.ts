@@ -26,6 +26,58 @@ afterEach(() => {
 });
 
 describe("Planner task creation cancellation", () => {
+    it("returns the absolute server task expiry with a new task", async () => {
+        const now = 1_788_263_407_150;
+        const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+        try {
+            resolveLLMMock.mockResolvedValue({
+                providerId: "deepseek",
+                url: "https://model.test/chat/completions",
+                apiKey: "platform-key",
+                byok: false,
+                credentialId: "",
+                learningCacheRead: true,
+                canAutoLearn: false,
+                modelFor: () => "deepseek-v4-flash",
+            });
+            assertBoundTaskStoreSchemaMock.mockResolvedValue(undefined);
+            putTaskStateMock.mockResolvedValue(undefined);
+            cleanupExpiredTasksMock.mockResolvedValue(undefined);
+            const waits: Promise<unknown>[] = [];
+
+            const response = await plan({
+                request: new Request("https://example.test/api/generate/plan", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        userPrompt: "Build a Paper plugin",
+                        coreType: "Paper",
+                        version: "1.21.4",
+                    }),
+                }),
+                data: { uid: "user-1" },
+                env: {
+                    DB: {},
+                    TASKS: {} as KVNamespace,
+                    DEEPSEEK_API_KEY: "platform-key",
+                },
+                waitUntil(promise: Promise<unknown>) {
+                    waits.push(promise);
+                },
+            } as any);
+
+            expect(response.status).toBe(200);
+            await expect(response.json()).resolves.toMatchObject({
+                taskId: expect.any(String),
+                expiresAt: Math.floor(now / 1000) * 1000 + 3_600_000,
+            });
+            expect(waits).toHaveLength(1);
+            await Promise.all(waits);
+        } finally {
+            dateNow.mockRestore();
+        }
+    });
+
     it("deletes a task persisted while the client cancellation is pending", async () => {
         const clientAbort = new AbortController();
         let finishPersist!: () => void;

@@ -2,20 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const hasOwnedTaskMock = vi.hoisted(() => vi.fn());
 const deleteTaskMock = vi.hoisted(() => vi.fn());
+const renewOwnedTaskMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../functions/_lib/taskStore", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     hasOwnedTask: hasOwnedTaskMock,
     deleteTask: deleteTaskMock,
+    renewOwnedTask: renewOwnedTaskMock,
 }));
 
-import { onRequestDelete as deleteTaskEndpoint } from "../../functions/api/generate/task";
+import {
+    onRequestDelete as deleteTaskEndpoint,
+    onRequestPatch as renewTaskEndpoint,
+} from "../../functions/api/generate/task";
 import { TaskStoreUnavailableError } from "../../functions/_lib/taskStore";
 
-function context(taskId = "task-1", uid = "user-1"): any {
+function context(taskId = "task-1", uid = "user-1", method = "DELETE"): any {
     return {
         request: new Request(`https://example.test/api/generate/task?taskId=${taskId}`, {
-            method: "DELETE",
+            method,
         }),
         data: { uid },
         env: { TASKS: {} as KVNamespace },
@@ -61,5 +66,29 @@ describe("DELETE /api/generate/task", () => {
         expect(response.status).toBe(401);
         expect(hasOwnedTaskMock).not.toHaveBeenCalled();
         expect(deleteTaskMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("PATCH /api/generate/task", () => {
+    it("renews an owned task and returns its absolute expiry", async () => {
+        const expiresAt = Date.UTC(2026, 8, 1, 9, 0, 0);
+        renewOwnedTaskMock.mockResolvedValue(expiresAt);
+
+        const response = await renewTaskEndpoint(context("task-1", "user-1", "PATCH"));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ expiresAt });
+        expect(renewOwnedTaskMock).toHaveBeenCalledWith(expect.anything(), "task-1", "user-1");
+    });
+
+    it("returns TASK_NOT_FOUND when the task cannot be renewed", async () => {
+        renewOwnedTaskMock.mockResolvedValue(null);
+
+        const response = await renewTaskEndpoint(context("task-expired", "user-1", "PATCH"));
+
+        expect(response.status).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+            code: "TASK_NOT_FOUND",
+        });
     });
 });

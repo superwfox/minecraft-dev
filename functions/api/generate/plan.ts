@@ -48,6 +48,7 @@ import {
     putTaskWithPlannerLease,
     releaseTaskPlannerLease,
     renewTaskPlannerLease,
+    TASK_STATE_TTL_SECONDS,
     TaskStoreUnavailableError,
 } from "../../_lib/taskStore";
 import { preflightOperations } from "../../_lib/preflightOperations";
@@ -677,11 +678,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 skills,
                 logs: ["任务已创建，进入澄清阶段"],
             };
-            await putTaskState(context.env, taskId, state, 3600, uid);
+            await putTaskState(context.env, taskId, state, TASK_STATE_TTL_SECONDS, uid);
             persistedTaskId = taskId;
             assertClientActive();
             context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
-            return new Response(JSON.stringify({ taskId }), {
+            const expiresAt = Math.floor(Date.now() / 1000) * 1000
+                + TASK_STATE_TTL_SECONDS * 1000;
+            return new Response(JSON.stringify({ taskId, expiresAt }), {
                 headers: { "Content-Type": "application/json" },
             });
         } catch (error) {
@@ -698,7 +701,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // ─── Mode 2: finalize plan using reasoner + clarify answers ───
     const taskId = body.taskId as string;
     const raw = await getOwnedTask(context.env, taskId, uid);
-    if (!raw) return new Response("Task not found", { status: 404 });
+    if (!raw) {
+        return new Response(JSON.stringify({
+            error: "任务已超过有效期或不存在，请重新开始生成",
+            code: "TASK_NOT_FOUND",
+        }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
     const llm = await resolveTaskLLM(context, JSON.parse(raw));
     if (!llm) return deepSeekKeyRequiredResponse();
     if (!llm.apiKey) return new Response("API key not configured", { status: 500 });

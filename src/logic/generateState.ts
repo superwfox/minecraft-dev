@@ -433,6 +433,7 @@ export type ClarifyRound = {
 
 export type GenTask = {
     taskId: string;
+    taskExpiresAt: number;
     phase: GenPhase;
     interruptedFrom: Exclude<GenPhase, "interrupted"> | "";
     userPrompt: string;   // 原始需求（持久化用：刷新后重试/续跑）
@@ -485,6 +486,7 @@ export type GenTask = {
 
 export const genTask = reactive<GenTask>({
     taskId: "",
+    taskExpiresAt: 0,
     phase: "idle",
     interruptedFrom: "",
     userPrompt: "",
@@ -630,6 +632,7 @@ export function recordLearningDebugEvent(
 
 export function resetGenTask() {
     genTask.taskId = "";
+    genTask.taskExpiresAt = 0;
     genTask.phase = "idle";
     genTask.interruptedFrom = "";
     genTask.userPrompt = "";
@@ -683,6 +686,19 @@ export function resetGenTask() {
     clearPersistedGenTask();
 }
 
+/** Drop server-backed state while retaining enough input for an explicit fresh retry. */
+export function discardExpiredGenTask() {
+    const userPrompt = genTask.userPrompt;
+    const coreType = genTask.coreType;
+    const version = genTask.version;
+    const logs = genTask.logs.slice(-200);
+    resetGenTask();
+    genTask.userPrompt = userPrompt;
+    genTask.coreType = coreType;
+    genTask.version = version;
+    genTask.logs = logs;
+}
+
 // 超级并发开关：默认 false（每个请求推进一个文件阶段并立即保存）。
 // 开启后可并行推进多个文件阶段；单个阶段失败不会清空该文件此前进度。
 // 用户偏好，持久化到 localStorage。
@@ -698,6 +714,7 @@ export function setSuperConcurrency(on: boolean) {
 // ── 生成态持久化：刷新不丢会话（taskID 的职责是重建会话，而非刷新即失败）──
 // 快照存 localStorage（不含文件正文，保持体积小；正文在后端 KV，续跑时按需重取）。
 const GEN_KEY = "tahai-gentask";
+export const GEN_TASK_TTL_MS = 3_600_000;
 let persistTimer: any = null;
 
 function writeGenTaskSnapshot() {
@@ -714,6 +731,7 @@ function writeGenTaskSnapshot() {
         }
         const snap = {
             taskId: genTask.taskId,
+            taskExpiresAt: genTask.taskExpiresAt,
             phase: genTask.phase,
             interruptedFrom: genTask.interruptedFrom,
             userPrompt: genTask.userPrompt,
@@ -789,10 +807,18 @@ export function restoreGenTask(): boolean {
             && (s.phase === "planning"
                 || (s.phase === "interrupted" && s.interruptedFrom === "planning"));
         if (!s.taskId && !canRestartModeOne) return false;
-        if (s.t && Date.now() - s.t > 3600_000) { localStorage.removeItem(GEN_KEY); return false; } // 超 KV TTL 作废
+        const snapshotTime = optionalCount(s.t) ?? 0;
+        const taskExpiresAt = optionalCount(s.taskExpiresAt)
+            ?? (s.taskId && snapshotTime ? snapshotTime + GEN_TASK_TTL_MS : 0);
+        // 服务端后续写入可能已延长 TTL；有 taskId 时必须在继续前由续期接口最终裁决。
+        if (!s.taskId && snapshotTime && Date.now() - snapshotTime > GEN_TASK_TTL_MS) {
+            localStorage.removeItem(GEN_KEY);
+            return false;
+        }
         const storedPhase = s.phase as GenPhase;
         const restoredFromActive = !["done", "error", "interrupted"].includes(storedPhase);
         genTask.taskId = s.taskId || "";
+        genTask.taskExpiresAt = taskExpiresAt;
         genTask.phase = restoredFromActive ? "interrupted" : storedPhase;
         genTask.interruptedFrom = restoredFromActive
             ? storedPhase as Exclude<GenPhase, "interrupted">
@@ -870,7 +896,7 @@ export function restoreGenTask(): boolean {
 
 // genTask 关键字段变化 → 防抖落盘
 watch(
-    () => [genTask.phase, genTask.interruptedFrom, genTask.files.length, genTask.currentIndex, genTask.logs.length,
+    () => [genTask.taskExpiresAt, genTask.phase, genTask.interruptedFrom, genTask.files.length, genTask.currentIndex, genTask.logs.length,
         genTask.error, genTask.errorMeta?.kind, genTask.errorMeta?.code, genTask.errorMeta?.status,
         genTask.files.filter(f => f.status === "done").length,
         genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,

@@ -15,6 +15,8 @@ import {
     shouldResumeLearningProgress,
     recordLearningDebugEvent,
     appendGenLog,
+    discardExpiredGenTask,
+    GEN_TASK_TTL_MS,
 } from "./generateState";
 import type {
     FixResumeStage,
@@ -46,8 +48,19 @@ const MAX_REPLAN_ATTEMPTS = 2;
 // ── 当前生成运行域：所有请求共享一个根 signal，离页/中断/重置可一次性终止 ──
 let generationAbort: AbortController | null = null;
 let generationRunId = 0;
+let taskKeepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+
+const TASK_KEEPALIVE_INTERVAL_MS = 10 * 60_000;
+const TASK_KEEPALIVE_RETRY_MS = 60_000;
+const TASK_UNAVAILABLE_MESSAGE = "任务已超过服务端有效期或已被清理，请重新开始生成";
+
+function stopTaskKeepalive() {
+    if (taskKeepaliveTimer) clearTimeout(taskKeepaliveTimer);
+    taskKeepaliveTimer = undefined;
+}
 
 function beginGenerationRun(): AbortSignal {
+    stopTaskKeepalive();
     generationAbort?.abort(new DOMException("Superseded", "AbortError"));
     generationAbort = new AbortController();
     generationRunId++;
@@ -89,6 +102,7 @@ function interruptedPhase(): Exclude<GenPhase, "interrupted"> | "" {
 }
 
 function markInterrupted(from: GenPhase | "" = genTask.phase) {
+    stopTaskKeepalive();
     if (genTask.phase === "interrupted") return;
     if (!from || ["idle", "done", "error", "interrupted"].includes(from)) return;
     genTask.interruptedFrom = from as Exclude<GenPhase, "interrupted">;
@@ -114,6 +128,7 @@ function isInterrupt(e: any): boolean {
 
 /** 中断当前 Chat 生成运行域。服务端会通过断连信号同步终止上游模型。 */
 export function interruptGenerate(options: { preserve?: boolean } = {}) {
+    stopTaskKeepalive();
     const from = interruptedPhase();
     generationAbort?.abort(new DOMException("User interrupted", "AbortError"));
     generationRunId++;
@@ -137,14 +152,28 @@ function clearGenerateError() {
     genTask.errorMeta = null;
 }
 
+function isTaskUnavailableError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const record = error as Record<string, unknown>;
+    const code = typeof record.code === "string" ? record.code : "";
+    const status = Number(record.status) || 0;
+    const message = error instanceof Error ? error.message.trim() : "";
+    return code === "TASK_NOT_FOUND"
+        || (status === 404 && /^Task not found$/i.test(message));
+}
+
 function setGenerateError(
     error: unknown,
     kind?: ActionMessageKind,
     message?: string,
 ) {
+    stopTaskKeepalive();
+    const taskUnavailable = isTaskUnavailableError(error);
+    if (taskUnavailable) discardExpiredGenTask();
     genTask.phase = "error";
-    genTask.error = message || (error instanceof Error ? error.message : String(error));
-    genTask.errorMeta = actionMessageMetaForError(error, kind);
+    genTask.error = message
+        || (taskUnavailable ? TASK_UNAVAILABLE_MESSAGE : (error instanceof Error ? error.message : String(error)));
+    genTask.errorMeta = actionMessageMetaForError(error, kind || (taskUnavailable ? "warning" : undefined));
 }
 
 function deepSeekAccessError(failure: DeepSeekAccessFailure): Error {
@@ -219,6 +248,79 @@ async function readApiError(
     const info = await readBaseApiError(response, fallback);
     return { ...info, activeRequestId };
 }
+
+function applyTaskExpiration(taskId: string, value: unknown): number {
+    const candidate = Number(value);
+    const expiresAt = Number.isFinite(candidate) && candidate > Date.now()
+        ? Math.floor(candidate)
+        : Date.now() + GEN_TASK_TTL_MS;
+    if (genTask.taskId === taskId) {
+        genTask.taskExpiresAt = expiresAt;
+        persistGenTaskNow();
+    }
+    return expiresAt;
+}
+
+async function renewClientTask(taskId: string, signal: AbortSignal): Promise<number> {
+    const response = await fetchWithByokFallback("/api/generate/task", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId }),
+        signal,
+    });
+    await rejectAccessResponse(response);
+    if (!response.ok) {
+        const apiError = await readApiError(response, "任务状态续期失败");
+        const error = response.status === 404
+            ? noRetry(apiError.message || TASK_UNAVAILABLE_MESSAGE, {
+                code: apiError.code || "TASK_NOT_FOUND",
+                status: response.status,
+            })
+            : new Error(apiError.message);
+        (error as any).code = apiError.code || (response.status === 404 ? "TASK_NOT_FOUND" : "");
+        (error as any).status = response.status;
+        if (response.status === 404) (error as any).terminal = true;
+        throw error;
+    }
+    const result = await response.json().catch(() => ({})) as { expiresAt?: unknown };
+    return applyTaskExpiration(taskId, result.expiresAt);
+}
+
+function scheduleTaskKeepalive(taskId: string, runId: number, delayMs = TASK_KEEPALIVE_INTERVAL_MS) {
+    stopTaskKeepalive();
+    taskKeepaliveTimer = setTimeout(async () => {
+        taskKeepaliveTimer = undefined;
+        if (runId !== generationRunId
+            || taskId !== genTask.taskId
+            || !isGeneratingPhase(genTask.phase)
+            || !generationAbort
+            || generationAbort.signal.aborted) return;
+        try {
+            await renewClientTask(taskId, generationAbort.signal);
+            if (runId === generationRunId && taskId === genTask.taskId) {
+                scheduleTaskKeepalive(taskId, runId);
+            }
+        } catch (error: any) {
+            if (runId !== generationRunId || taskId !== genTask.taskId || isInterrupt(error)) return;
+            if (isTaskUnavailableError(error)) {
+                generationAbort?.abort(new DOMException("Task expired", "AbortError"));
+                generationRunId++;
+                setGenerateError(error, "warning");
+                appendGenLog(`× ${genTask.error}`);
+                persistGenTaskNow();
+                return;
+            }
+            scheduleTaskKeepalive(taskId, runId, TASK_KEEPALIVE_RETRY_MS);
+        }
+    }, delayMs);
+}
+
+async function ensureTaskAlive(taskId: string, runId: number): Promise<void> {
+    await renewClientTask(taskId, generationSignal());
+    assertGenerationRun(runId);
+    scheduleTaskKeepalive(taskId, runId);
+}
+
 function setPhase(phase: GenPhase, log?: string) {
     genTask.phase = phase;
     if (phase !== "interrupted") genTask.interruptedFrom = "";
@@ -420,6 +522,12 @@ async function postPlanner(body: any): Promise<any> {
             }
             if (!resp.ok) {
                 const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
+                if (resp.status === 404 || apiError.code === "TASK_NOT_FOUND") {
+                    throw noRetry(apiError.message || TASK_UNAVAILABLE_MESSAGE, {
+                        code: apiError.code || "TASK_NOT_FOUND",
+                        status: resp.status,
+                    });
+                }
                 if (isPlannerTimeout(apiError.code, resp.status)) {
                     if (timeoutRetries++ >= 1) {
                         const error = new Error(apiError.message);
@@ -2466,6 +2574,13 @@ export async function resumeGenerate() {
         persistGenTaskNow();
     };
 
+    try {
+        await ensureTaskAlive(genTask.taskId, resumeRunId);
+    } catch (error: any) {
+        recordResumeFailure(error);
+        return;
+    }
+
     // 已触发构建的阶段只恢复轮询，避免刷新后重复建分支、重复触发 workflow。
     if (["building", "polling"].includes(p)) {
         try { await buildWithRetry(undefined, undefined, true); }
@@ -2609,6 +2724,22 @@ export async function startGenerate(
     const runId = generationRunId;
     let chosenPathId: string | undefined = resumePrepared ? genTask.chosenPathId || undefined : undefined;
 
+    if (resumePrepared && genTask.taskId) {
+        try {
+            await ensureTaskAlive(genTask.taskId, runId);
+        } catch (error: any) {
+            if (!isGenerationRunCurrent(runId)) return;
+            if (isInterrupt(error)) {
+                markInterrupted(resumePhase || genTask.phase);
+                return;
+            }
+            setGenerateError(error);
+            appendGenLog(`× ${genTask.error}`);
+            persistGenTaskNow();
+            return;
+        }
+    }
+
     if (!resumePrepared) {
         lastGenParams = { userPrompt, coreType, version };
         const skillIds = [...selected];
@@ -2624,6 +2755,8 @@ export async function startGenerate(
             setPhase("planning", "正在创建任务...");
             const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds });
             genTask.taskId = initResult.taskId;
+            applyTaskExpiration(genTask.taskId, initResult.expiresAt);
+            scheduleTaskKeepalive(genTask.taskId, runId);
             fetchMe(); // 扣费后刷新顶栏剩余额度
         } catch (e: any) {
             if (!isGenerationRunCurrent(runId)) return;
@@ -3045,6 +3178,10 @@ export async function startBuildFromIDE(
 ) {
     beginGenerationRun();
     const runId = generationRunId;
+    if (genTask.taskId) {
+        applyTaskExpiration(genTask.taskId, Date.now() + GEN_TASK_TTL_MS);
+        scheduleTaskKeepalive(genTask.taskId, runId);
+    }
     try {
         await buildWithRetry(files, meta);
     } catch (e: any) {

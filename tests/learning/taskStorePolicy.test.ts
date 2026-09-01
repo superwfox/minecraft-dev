@@ -9,6 +9,7 @@ import {
     putTask,
     putTaskState,
     putTaskWithOperationLease,
+    renewOwnedTask,
     renewTaskOperationLease,
     renewTaskPlannerLease,
     TaskOwnershipError,
@@ -91,6 +92,37 @@ function createQuotaMarkerD1(taskId: string, ownerUid: string, raw: string) {
         },
     } as unknown as D1Database;
     return { database, quotaExhausted: () => quotaExhausted };
+}
+
+function createTaskRenewalD1(taskId: string, ownerUid: string, initialExpiresAt: number) {
+    let expiresAt = initialExpiresAt;
+    const database = {
+        prepare(sql: string) {
+            return {
+                bind(...args: unknown[]) {
+                    return {
+                        async first() {
+                            if (!sql.includes("UPDATE generation_tasks")
+                                || !sql.includes("RETURNING expires_at")) {
+                                throw new Error(`unexpected renewal query: ${sql}`);
+                            }
+                            const now = Math.floor(Date.now() / 1000) * 1000;
+                            if (String(args[0]) !== taskId
+                                || String(args[1]) !== ownerUid
+                                || expiresAt <= now) return null;
+                            expiresAt = Math.max(expiresAt, now + (Number(args[2]) || 0));
+                            return { expires_at: expiresAt };
+                        },
+                    };
+                },
+            };
+        },
+    } as unknown as D1Database;
+    return {
+        database,
+        expiresAt: () => expiresAt,
+        expire: () => { expiresAt = Math.floor(Date.now() / 1000) * 1000 - 1; },
+    };
 }
 
 function createPlannerLeaseD1(ownerUid: string) {
@@ -433,6 +465,30 @@ describe("task state write policy", () => {
             expect(values.has(taskId)).toBe(false);
         } finally {
             warn.mockRestore();
+        }
+    });
+});
+
+describe("task expiry renewal", () => {
+    it("renews only an active task owned by the current user", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-09-01T08:00:00.000Z"));
+        try {
+            const taskId = "task-renew";
+            const ownerUid = "user-1";
+            const now = Date.now();
+            const renewal = createTaskRenewalD1(taskId, ownerUid, now + 60_000);
+            const { namespace } = createMemoryKv();
+            const env = { TASKS: namespace, DB: renewal.database };
+
+            await expect(renewOwnedTask(env, taskId, ownerUid)).resolves.toBe(now + 3_600_000);
+            expect(renewal.expiresAt()).toBe(now + 3_600_000);
+            await expect(renewOwnedTask(env, taskId, "other-user")).resolves.toBeNull();
+
+            renewal.expire();
+            await expect(renewOwnedTask(env, taskId, ownerUid)).resolves.toBeNull();
+        } finally {
+            vi.useRealTimers();
         }
     });
 });

@@ -144,4 +144,42 @@ describe("generation state persistence", () => {
         });
         expect(genTask.logs).not.toContain("■ 上次页面离开时任务仍在进行，已暂停等待手动继续");
     });
+
+    it("does not extend the server task expiry when a local snapshot is refreshed", () => {
+        const startedAt = Date.UTC(2026, 8, 1, 8, 0, 0);
+        const taskExpiresAt = startedAt + 60 * 60_000;
+        vi.setSystemTime(startedAt);
+
+        genTask.taskId = "task-expiring";
+        genTask.taskExpiresAt = taskExpiresAt;
+        genTask.phase = "planning";
+        genTask.userPrompt = "创建一个唯一 Boss 插件";
+        genTask.coreType = "PAPER";
+        genTask.version = "1.21.4";
+        persistGenTaskNow();
+
+        vi.setSystemTime(startedAt + 59 * 60_000);
+        genTask.logs.push("本地状态发生变化");
+        persistGenTaskNow();
+
+        const refreshedSnapshot = localStorage.getItem(GEN_KEY);
+        expect(refreshedSnapshot).not.toBeNull();
+        expect(JSON.parse(refreshedSnapshot!)).toMatchObject({
+            t: startedAt + 59 * 60_000,
+            taskExpiresAt,
+        });
+
+        vi.setSystemTime(taskExpiresAt + 1);
+        resetGenTask();
+        localStorage.setItem(GEN_KEY, refreshedSnapshot!);
+
+        expect(restoreGenTask()).toBe(true);
+        expect(genTask).toMatchObject({
+            taskId: "task-expiring",
+            taskExpiresAt,
+            phase: "interrupted",
+            interruptedFrom: "planning",
+        });
+        expect(JSON.parse(localStorage.getItem(GEN_KEY) || "{}").taskExpiresAt).toBe(taskExpiresAt);
+    });
 });

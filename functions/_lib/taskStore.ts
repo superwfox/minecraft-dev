@@ -29,7 +29,8 @@ export interface TaskOperationLease {
     leaseUntil: number;
 }
 
-const STATE_TTL_SECONDS = 3600;
+export const TASK_STATE_TTL_SECONDS = 3600;
+const STATE_TTL_SECONDS = TASK_STATE_TTL_SECONDS;
 const CHUNK_CHARACTERS = 300_000;
 // Free plan allows 50 D1 statements per invocation. Reserve headroom for task read/cost/cleanup.
 const MAX_CHUNKS = 40;
@@ -793,6 +794,52 @@ export async function getOwnedTask(
     } catch {
         return null;
     }
+}
+
+/** Extend an active owned task without reviving expired or incomplete state. */
+export async function renewOwnedTask(
+    env: TaskStoreEnv,
+    taskId: string,
+    ownerUid: string,
+    expirationTtl = STATE_TTL_SECONDS,
+): Promise<number | null> {
+    if (!taskId || !ownerUid) return null;
+    const ttlSeconds = Math.max(60, Math.floor(expirationTtl));
+
+    if (env.DB) {
+        try {
+            const expirationMs = ttlSeconds * 1000;
+            const row = await env.DB.prepare(`
+                UPDATE generation_tasks
+                SET expires_at = MAX(expires_at, ${D1_NOW_MS_SQL} + ?3)
+                WHERE task_id = ?1
+                  AND owner_uid = ?2
+                  AND expires_at > ${D1_NOW_MS_SQL}
+                  AND EXISTS (
+                      SELECT 1
+                      FROM generation_task_chunks AS c
+                      WHERE c.task_id = generation_tasks.task_id
+                  )
+                RETURNING expires_at
+            `).bind(taskId, ownerUid, expirationMs).first<{ expires_at: number }>();
+            const expiresAt = Number(row?.expires_at);
+            return Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : null;
+        } catch (error) {
+            console.warn("D1 task renewal failed", error);
+            throw new TaskStoreUnavailableError("D1 task renewal failed");
+        }
+    }
+
+    const raw = await env.TASKS.get(taskId);
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw) as { uid?: unknown };
+        if (parsed.uid !== ownerUid) return null;
+    } catch {
+        return null;
+    }
+    await env.TASKS.put(taskId, raw, { expirationTtl: ttlSeconds });
+    return Date.now() + ttlSeconds * 1000;
 }
 
 /** Check deletion ownership without treating an expired task as absent. */
