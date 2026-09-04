@@ -178,9 +178,9 @@ sequenceDiagram
 
 ### 模型主动 Learning
 
-Planner、Generator、Reviewer、Reworker 与 Fixer 的 DeepSeek 请求都会附带原生 `learn_public_api` function tool。DS 负责判断何时缺少精确的版本化公开 API 事实；Pages Functions 将工具参数转换为原子 `KnowledgeNeed`，校验公开命名空间或任务已声明的外部依赖，再由 `/api/learning/start|step|status` 完成资料发现、抓取和证据验证。完成后，原始 assistant `reasoning_content`、`tool_calls` 与验证结果会按 DeepSeek function-calling 协议回放，模型从中断点继续。
+在适用的 Planner、Generator、Reviewer、Reworker 与 Fixer 调用点，DeepSeek 请求会附带原生 `learn_public_api` function tool。DS 负责判断何时缺少精确的版本化公开 API 事实；Pages Functions 将工具参数转换为原子 `KnowledgeNeed`，校验公开命名空间或任务已声明的外部依赖，再由 `/api/learning/start|step|status` 完成资料发现、抓取和证据验证。完成后，原始 assistant `reasoning_content`、`tool_calls` 与验证结果会按 DeepSeek function-calling 协议回放，模型从中断点继续。
 
-Learning job 与模型请求 ID、需求指纹和任务状态栅栏绑定，结果写入 D1 公共知识缓存；运行时限制每段模型对话最多两轮工具调用。前端只负责跨 Worker 请求推进 job 和恢复连接，不判断是否需要学习。
+Learning job 与模型请求 ID、需求指纹和任务状态栅栏绑定，结果写入 D1 公共知识缓存；模型取得验证结果后仍可按需继续调用工具，不设固定轮次上限，但首次调用后的连续对话仍受同一任务时限、取消、配额和授权边界约束。前端只负责跨 Worker 请求推进 job 和恢复连接，不判断是否需要学习。
 
 ## 核心设计决策
 

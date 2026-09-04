@@ -41,6 +41,10 @@ import { readApiError as readBaseApiError, responseError } from "../api/apiError
 import {actionMessageMetaForError} from "./actionMessages";
 import type {ActionMessageKind} from "./actionMessages";
 import {recordPromptHistory} from "./promptHistory";
+import {
+    createLearningContinuationDeadline,
+    type LearningContinuationDeadline,
+} from "./learningContinuation";
 
 const MAX_FIX_ATTEMPTS = 3;
 const MAX_REPLAN_ATTEMPTS = 2;
@@ -89,12 +93,15 @@ function isGenerationRunCurrent(runId: number): boolean {
     return runId === generationRunId && !!generationAbort && !generationAbort.signal.aborted;
 }
 
+function linkAbortSignal(controller: AbortController, source: AbortSignal): () => void {
+    const abort = () => controller.abort(source.reason ?? new DOMException("Aborted", "AbortError"));
+    if (source.aborted) abort();
+    else source.addEventListener("abort", abort, { once: true });
+    return () => source.removeEventListener("abort", abort);
+}
+
 function linkGenerationAbort(controller: AbortController): () => void {
-    const root = generationSignal();
-    const abort = () => controller.abort(root.reason ?? new DOMException("Aborted", "AbortError"));
-    if (root.aborted) abort();
-    else root.addEventListener("abort", abort, { once: true });
-    return () => root.removeEventListener("abort", abort);
+    return linkAbortSignal(controller, generationSignal());
 }
 
 function interruptedPhase(): Exclude<GenPhase, "interrupted"> | "" {
@@ -403,7 +410,7 @@ function createBuildRequestId(): string {
     return `build_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-// 仅按 SSE 传输活动判断连接是否失活；不设置固定单次或总等待上限。
+// 初次 Planner 请求仅按 SSE 活动判断失活；Learning 续接另受共享的绝对时限约束。
 const PLANNER_TRANSPORT_IDLE_MS = 5_000;
 const PLANNER_CONNECTION_RETRIES = 3;
 
@@ -419,7 +426,7 @@ class PlannerTransportTimeoutError extends Error {
 
 function plannerAttemptAbortError(controller: AbortController): Error | null {
     if (!controller.signal.aborted) return null;
-    return controller.signal.reason instanceof PlannerTransportTimeoutError
+    return controller.signal.reason instanceof Error
         ? controller.signal.reason
         : null;
 }
@@ -430,18 +437,30 @@ function isPlannerTimeout(code: string, status: number): boolean {
         || status === 524;
 }
 
-async function postPlanner(body: any): Promise<any> {
+async function postPlanner(
+    body: any,
+    learningContinuation?: LearningContinuationDeadline,
+): Promise<any> {
     const signal = generationSignal();
     const runId = generationRunId;
     let announcedWait = false;
     let failures = 0;
     let timeoutRetries = 0;
     const waitForPlannerRetry = async (delayMs: number) => {
-        await waitWithAbort(delayMs, signal);
+        learningContinuation?.assertActive();
+        const remainingMs = learningContinuation
+            ? Math.max(1, learningContinuation.deadlineAt - Date.now())
+            : delayMs;
+        await waitWithAbort(Math.min(delayMs, remainingMs), signal);
+        learningContinuation?.assertActive();
     };
     while (true) {
+        learningContinuation?.assertActive();
         const attemptController = new AbortController();
         const unlinkGenerationAbort = linkGenerationAbort(attemptController);
+        const unlinkLearningContinuation = learningContinuation
+            ? linkAbortSignal(attemptController, learningContinuation.signal)
+            : () => {};
         let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
         let lastTransportActivity = 0;
 
@@ -479,6 +498,7 @@ async function postPlanner(body: any): Promise<any> {
                 });
             } catch (error) {
                 if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+                learningContinuation?.assertActive();
                 const attemptError = plannerAttemptAbortError(attemptController) || error;
                 if (isInterrupt(attemptError)) throw generationAbortError();
                 if (failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
@@ -487,6 +507,7 @@ async function postPlanner(body: any): Promise<any> {
             }
 
             assertGenerationRun(runId);
+            learningContinuation?.assertActive();
 
             await rejectAccessResponse(resp);
             if (resp.status === 429) {
@@ -559,6 +580,7 @@ async function postPlanner(body: any): Promise<any> {
                     });
                 } catch (error: any) {
                     if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+                    learningContinuation?.assertActive();
                     const attemptError = plannerAttemptAbortError(attemptController) || error;
                     if (isInterrupt(attemptError)) throw generationAbortError();
                     if (attemptError?.noRetry || attemptError?.terminal) throw attemptError;
@@ -618,13 +640,20 @@ async function postPlanner(body: any): Promise<any> {
                     continue;
                 }
                 assertGenerationRun(runId);
+                learningContinuation?.assertActive();
                 return streamed;
             }
             const result = await resp.json();
             assertGenerationRun(runId);
+            learningContinuation?.assertActive();
             return result;
+        } catch (error) {
+            if (signal.aborted || runId !== generationRunId) throw generationAbortError();
+            learningContinuation?.assertActive();
+            throw error;
         } finally {
             clearTransportIdleTimer();
+            unlinkLearningContinuation();
             unlinkGenerationAbort();
         }
     }
@@ -1008,14 +1037,23 @@ function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | n
 
 async function runLearning(
     toolRequestId: string,
-    options?: { resumeExisting?: boolean },
+    options?: {
+        resumeExisting?: boolean;
+        continuation?: LearningContinuationDeadline;
+    },
 ): Promise<void> {
     generationSignal();
     const generationId = generationRunId;
-    const assertActive = () => assertGenerationRun(generationId);
+    const assertActive = () => {
+        assertGenerationRun(generationId);
+        options?.continuation?.assertActive();
+    };
     const stage: LearningStage = "tool";
     const startedAt = Date.now();
-    let jobDeadline = startedAt + LEARNING_JOB_BUDGET_MS;
+    let jobDeadline = Math.min(
+        startedAt + LEARNING_JOB_BUDGET_MS,
+        options?.continuation?.deadlineAt ?? Number.POSITIVE_INFINITY,
+    );
     let lastMessage = "";
     let lastEndpoint: LearningEndpoint = "start";
     let lastFailureReason: LearningReasonCode = "client_network";
@@ -1053,6 +1091,7 @@ async function runLearning(
             message: "正在恢复联网查证状态",
         });
     } else {
+        const remainingMs = Math.max(1, jobDeadline - startedAt);
         genTask.learningProgress = normalizeLearningProgress({
             jobId: "",
             status: "queued",
@@ -1060,7 +1099,7 @@ async function runLearning(
             stage,
             startedAt,
             deadlineAt: jobDeadline,
-            remainingMs: LEARNING_JOB_BUDGET_MS,
+            remainingMs,
             totalNeeds: 0,
             completedNeeds: 0,
             sourceCount: 0,
@@ -1087,9 +1126,19 @@ async function runLearning(
         const deadlineAt = genTask.learningProgress.deadlineAt;
         const remainingMs = genTask.learningProgress.remainingMs;
         if (deadlineAt !== undefined) {
-            jobDeadline = deadlineAt;
+            jobDeadline = Math.min(
+                deadlineAt,
+                options?.continuation?.deadlineAt ?? Number.POSITIVE_INFINITY,
+            );
         } else if (remainingMs !== undefined) {
-            jobDeadline = Date.now() + remainingMs;
+            jobDeadline = Math.min(
+                Date.now() + remainingMs,
+                options?.continuation?.deadlineAt ?? Number.POSITIVE_INFINITY,
+            );
+        }
+        if (options?.continuation) {
+            genTask.learningProgress.deadlineAt = jobDeadline;
+            genTask.learningProgress.remainingMs = Math.max(0, jobDeadline - Date.now());
         }
         const message = genTask.learningProgress.message;
         if (message && message !== lastMessage) {
@@ -1193,7 +1242,10 @@ async function runLearning(
             lastFailureHttpStatus = 0;
             lastFailureReason = "client_network";
             jobId = "";
-            jobDeadline = Date.now() + LEARNING_JOB_BUDGET_MS;
+            jobDeadline = Math.min(
+                Date.now() + LEARNING_JOB_BUDGET_MS,
+                options?.continuation?.deadlineAt ?? Number.POSITIVE_INFINITY,
+            );
             genTask.learningProgress = normalizeLearningProgress({
                 jobId: "",
                 status: "queued",
@@ -1201,7 +1253,7 @@ async function runLearning(
                 stage,
                 startedAt,
                 deadlineAt: jobDeadline,
-                remainingMs: LEARNING_JOB_BUDGET_MS,
+                remainingMs: Math.max(1, jobDeadline - Date.now()),
                 totalNeeds: 0,
                 completedNeeds: 0,
                 sourceCount: 0,
@@ -1404,23 +1456,30 @@ async function runLearning(
     await appendLearningTerminalDiagnostics(stage);
 }
 
+function modelLearningToolRequests(value: unknown): any[] {
+    if (!Array.isArray(value) || value.length === 0) return [];
+    return value
+        .filter((item: any) => item && /^learnreq_[a-f0-9]{32}$/i.test(String(item.requestId || "")))
+        .slice(0, 3);
+}
+
 async function runModelLearningToolRequests(
     value: unknown,
     jobIds: Record<string, string>,
+    continuation?: LearningContinuationDeadline,
 ): Promise<boolean> {
-    if (!Array.isArray(value) || value.length === 0) return false;
-    const requests = value
-        .filter((item: any) => item && /^learnreq_[a-f0-9]{32}$/i.test(String(item.requestId || "")))
-        .slice(0, 3);
+    const requests = modelLearningToolRequests(value);
     if (!requests.length) return false;
 
     for (const request of requests) {
+        continuation?.assertActive();
         const requestId = String(request.requestId);
         const question = Array.isArray(request.questions)
             ? request.questions.find((item: unknown) => typeof item === "string")
             : "";
         appendGenLog(`▸ DS 主动调用 Learning${question ? `：${question}` : ""}`);
-        await runLearning(requestId);
+        await runLearning(requestId, { continuation });
+        continuation?.assertActive();
         if (genTask.learningProgress.jobId) {
             jobIds[requestId] = genTask.learningProgress.jobId;
         }
@@ -2120,37 +2179,51 @@ async function streamBuildFix(
     mode: "diagnose" | "repair" | "inspect" = "repair",
     repairAuthorization?: FixRepairAuthorization,
     learningToolJobs: Record<string, string> = {},
+    learningContinuation?: LearningContinuationDeadline,
 ): Promise<any> {
-    const signal = generationSignal();
+    const rootSignal = generationSignal();
+    const signal = learningContinuation?.signal ?? rootSignal;
     const runId = generationRunId;
-    const resp = await fetchWithByokFallback("/api/generate/fix", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            taskId,
-            mode,
-            ...(mode === "repair" ? { repairAuthorization } : {}),
-            ...(mode === "repair" ? { learningToolJobs } : {}),
-        }),
-        signal,
-    });
-    assertGenerationRun(runId);
-    await rejectAccessResponse(resp);
-    if (!resp.ok) {
-        const apiError = await readApiError(resp, "自动修复请求失败");
-        const error = new Error(apiError.message);
-        (error as any).code = apiError.code;
+    learningContinuation?.assertActive();
+    try {
+        const resp = await fetchWithByokFallback("/api/generate/fix", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                taskId,
+                mode,
+                ...(mode === "repair" ? { repairAuthorization } : {}),
+                ...(mode === "repair" ? { learningToolJobs } : {}),
+            }),
+            signal,
+        });
+        assertGenerationRun(runId);
+        learningContinuation?.assertActive();
+        await rejectAccessResponse(resp);
+        if (!resp.ok) {
+            const apiError = await readApiError(resp, "自动修复请求失败");
+            const error = new Error(apiError.message);
+            (error as any).code = apiError.code;
+            throw error;
+        }
+
+        const contentType = resp.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+            const result = await resp.json();
+            assertGenerationRun(runId);
+            learningContinuation?.assertActive();
+            return result;
+        }
+
+        const result = await readSSE(resp, { runId });
+        assertGenerationRun(runId);
+        learningContinuation?.assertActive();
+        return result;
+    } catch (error) {
+        if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
+        learningContinuation?.assertActive();
         throw error;
     }
-
-    const contentType = resp.headers.get("Content-Type") || "";
-    if (contentType.includes("application/json")) {
-        const result = await resp.json();
-        assertGenerationRun(runId);
-        return result;
-    }
-
-    return readSSE(resp, { runId });
 }
 
 async function repairWithLearningTools(
@@ -2158,18 +2231,36 @@ async function repairWithLearningTools(
     repairAuthorization: FixRepairAuthorization,
 ): Promise<any> {
     const learningToolJobs: Record<string, string> = {};
-    for (let round = 0; round <= 3; round++) {
-        const result = await streamBuildFix(
-            taskId,
-            "repair",
-            repairAuthorization,
-            learningToolJobs,
-        );
-        if (!await runModelLearningToolRequests(result?.learningToolRequests, learningToolJobs)) {
-            return result;
+    let learningContinuation: LearningContinuationDeadline | undefined;
+    try {
+        while (true) {
+            learningContinuation?.assertActive();
+            const result = await streamBuildFix(
+                taskId,
+                "repair",
+                repairAuthorization,
+                learningToolJobs,
+                learningContinuation,
+            );
+            if (!modelLearningToolRequests(result?.learningToolRequests).length) {
+                return result;
+            }
+            learningContinuation ??= createLearningContinuationDeadline(
+                GEN_TASK_TTL_MS,
+                "自动修复的 Learning 对话超过任务时限，已停止继续调用工具",
+                generationSignal(),
+            );
+            if (!await runModelLearningToolRequests(
+                result?.learningToolRequests,
+                learningToolJobs,
+                learningContinuation,
+            )) {
+                return result;
+            }
         }
+    } finally {
+        learningContinuation?.dispose();
     }
-    throw new Error("DS 连续请求 Learning 超过安全上限，已停止本轮自动修复");
 }
 
 async function recoverBuildRepair(taskId: string): Promise<any> {
@@ -2855,23 +2946,33 @@ export async function startGenerate(
 
             const plannerLearningToolJobs: Record<string, string> = {};
             let planResult: any;
-            for (let plannerToolTurn = 0; ; plannerToolTurn++) {
-                if (plannerToolTurn > 4) {
-                    throw new Error("Planner Learning 工具恢复次数超过安全上限");
+            let learningContinuation: LearningContinuationDeadline | undefined;
+            try {
+                while (true) {
+                    learningContinuation?.assertActive();
+                    planResult = await postPlanner({
+                        taskId: genTask.taskId,
+                        chosenPathId,
+                        skillIds: [...selected],
+                        replan: plannerReplan,
+                        plannerRequestId,
+                        learningToolJobs: plannerLearningToolJobs,
+                    }, learningContinuation);
+                    if (!modelLearningToolRequests(planResult?.learningToolRequests).length) break;
+                    learningContinuation ??= createLearningContinuationDeadline(
+                        GEN_TASK_TTL_MS,
+                        "Planner 的 Learning 对话超过任务时限，已停止继续调用工具",
+                        generationSignal(),
+                    );
+                    await runModelLearningToolRequests(
+                        planResult?.learningToolRequests,
+                        plannerLearningToolJobs,
+                        learningContinuation,
+                    );
+                    setPhase("planning", "Learning 已返回，Planner 继续规划...");
                 }
-                planResult = await postPlanner({
-                    taskId: genTask.taskId,
-                    chosenPathId,
-                    skillIds: [...selected],
-                    replan: plannerReplan,
-                    plannerRequestId,
-                    learningToolJobs: plannerLearningToolJobs,
-                });
-                if (!await runModelLearningToolRequests(
-                    planResult?.learningToolRequests,
-                    plannerLearningToolJobs,
-                )) break;
-                setPhase("planning", "Learning 已返回，Planner 继续规划...");
+            } finally {
+                learningContinuation?.dispose();
             }
             genTask.projectName = planResult.projectName;
             genTask.packageName = planResult.packageName;

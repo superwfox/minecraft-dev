@@ -14,7 +14,6 @@ import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContr
 import {
     createModelLearningRequest,
     learningToolDefinition,
-    MAX_LEARNING_TOOL_ROUNDS,
     putModelLearningRequest,
     removeModelLearningRequest,
     type ModelChatMessage,
@@ -461,10 +460,7 @@ async function callWithLearningTool(input: {
         }
     }
 
-    const tools = previousRequest?.round === undefined
-        || previousRequest.round < MAX_LEARNING_TOOL_ROUNDS
-        ? learningToolDefinition(input.llm)
-        : [];
+    const tools = learningToolDefinition(input.llm);
     const result = await input.invoke(messages, tools);
     await input.charge(result);
     assertBucketActive(input.signal);

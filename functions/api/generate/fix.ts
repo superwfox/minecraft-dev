@@ -49,7 +49,6 @@ import {
 import {
     createModelLearningRequest,
     learningToolDefinition,
-    MAX_LEARNING_TOOL_ROUNDS,
     putModelLearningRequest,
     removeModelLearningRequest,
     type ModelChatMessage,
@@ -1184,8 +1183,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         { role: "user", content: prompt.user },
                     ];
                 const tools = isLearningToolTurn
-                    && (!previousFixLearningRequest
-                        || previousFixLearningRequest.round < MAX_LEARNING_TOOL_ROUNDS)
                     ? learningToolDefinition(llm)
                     : [];
                 let fixRes = await callAIStream(

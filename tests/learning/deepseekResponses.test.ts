@@ -80,6 +80,60 @@ describe("DeepSeek Responses adapter", () => {
         }]);
     });
 
+    it("accepts a fenced JSON payload after provider explanatory text", () => {
+        const content = [
+            "I found one versioned source.",
+            "```json",
+            JSON.stringify({
+                candidates: [{
+                    needId: "need-api",
+                    sources: [{
+                        url: "https://example.com/versioned-api",
+                        reason: "Check the versioned source for the exact API contract.",
+                    }],
+                }],
+            }),
+            "```",
+        ].join("\n");
+
+        expect(parseLearningCandidates(content, [makeNeed()])).toEqual([{
+            needId: "need-api",
+            sources: [{
+                url: "https://example.com/versioned-api",
+                reason: "Check the versioned source for the exact API contract.",
+            }],
+        }]);
+    });
+
+    it("skips earlier fenced JSON blocks that are not candidate results", () => {
+        const content = [
+            "I used the following search request:",
+            "```json",
+            JSON.stringify({ query: "versioned API documentation" }),
+            "```",
+            "The verified candidate result is:",
+            "```json",
+            JSON.stringify({
+                candidates: [{
+                    needId: "need-api",
+                    sources: [{
+                        url: "https://example.com/versioned-api",
+                        reason: "Check the versioned source for the exact API contract.",
+                    }],
+                }],
+            }),
+            "```",
+        ].join("\n");
+
+        expect(parseLearningCandidates(content, [makeNeed()])).toEqual([{
+            needId: "need-api",
+            sources: [{
+                url: "https://example.com/versioned-api",
+                reason: "Check the versioned source for the exact API contract.",
+            }],
+        }]);
+    });
+
     it("truncates overlong URL reasons without discarding the source", () => {
         const validationCodes: string[] = [];
         expect(parseLearningCandidates(JSON.stringify({

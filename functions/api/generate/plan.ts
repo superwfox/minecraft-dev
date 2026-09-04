@@ -19,7 +19,6 @@ import {
     createModelLearningRequest,
     getModelLearningRequest,
     learningToolDefinition,
-    MAX_LEARNING_TOOL_ROUNDS,
     putModelLearningRequest,
     removeModelLearningRequest,
     type ModelChatMessage,
@@ -1107,10 +1106,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             { role: "system", content: system },
             { role: "user", content: user },
         ];
-        const plannerTools = !previousPlannerLearningRequest
-            || previousPlannerLearningRequest.round < MAX_LEARNING_TOOL_ROUNDS
-            ? learningToolDefinition(llm)
-            : [];
+        const plannerTools = learningToolDefinition(llm);
         const { readable, writable } = new TransformStream<Uint8Array>();
         const encoder = new TextEncoder();
         const writer = writable.getWriter();

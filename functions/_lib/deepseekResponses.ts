@@ -167,6 +167,25 @@ function stripFences(raw: string): string {
     return raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
+function parseDiscoveryJson(content: string): unknown {
+    const normalized = stripFences(content);
+    try {
+        return JSON.parse(normalized);
+    } catch (directError) {
+        const fencedBlocks = content.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi);
+        let parsedFencedBlock = false;
+        for (const match of fencedBlocks) {
+            try {
+                const parsed = JSON.parse(match[1].trim());
+                parsedFencedBlock = true;
+                if (Array.isArray(parsed?.candidates)) return parsed;
+            } catch { /* try the next fenced block */ }
+        }
+        if (parsedFencedBlock) throw new Error("discovery_candidates");
+        throw directError;
+    }
+}
+
 function candidateUrlKey(raw: string): string {
     try {
         const url = new URL(raw);
@@ -190,7 +209,7 @@ export function parseLearningCandidates(
     needs: KnowledgeNeed[],
     validationCodes: string[] = [],
 ): LearningCandidate[] {
-    const parsed = JSON.parse(stripFences(content)) as any;
+    const parsed = parseDiscoveryJson(content) as any;
     const allowedIds = new Set(needs.map((need) => need.id));
     if (!Array.isArray(parsed?.candidates)) throw new Error("discovery_candidates");
     const candidates = parsed.candidates;

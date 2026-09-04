@@ -279,7 +279,7 @@ data: [DONE]
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，最多连续调用两轮，并继续执行来源验证、配额、任务授权和 D1 缓存。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，并继续执行来源验证、配额、任务授权、任务时限和 D1 缓存；模型可在取得验证结果后按需继续调用工具，不再受固定轮次上限约束。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
 
 ## KV 绑定
 

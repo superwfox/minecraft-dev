@@ -13,8 +13,8 @@ import type {
 } from "./types";
 
 export const LEARNING_TOOL_NAME = "learn_public_api";
-export const MAX_LEARNING_TOOL_ROUNDS = 2;
 const MAX_STORED_REQUESTS = 8;
+const MAX_STORED_MESSAGES = 16;
 const CORE_PUBLIC_PREFIXES = [
     "com.destroystokyo.paper",
     "com.mojang",
@@ -362,7 +362,7 @@ function assistantMessage(value: unknown, calls: ModelToolCall[]): ModelChatMess
 }
 
 function safeMessages(value: ModelChatMessage[]): ModelChatMessage[] {
-    return value.slice(-16).map((message) => ({
+    const messages = value.map((message) => ({
         ...message,
         content: typeof message.content === "string" ? message.content.slice(0, 80_000) : "",
         ...(message.reasoning_content === undefined ? {} : {
@@ -372,6 +372,42 @@ function safeMessages(value: ModelChatMessage[]): ModelChatMessage[] {
             tool_calls: message.tool_calls.slice(0, 3),
         }),
     }));
+    if (messages.length <= MAX_STORED_MESSAGES) return messages;
+
+    const anchorIndexes = ["system", "user"]
+        .map((role) => messages.findIndex((message) => message.role === role))
+        .filter((index, position, indexes) => index >= 0 && indexes.indexOf(index) === position);
+    const anchorIndexSet = new Set(anchorIndexes);
+    const interactionGroups: number[][] = [];
+    for (let index = 0; index < messages.length; index++) {
+        if (anchorIndexSet.has(index)) continue;
+        const message = messages[index];
+        if (message.role === "tool") {
+            const group = interactionGroups.at(-1);
+            const assistant = group?.length ? messages[group[0]] : null;
+            const matchingCall = assistant?.role === "assistant"
+                && assistant.tool_calls?.some((call) => call.id === message.tool_call_id);
+            const duplicateResult = group?.some((groupIndex) =>
+                messages[groupIndex].role === "tool"
+                && messages[groupIndex].tool_call_id === message.tool_call_id
+            );
+            if (matchingCall && !duplicateResult) group!.push(index);
+            continue;
+        }
+        interactionGroups.push([index]);
+    }
+
+    const recentIndexes: number[] = [];
+    const recentCapacity = MAX_STORED_MESSAGES - anchorIndexes.length;
+    for (let index = interactionGroups.length - 1; index >= 0; index--) {
+        const group = interactionGroups[index];
+        if (recentIndexes.length + group.length > recentCapacity) break;
+        recentIndexes.unshift(...group);
+    }
+
+    return [...anchorIndexes, ...recentIndexes]
+        .sort((left, right) => left - right)
+        .map((index) => messages[index]);
 }
 
 export async function createModelLearningRequest(input: {
@@ -388,7 +424,6 @@ export async function createModelLearningRequest(input: {
     const calls = learningToolCallsFromMessage(input.message);
     if (!calls.length) return null;
     const round = Math.max(1, Math.floor(Number(input.round) || 1));
-    if (round > MAX_LEARNING_TOOL_ROUNDS) throw new Error("learning_tool_round_limit");
 
     const needs: KnowledgeNeed[] = [];
     const callNeedIds: Record<string, string> = {};
@@ -435,7 +470,6 @@ function validRequest(value: unknown): value is ModelLearningRequest {
         && !!request.originKey
         && Number.isInteger(request.round)
         && request.round >= 1
-        && request.round <= MAX_LEARNING_TOOL_ROUNDS
         && /^[a-f0-9]{64}$/.test(request.lookupHash)
         && Array.isArray(request.needs)
         && request.needs.length > 0

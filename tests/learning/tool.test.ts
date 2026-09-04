@@ -9,6 +9,7 @@ import {
     putModelLearningRequest,
     removeModelLearningRequest,
     sameModelLearningAuthorization,
+    type ModelChatMessage,
 } from "../../functions/_lib/learning/tool";
 
 function provider(overrides: Partial<LLMProvider> = {}): LLMProvider {
@@ -25,9 +26,12 @@ function provider(overrides: Partial<LLMProvider> = {}): LLMProvider {
     };
 }
 
-function toolCall(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function toolCall(
+    overrides: Record<string, unknown> = {},
+    id = "call_particle_slime",
+): Record<string, unknown> {
     return {
-        id: "call_particle_slime",
+        id,
         type: "function",
         function: {
             name: "learn_public_api",
@@ -180,15 +184,141 @@ describe("model-owned Learning tool", () => {
         expect(getModelLearningRequest(state, request!.requestId)).toBeNull();
     });
 
-    it("enforces the two-round tool-call safety limit", async () => {
-        await expect(createModelLearningRequest({
+    it("allows continued tool calls beyond the former two-round limit", async () => {
+        const request = await createModelLearningRequest({
             message: { tool_calls: [toolCall()] },
             messages: [{ role: "user", content: "Implement it." }],
             origin: "review",
             originKey: "bucket:Main.java:review:0",
-            round: 3,
+            round: 12,
             coreType: "Paper",
             mcVersion: "1.21.8",
-        })).rejects.toThrow("learning_tool_round_limit");
+        });
+
+        expect(request?.round).toBe(12);
+        const state: Record<string, unknown> = {};
+        putModelLearningRequest(state, request!);
+        expect(getModelLearningRequest(state, request!.requestId)?.round).toBe(12);
+    });
+
+    it("retains the original system and user constraints across many continuations", async () => {
+        const originalSystem = "Keep the generated plugin compatible with Paper 1.21.8.";
+        const originalUser = "Implement the requested particle behavior without inventing APIs.";
+        let messages: ModelChatMessage[] = [
+            { role: "system", content: originalSystem },
+            { role: "user", content: originalUser },
+        ];
+
+        for (let round = 1; round <= 12; round++) {
+            const request = await createModelLearningRequest({
+                message: {
+                    role: "assistant",
+                    content: `Learning request ${round}`,
+                    tool_calls: [toolCall()],
+                },
+                messages,
+                origin: "generate",
+                originKey: "bucket:Main.java:generate:0",
+                targetPath: "src/main/java/example/Main.java",
+                round,
+                coreType: "Paper",
+                mcVersion: "1.21.8",
+            });
+
+            expect(request).not.toBeNull();
+            messages = modelLearningContinuation(request!, {
+                status: "ready",
+                knowledgeContext: `Verified result ${round}`,
+            });
+        }
+
+        expect(messages).toHaveLength(16);
+        expect(messages[0]).toMatchObject({ role: "system", content: originalSystem });
+        expect(messages[1]).toMatchObject({ role: "user", content: originalUser });
+        expect(messages.at(-1)).toMatchObject({ role: "tool" });
+        expect(messages.at(-1)?.content).toContain("Verified result 12");
+        expect(messages.some((message) => message.content.includes("Verified result 11"))).toBe(true);
+    });
+
+    it("truncates only at complete multi-tool interaction boundaries", async () => {
+        let messages: ModelChatMessage[] = [
+            { role: "system", content: "Keep the original system contract." },
+            { role: "user", content: "Keep the original user request." },
+        ];
+
+        for (let round = 1; round <= 7; round++) {
+            const request = await createModelLearningRequest({
+                message: {
+                    role: "assistant",
+                    content: `Single-call request ${round}`,
+                    tool_calls: [toolCall({}, `call_single_${round}`)],
+                },
+                messages,
+                origin: "generate",
+                originKey: "bucket:Main.java:generate:0",
+                round,
+                coreType: "Paper",
+                mcVersion: "1.21.8",
+            });
+            messages = modelLearningContinuation(request!, {
+                status: "ready",
+                knowledgeContext: `Single-call result ${round}`,
+            });
+        }
+
+        const multiRequest = await createModelLearningRequest({
+            message: {
+                role: "assistant",
+                content: "Two-call request",
+                tool_calls: [
+                    toolCall({}, "call_multi_particle"),
+                    toolCall({
+                        subject: "org.bukkit.Sound.ENTITY_SLIME_JUMP",
+                        question: "Does org.bukkit.Sound.ENTITY_SLIME_JUMP exist in Paper 1.21.8?",
+                        answerType: "signature",
+                        symbol: "org.bukkit.Sound.ENTITY_SLIME_JUMP",
+                        searchQueries: ["Paper 1.21.8 Sound ENTITY_SLIME_JUMP Javadoc"],
+                        acceptanceCriteria: ["The versioned Paper Javadoc states the exact enum constant."],
+                    }, "call_multi_sound"),
+                ],
+            },
+            messages,
+            origin: "generate",
+            originKey: "bucket:Main.java:generate:0",
+            round: 8,
+            coreType: "Paper",
+            mcVersion: "1.21.8",
+        });
+        messages = modelLearningContinuation(multiRequest!, {
+            status: "ready",
+            knowledgeContext: "Both facts are verified.",
+        });
+
+        expect(messages.length).toBeLessThanOrEqual(16);
+        expect(messages[0]).toMatchObject({ role: "system", content: "Keep the original system contract." });
+        expect(messages[1]).toMatchObject({ role: "user", content: "Keep the original user request." });
+        expect(messages[2]?.role).toBe("assistant");
+
+        let activeToolCallIds = new Set<string>();
+        for (const message of messages.slice(2)) {
+            if (message.role === "assistant") {
+                activeToolCallIds = new Set(message.tool_calls?.map((call) => call.id) ?? []);
+            } else if (message.role === "tool") {
+                expect(activeToolCallIds.has(message.tool_call_id ?? "")).toBe(true);
+            } else {
+                activeToolCallIds.clear();
+            }
+        }
+
+        const latestAssistantIndex = messages.findIndex((message) => message.content === "Two-call request");
+        expect(latestAssistantIndex).toBeGreaterThan(1);
+        expect(messages[latestAssistantIndex]?.tool_calls?.map((call) => call.id)).toEqual([
+            "call_multi_particle",
+            "call_multi_sound",
+        ]);
+        expect(messages.slice(latestAssistantIndex + 1).map((message) => message.tool_call_id)).toEqual([
+            "call_multi_particle",
+            "call_multi_sound",
+        ]);
     });
 });
