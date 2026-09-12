@@ -1,7 +1,7 @@
 import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
-import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
@@ -84,12 +84,9 @@ async function callAI(
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
+        ...thinkingFor(llm, usePro ? "pro" : "flash"),
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
-    if (usePro) {
-        body.reasoning_effort = "high";
-        body.thinking = { type: "enabled" };
-    }
     if (jsonMode) body.response_format = { type: "json_object" };
 
     const ctrl = new AbortController();
@@ -125,15 +122,11 @@ async function callAIStream(
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
+        ...thinkingFor(llm, usePro ? "pro" : "flash"),
         stream: true,
         stream_options: { include_usage: true },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
     };
-    if (usePro) {
-        body.reasoning_effort = "high";
-        body.thinking = { type: "enabled" };
-    }
-
     // 空闲超时:每收到一块数据就续命(arm),只掐真正断死的连接，不误杀慢而活着的长思考。
     const ctrl = new AbortController();
     const disposeParentAbort = linkAbortSignal(ctrl, operationAbort.signal);

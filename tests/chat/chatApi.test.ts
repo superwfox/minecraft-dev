@@ -79,6 +79,7 @@ describe("POST /api/chat", () => {
             input: "做一个唯一 Boss，命令 /boss spawn",
             taskId: "client-controlled-task",
             model: "deepseek-v4-pro",
+            reasoning_effort: "max",
             messages: [{ role: "system", content: "caller-controlled prompt" }],
             response_format: { type: "text" },
         });
@@ -93,9 +94,10 @@ describe("POST /api/chat", () => {
         expect(fetchMock).toHaveBeenCalledOnce();
         const [, init] = vi.mocked(fetchMock).mock.calls[0];
         const payload = JSON.parse(String(init?.body));
-        expect(payload.model).toBe("deepseek-v4-flash");
+        expect(payload.model).toBe("deepseek-flash");
         expect(payload.response_format).toEqual({ type: "json_object" });
-        expect(payload).not.toHaveProperty("reasoning_effort");
+        expect(payload.reasoning_effort).toBe("low");
+        expect(payload.thinking).toEqual({ type: "enabled" });
         expect(payload.messages).toHaveLength(2);
         expect(payload.messages[0]).toMatchObject({ role: "system" });
         expect(payload.messages[0].content).toContain("无损整理和排版");
@@ -113,7 +115,7 @@ describe("POST /api/chat", () => {
             expect.anything(),
             "user-1",
             "adhoc:user-1",
-            "deepseek-v4-flash",
+            "deepseek-flash",
             { prompt_tokens: 10, completion_tokens: 10 },
             false,
         );
@@ -151,6 +153,88 @@ describe("POST /api/chat", () => {
         expect(isClientCancelled(upstreamSignal?.reason)).toBe(true);
         expect(response.status).toBe(499);
         await expect(response.json()).resolves.toMatchObject({ code: "CLIENT_CANCELLED" });
+    });
+});
+
+describe.each(["chat", "stream"] as const)("POST /api/%s model routing", (path) => {
+    const handler = path === "chat" ? chat : stream;
+
+    it.each([
+        [undefined, undefined, "low", false],
+        ["deepseek-v4-flash", undefined, "low", false],
+        ["deepseek-v4-pro", undefined, "high", false],
+        ["deepseek-reasoner", undefined, "high", true],
+        ["deepseek-flash", "low", "low", true],
+        ["deepseek-flash", "high", "high", true],
+        ["deepseek-flash", "max", "max", false],
+        ["deepseek-v4-pro", "low", "low", false],
+        ["deepseek-v4-pro", "invalid", "high", false],
+    ])("routes %s / %s to V4.1 with %s (BYOK=%s)", async (model, effort, expectedEffort, byok) => {
+        const usage = { prompt_tokens: 10, completion_tokens: 20 };
+        const fetchMock = vi.fn(async () => path === "chat"
+            ? new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage }))
+            : new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }], usage })}\n\ndata: [DONE]\n\n`),
+        ) as unknown as typeof fetch;
+        vi.stubGlobal("fetch", fetchMock);
+        const { context, waitUntilPromises } = makeContext(path, {
+            model,
+            reasoning_effort: effort,
+            messages: [{ role: "user", content: "hello" }],
+        });
+        if (byok) {
+            context.request.headers.set("X-LLM-Provider", "deepseek");
+            context.request.headers.set("X-LLM-Key", "user-key");
+        }
+
+        const response = await handler(context);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain("ok");
+        await Promise.all(waitUntilPromises);
+
+        const [url, init] = vi.mocked(fetchMock).mock.calls[0];
+        expect(url).toBe("https://api.deepseek.com/v1/chat/completions");
+        expect(new Headers(init?.headers).get("Authorization"))
+            .toBe(`Bearer ${byok ? "user-key" : "platform-key"}`);
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+            model: "deepseek-flash",
+            reasoning_effort: expectedEffort,
+            thinking: { type: "enabled" },
+        });
+        if (byok) expect(accumulateCostMock).not.toHaveBeenCalled();
+        else expect(accumulateCostMock).toHaveBeenCalledWith(
+            expect.anything(), "user-1", "adhoc:user-1", "deepseek-flash", usage, false,
+        );
+    });
+
+    it.each(["low", "high"])("preserves GLM BYOK parameters for the %s tier", async (effort) => {
+        const fetchMock = vi.fn(async () => path === "chat"
+            ? new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }))
+            : new Response("data: [DONE]\n\n"),
+        ) as unknown as typeof fetch;
+        vi.stubGlobal("fetch", fetchMock);
+        const { context, waitUntilPromises } = makeContext(path, {
+            model: "deepseek-flash",
+            reasoning_effort: effort,
+            messages: [{ role: "user", content: "hello" }],
+        });
+        context.request.headers.set("X-LLM-Provider", "glm");
+        context.request.headers.set("X-LLM-Key", "glm-key");
+        context.env.TASKS.get = async () => JSON.stringify({ totalRecharged: 25 });
+
+        const response = await handler(context);
+        expect(response.status).toBe(200);
+        await response.text();
+        await Promise.all(waitUntilPromises);
+        const [, init] = vi.mocked(fetchMock).mock.calls[0];
+        const payload = JSON.parse(String(init?.body));
+        expect(payload.model).toBe("glm-5.2");
+        if (effort === "high") {
+            expect(payload.reasoning_effort).toBe("high");
+            expect(payload.thinking).toEqual({ type: "enabled" });
+        } else {
+            expect(payload).not.toHaveProperty("reasoning_effort");
+            expect(payload).not.toHaveProperty("thinking");
+        }
     });
 });
 

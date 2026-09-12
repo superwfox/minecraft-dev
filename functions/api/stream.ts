@@ -7,6 +7,7 @@ import {
     deepSeekKeyRequiredResponse,
     resolveLLM,
     resolveTaskLLM,
+    thinkingFor,
     tierFromModel,
     type LLMProvider,
 } from "../_lib/llm";
@@ -49,7 +50,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     if (!llm.apiKey) return new Response("API key not configured", {status: 500});
 
-    const tier = tierFromModel(body.model);
+    const tier = tierFromModel(body.model, body.reasoning_effort);
     const model = llm.modelFor(tier);
 
     const messages = Array.isArray(body.messages)
@@ -76,15 +77,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const payload: any = {
         model,
+        ...thinkingFor(llm, tier, body.reasoning_effort),
         messages,
         stream: true,
         stream_options: { include_usage: true },
     };
-    if (tier === "pro") {
-        payload.reasoning_effort = "high";
-        payload.thinking = {type: "enabled"};
-    }
-
     const upstreamAbort = new AbortController();
     const unlinkClientAbort = linkClientAbortSignal(
         upstreamAbort,

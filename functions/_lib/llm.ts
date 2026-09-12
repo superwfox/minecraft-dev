@@ -7,20 +7,22 @@
 // 未提供有效 BYOK 配置时回退到共享 DeepSeek key。
 //
 // GLM 与 DeepSeek 均为 OpenAI 兼容 chat/completions，所以请求体与 SSE 解析可复用，
-// 这里只切换 { url, key, 模型名 }。
+// 统一解析提供方、模型名与思考强度。
 
 import { getTier } from "./quota";
 
 export type LLMTier = "pro" | "flash";
+export type ReasoningEffort = "low" | "high" | "max";
 export type TaskBillingProvider = "deepseek_byok" | "platform";
 
+export const DEEPSEEK_MODEL = "deepseek-flash";
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const GLM_CODING_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
 
 const DEEPSEEK_MODELS: Record<LLMTier, string> = {
-    pro: "deepseek-v4-pro",
-    flash: "deepseek-v4-flash",
+    pro: DEEPSEEK_MODEL,
+    flash: DEEPSEEK_MODEL,
 };
 // GLM 两档（用户自带 key；如果某账号没有这些型号，改这里即可）。
 // 当前统一用最新的 glm-5.2（智谱默认旗舰）；如需给 flash 档换更省的型号，改 flash 这行即可。
@@ -50,9 +52,30 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-/** 把 chat/stream 等 body 里的模型字符串归一化成档位（含 pro 关键字即 pro） */
-export function tierFromModel(model: string | undefined): LLMTier {
-    return model && /pro|reason/i.test(model) ? "pro" : "flash";
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+    return value === "low" || value === "high" || value === "max";
+}
+
+/** 新客户端用 effort 选择档位；未指定时兼容旧客户端的 pro/reasoner 模型名。 */
+export function tierFromModel(model: unknown, effort?: unknown): LLMTier {
+    if (isReasoningEffort(effort)) return effort === "low" ? "flash" : "pro";
+    return typeof model === "string" && /pro|reason/i.test(model) ? "pro" : "flash";
+}
+
+export function thinkingFor(
+    llm: Pick<LLMProvider, "providerId">,
+    tier: LLMTier,
+    effort?: unknown,
+): { reasoning_effort?: ReasoningEffort; thinking?: { type: "enabled" } } {
+    if (llm.providerId === "deepseek") {
+        return {
+            reasoning_effort: isReasoningEffort(effort) ? effort : tier === "pro" ? "high" : "low",
+            thinking: { type: "enabled" },
+        };
+    }
+    return tier === "pro"
+        ? { reasoning_effort: "high", thinking: { type: "enabled" } }
+        : {};
 }
 
 /** 供中间件和任务恢复入口使用；与 resolveLLM 的 DeepSeek BYOK 判定保持一致。 */

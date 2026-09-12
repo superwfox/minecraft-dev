@@ -20,14 +20,16 @@
 
 ### 模型分工
 
-| 模型 | 用途 | 备注 |
+| 模型 / 档位 | 用途 | 备注 |
 |------|------|------|
-| `deepseek-v4-flash` | Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | 速度快，承担批量生成 |
-| `deepseek-v4-pro` | clarify / **grade** / planner / reChecker / rework / fix | 自动注入 `reasoning_effort: "high"` + `thinking: { type: "enabled" }`，处理深度推理 |
+| `deepseek-flash` / 原 flash 档 | 预检、Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 pro 档 | clarify / **grade** / planner / reChecker / rework / fix / 增量需求 / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+
+两档均使用 DeepSeek-V4.1-Flash，通过思考强度区分任务分工。Responses 联网发现同样使用 `deepseek-flash`，对应参数为 `reasoning: { effort: "low" }`。
 
 > **自带 DeepSeek Key（所有用户）**：Key 保存在用户浏览器。所有模型请求统一通过 Pages Functions 路由，模型名称与平台请求保持一致；Key 仅随请求临时传递，`resolveLLM` 不落库且跳过平台计费。未配置时使用已有充值余额走共享 DeepSeek。
 
-`functions/api/chat.ts` 与 `stream.ts` 在 `model` 包含 `pro` 时自动注入上述两个字段，调用方只传模型名即可。
+`functions/api/chat.ts` 与 `stream.ts` 优先读取 `reasoning_effort`（`low` / `high` / `max`），默认 `low`，并显式启用 thinking。未提供有效 effort 时，旧客户端模型名中的 `pro` / `reason` 仍映射到 `high`；DeepSeek 的实际模型名统一为 `deepseek-flash`。
 
 ## 整体流程
 
@@ -77,7 +79,7 @@ graph TB
 
 ### precheck 完整性预检
 
-用户提交后，前端先调 `/api/stream`（`deepseek-v4-flash`）判断是否已经能识别核心功能并进入规划（`src/api/deepseek.ts` 的 `precheckPrompt`）：
+用户提交后，前端先调 `/api/stream`（`deepseek-flash`，`reasoning_effort=low`）判断是否已经能识别核心功能并进入规划（`src/api/deepseek.ts` 的 `precheckPrompt`）：
 
 - `{"complete": true}` → 继续；
 - `{"complete": false, "heading": "...", "items": [...]}` → 仅展示真正阻断规划的少量补充问题，等用户补完再提交；
@@ -93,7 +95,7 @@ graph TB
 sequenceDiagram
     participant F as 前端
     participant C as /api/generate/clarify
-    participant AI as deepseek-v4-pro
+    participant AI as DeepSeek V4.1 Flash (high)
 
     loop 直到 done=true 或达到 5 轮
         F->>C: POST { taskId, answers? }
@@ -109,7 +111,7 @@ sequenceDiagram
 
 **关键设计：**
 
-- **Reasoner 流式协议**：`deepseek-v4-pro` 的 chunk 同时含 `delta.reasoning_content`（思考）和 `delta.content`（输出）。前端把 reasoning 写入可折叠的「AI 思考中」区域，content 增量喂给 JSON 解析器。
+- **Reasoner 流式协议**：`deepseek-flash`（`reasoning_effort=high`）的 chunk 同时含 `delta.reasoning_content`（思考）和 `delta.content`（输出）。前端把 reasoning 写入可折叠的「AI 思考中」区域，content 增量喂给 JSON 解析器。
 - **增量卡片渲染**：在 delta 阶段就用深度计数解析器（`generateHandler.ts` 的 `extractCompletedTodos`）抽出已闭合的 todo 推进 ClarifyPanel，消除「思考完→等结果→突然出现」的空档。
 - **按需澄清项**（仅在确实存在会改变产品行为的分叉时提出）：
   - `ui-interaction`：需求明确涉及可视化选择、列表、分页或图形界面时询问
@@ -123,7 +125,7 @@ sequenceDiagram
 
 ## 第零·五阶段：复杂度分级 + 实现路径确认门
 
-澄清完成后、进入 Planner 之前，先经一道**分级门**（`/api/generate/grade`，`deepseek-v4-pro` + thinking，SSE）。它解决两个问题：**控制 plan 的体量**，以及**在有多种合理实现时让用户拍板**，而不是让 Planner 替用户猜。
+澄清完成后、进入 Planner 之前，先经一道**分级门**（`/api/generate/grade`，`deepseek-flash` + `reasoning_effort=high`，SSE）。它解决两个问题：**控制 plan 的体量**，以及**在有多种合理实现时让用户拍板**，而不是让 Planner 替用户猜。
 
 ### 打分向量 + 确定性下限
 
@@ -159,7 +161,7 @@ graph LR
 
 ## 第一阶段：Planner 规划（主类蓝图 + 文件树）
 
-`clarifyDone === true` 后前端第二次调 `/api/generate/plan`（带 taskId，并附上用户挂载的 `skillIds`）。后端用 `deepseek-v4-pro`（thinking）产出**两样东西**：主类蓝图 `mainBlueprint` 和带类型的文件树 `files[]`。
+`clarifyDone === true` 后前端第二次调 `/api/generate/plan`（带 taskId，并附上用户挂载的 `skillIds`）。后端用 `deepseek-flash`（`reasoning_effort=high`）产出**两样东西**：主类蓝图 `mainBlueprint` 和带类型的文件树 `files[]`。
 
 > **技能注入**：若用户挂载了 [技能库](/features/skills) 中的 Skill，`plan.ts` 用 `getSkillBundles`（KV 缓存 30 分钟）拉取每个技能的资料 + 生成器条目，存入任务状态，在规划与逐文件生成阶段注入 AI 上下文——让 Planner 和 Generator 能用上 Paper 默认 API 之外的能力。
 
@@ -289,7 +291,7 @@ sequenceDiagram
     participant F as 前端
     participant Fix as fix.ts
     participant GH as GitHub API
-    participant AI as deepseek-v4-pro
+    participant AI as DeepSeek V4.1 Flash (high)
 
     F->>Fix: POST /api/generate/fix
     Fix->>GH: 获取失败 Job 日志

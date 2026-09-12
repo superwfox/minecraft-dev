@@ -7,6 +7,7 @@ import {
     deepSeekKeyRequiredResponse,
     resolveLLM,
     resolveTaskLLM,
+    thinkingFor,
     tierFromModel,
     type LLMProvider,
 } from "../_lib/llm";
@@ -107,7 +108,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
     if (!llm.apiKey) return new Response("API key not configured", {status: 500});
 
-    const tier = formatPrompt ? "flash" : tierFromModel(body.model);
+    const tier = formatPrompt ? "flash" : tierFromModel(body.model, body.reasoning_effort);
     const model = llm.modelFor(tier);
 
     // 【非流式】CF 免费版单请求仅 ~10ms CPU。流式逐 chunk decode + JSON.parse 会超 CPU 被硬杀。
@@ -122,10 +123,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             response_format: { type: "json_object" },
         }
         : {model, messages: body.messages};
-    if (tier === "pro") {
-        payload.reasoning_effort = "high";
-        payload.thinking = {type: "enabled"};
-    }
+    Object.assign(payload, thinkingFor(llm, tier, formatPrompt ? undefined : body.reasoning_effort));
     if (!formatPrompt && body.response_format) payload.response_format = body.response_format;
 
     const ctrl = new AbortController();

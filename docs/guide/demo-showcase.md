@@ -30,14 +30,16 @@
 
 ## 第零阶段：需求确认
 
-### 步骤 1：precheck 完整性预检（deepseek-v4-pro + thinking）
+### 步骤 1：precheck 完整性预检（deepseek-flash + low）
 
-用户提交后，前端先调用 `/api/chat` 走 `deepseek-v4-pro` 判断需求是否闭环。
+用户提交后，前端先调用 `/api/stream` 走 `deepseek-flash`（`reasoning_effort=low`）判断是否能识别核心需求。
 
 **输入**：
 ```json
 {
-  "model": "deepseek-v4-pro",
+  "model": "deepseek-flash",
+  "reasoning_effort": "low",
+  "stream": true,
   "messages": [
     { "role": "system", "content": "你是 Minecraft 插件需求完整性检查器..." },
     { "role": "user", "content": "请帮我完成一个玩家进服后被踢出..." }
@@ -54,9 +56,9 @@
 
 ### 步骤 2：getInfo 提取核心 + 版本 → 用户确认
 
-`deepseek-v4-flash` 提取出 `coreType: "PAPER"`、`version: "1.20.6"`，因为已写在需求中无需再问。
+`deepseek-flash`（`reasoning_effort=low`）提取出 `coreType: "PAPER"`、`version: "1.20.6"`，因为已写在需求中无需再问。
 
-### 步骤 3：多轮 Clarify 澄清（deepseek-v4-pro + thinking）
+### 步骤 3：多轮 Clarify 澄清（deepseek-flash + high）
 
 确认版本后调用 `POST /api/generate/plan`（无 taskId）创建任务，再循环调用 `POST /api/generate/clarify` 进入澄清。
 
@@ -123,7 +125,7 @@ ClarifyPanel 顶部显示进度 `1/3`，单卡片纵向选项。用户选择：
 
 ## 第零·五阶段：复杂度分级与实现路径
 
-澄清结束后、进入 Planner 之前，前端调用 `POST /api/generate/grade`（`deepseek-v4-pro` + thinking），先给需求评一个复杂度，必要时让用户拍板实现路径。
+澄清结束后、进入 Planner 之前，前端调用 `POST /api/generate/grade`（`deepseek-flash` + `reasoning_effort=high`），先给需求评一个复杂度，必要时让用户拍板实现路径。
 
 ### grade 输出
 
@@ -162,7 +164,7 @@ ClarifyPanel 顶部显示进度 `1/3`，单卡片纵向选项。用户选择：
 
 ## 第一阶段：Planner 规划
 
-澄清与分级完成后，前端再次调用 `POST /api/generate/plan`（带 taskId 与 `chosenPathId`），后端把已确认决策 + 所选实现路径拼接进 `plannerPrompt` 并调用 `deepseek-v4-pro` 出文件树。
+澄清与分级完成后，前端再次调用 `POST /api/generate/plan`（带 taskId 与 `chosenPathId`），后端把已确认决策 + 所选实现路径拼接进 `plannerPrompt` 并调用 `deepseek-flash`（`reasoning_effort=high`）出文件树。
 
 ### Planner 输入
 
@@ -673,14 +675,14 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 
 ### 0. precheck + 多轮 Clarify 把模糊需求收敛为可执行决策
 
-- precheck（`deepseek-v4-pro` + thinking）拦截"功能闭环 / 玩家行为 / 触发方式"未交代的输入，输入框预填补充提示
+- precheck（`deepseek-flash` + `reasoning_effort=low`）检查是否能识别核心需求，必要时提示补充
 - ClarifyPanel 单卡片纵向选项，强制覆盖 UI 方式 / 持久化（含文本格式追问）/ 权限节点等关键项
 - Reasoner 的思考流写入折叠区，todos 增量解析逐张推到面板，无空档
 - clarifyRounds 全部回灌 `plannerPrompt`，让 Planner 按"已确认决策"出文件树，避免冗余
 
 ### 0.5 复杂度分级 + 实现路径确认门
 
-- grade（`deepseek-v4-pro` + thinking）对需求打**分向量**，`enforceLevelFloor` 用确定性硬规则强制等级下限（如"持久化"必到中等）
+- grade（`deepseek-flash` + `reasoning_effort=high`）对需求打**分向量**，`enforceLevelFloor` 用确定性硬规则强制等级下限（如"持久化"必到中等）
 - 非"直接"级时列出多条**实现路径**让用户选定，或填修正打回重评——在"有多种合理做法"时把决定权交还用户，而非让 Planner 替用户猜
 - 所选路径 + 打分向量带进 Planner，控制 plan 体量与实现方向
 

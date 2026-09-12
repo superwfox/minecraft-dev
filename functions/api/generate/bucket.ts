@@ -1,7 +1,7 @@
 import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
-import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
+import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
@@ -181,12 +181,9 @@ async function callAI(
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
+        ...thinkingFor(llm, usePro ? "pro" : "flash"),
         messages: messages ?? [{ role: "system", content: system }, { role: "user", content: user }],
     };
-    if (usePro) {
-        body.reasoning_effort = "high";
-        body.thinking = { type: "enabled" };
-    }
     if (jsonMode) body.response_format = { type: "json_object" };
     if (tools.length) body.tools = tools;
 
@@ -250,12 +247,9 @@ async function callAIStream(
     const model = llm.modelFor(usePro ? "pro" : "flash");
     const body: any = {
         model,
+        ...thinkingFor(llm, usePro ? "pro" : "flash"),
         messages: messages ?? [{ role: "system", content: system }, { role: "user", content: user }],
     };
-    if (usePro) {
-        body.reasoning_effort = "high";
-        body.thinking = { type: "enabled" };
-    }
     if (tools.length) body.tools = tools;
 
     const ctrl = new AbortController();

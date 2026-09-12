@@ -227,7 +227,8 @@ describe("DeepSeek Responses adapter", () => {
         const body = JSON.parse(String(init?.body));
         expect(url).toBe("https://api.deepseek.com/responses");
         expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
-        expect(body.model).toBe("deepseek-v4-flash");
+        expect(body.model).toBe("deepseek-flash");
+        expect(body.reasoning).toEqual({ effort: "low" });
         expect(body.tools).toEqual([{ type: "web_search" }]);
         expect(body.tool_choice).toEqual({ type: "web_search" });
         expect(body.text?.format).toMatchObject({

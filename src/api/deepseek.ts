@@ -55,7 +55,8 @@ async function requestCompletion(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            model: options.reasoning ? "deepseek-v4-pro" : "deepseek-v4-flash",
+            model: "deepseek-flash",
+            reasoning_effort: options.reasoning ? "high" : "low",
             messages,
             ...(options.stream ? { stream: true } : {}),
         }),

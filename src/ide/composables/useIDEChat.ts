@@ -73,7 +73,8 @@ async function requestIDEStream(
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
-            model: "deepseek-v4-flash",
+            model: "deepseek-flash",
+            reasoning_effort: "low",
             taskId: taskId || undefined,
             messages,
             stream: true,

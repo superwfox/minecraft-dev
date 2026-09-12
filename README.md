@@ -13,7 +13,7 @@
 | 目标用户 | Minecraft 服务器运营者、插件作者、教学场景 |
 | 输入 | 一段自然语言需求（如"做一个商店插件，物品按等级涨价"） |
 | 输出 | 可直接部署的 Maven 插件项目 + 编译好的 `.jar` |
-| 核心引擎 | DeepSeek `deepseek-v4-pro` (Reasoner, `reasoning_effort=high`) + `deepseek-v4-flash` |
+| 核心引擎 | DeepSeek V4.1 Flash（`deepseek-flash`）；原 pro 档 `reasoning_effort=high`，原 flash 档 `reasoning_effort=low` |
 | 部署形态 | Cloudflare Pages（前端静态资源 + Pages Functions Workers） |
 | 状态后端 | Cloudflare D1（生成任务/任务成本）+ KV（用户额度与缓存） |
 | 编译产物 | GitHub Actions → Maven artifact → 通过 Worker 代理下载 |
@@ -194,7 +194,7 @@ interface FileSummary {
 
 ### 4.4 多轮澄清 + Reasoner 思考流式
 
-`functions/api/generate/clarify.ts` 将 `deepseek-v4-pro` 的 `delta.reasoning_content` 与 `delta.content` **分别打 type tag** 推回前端：
+`functions/api/generate/clarify.ts` 将 `deepseek-flash`（`reasoning_effort=high`）的 `delta.reasoning_content` 与 `delta.content` **分别打 type tag** 推回前端：
 
 ```
 event: { type: "reasoning", content: "..." }   ← AI 思考过程

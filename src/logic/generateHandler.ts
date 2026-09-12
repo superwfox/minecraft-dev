@@ -3346,7 +3346,8 @@ export async function appendFeature(appendText: string) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                model: "deepseek-v4-pro",
+                model: "deepseek-flash",
+                reasoning_effort: "high",
                 taskId: genTask.taskId || undefined,
                 purpose: "append",
                 projectContext: {

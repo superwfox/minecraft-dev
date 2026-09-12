@@ -121,7 +121,7 @@ magic 0xCAFEBABE → 常量池 → access_flags → this_class
 
 ## AI 助手
 
-IDE 内置两个独立的 AI 入口（均走 `/api/stream`，`deepseek-v4-flash`，逻辑在 `useIDEChat.ts`）：
+IDE 内置两个独立的 AI 入口（均走 `/api/stream`，`deepseek-flash` + `reasoning_effort=low`，逻辑在 `useIDEChat.ts`）：
 
 ### 底部聊天 dock
 

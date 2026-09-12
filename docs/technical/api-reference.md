@@ -23,12 +23,14 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 ## 模型与 Thinking 参数
 
-| 模型 | 用途 | 自动注入 |
+| 模型 / 档位 | 用途 | 自动注入 |
 |------|------|----------|
-| `deepseek-v4-flash` | Pre-checker / Generator / Summarizer / Dynamic Gen / IDE 助手 / 对话兜底 | — |
-| `deepseek-v4-pro` | clarify / grade / planner / reChecker / rework / fix | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / IDE 助手 / 对话兜底 / Responses 联网发现 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }`（Responses 使用 `reasoning: { effort: "low" }`） |
+| `deepseek-flash` / 原 pro 档 | clarify / grade / planner / reChecker / rework / fix / 增量需求 / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
-`/api/chat` 和 `/api/stream` 在 `model` 包含 `pro` 时自动注入上述两个字段；调用方只需传模型名。
+两档统一调用 DeepSeek-V4.1-Flash，API 模型名为 `deepseek-flash`。`/api/chat` 和 `/api/stream` 优先读取 `reasoning_effort`（`low`、`high`、`max`），默认 `low`；未提供有效 effort 时，旧客户端模型名中的 `pro` / `reason` 仍映射到 `high`。`max` 会原样用于 DeepSeek 请求。需求整理器固定使用 `low`。DeepSeek BYOK 与平台请求采用相同路由；GLM BYOK 保持现有模型和参数策略。
+
+根据 [2026-09-10 官方更新](https://api-docs.deepseek.com/zh-cn/updates) 与 [思考模式文档](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode) 核对。V4.1 Flash 人民币单价（每百万 tokens）为：闲时缓存命中 / 未命中 / 输出 `0.02 / 1 / 4` 元，高峰 `0.04 / 2 / 8` 元；高峰仅为北京时间周一至周五 09:00-12:00、14:00-18:00。详见 [官方价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)。两档单价相同，成本随实际 token 用量计算。
 
 ## 对话 API
 
@@ -39,13 +41,14 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 **请求**：
 ```json
 {
-  "model": "deepseek-v4-flash",
+  "model": "deepseek-flash",
+  "reasoning_effort": "low",
   "messages": [ { "role": "system", "content": "..." }, { "role": "user", "content": "..." } ],
   "response_format": { "type": "json_object" }
 }
 ```
 
-`model` 缺省为 `deepseek-v4-flash`；含 `pro` 时服务端追加 thinking 字段。`response_format` 可选透传。
+DeepSeek `model` 统一解析为 `deepseek-flash`；服务端显式启用 thinking 并设置对应 effort。`response_format` 可选透传。
 
 **响应**：`{ "content": "AI 返回的文本" }`
 
@@ -53,7 +56,7 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 流式对话，用于 IDE 助手、对话兜底等。
 
-**请求**：`{ "model": "deepseek-v4-flash", "messages": [...], "stream": true }`
+**请求**：`{ "model": "deepseek-flash", "reasoning_effort": "low", "messages": [...], "stream": true }`
 
 **响应**：SSE 流
 ```
@@ -92,7 +95,7 @@ GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
 请求：`{ "userPrompt": "...", "coreType": "PAPER", "version": "1.21" }`
 响应：`{ "taskId": "1710556800000-abc123" }`
 
-**模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-v4-pro`（thinking），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 D1。
+**模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-flash`（`reasoning_effort=high`），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 D1。
 
 Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRequests`。前端推进对应 Learning job 后，以同一 `plannerRequestId` 和 `learningToolJobs` 重入；服务端把验证结果作为 `role: "tool"` 消息接回原始 thinking/tool-call 对话，再继续产出计划。Generator、Reviewer、Reworker 与 Fixer 使用同一协议。
 
@@ -149,7 +152,7 @@ Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRe
 | 事件 `type` | 说明 |
 |------|------|
 | `phase` | 阶段切换，含 `round` 当前轮次 |
-| `reasoning` | `deepseek-v4-pro` 的思考流（前端写入折叠区） |
+| `reasoning` | `deepseek-flash`（`reasoning_effort=high`）的思考流（前端写入折叠区） |
 | `delta` | 最终 JSON 的流式片段（前端可增量解析提前渲染卡片） |
 | `result` | 解析完成：`{ done, todos }`，或 `{ needMoreInput: true, hint }` |
 | `log` | 日志（解析失败、超过最大轮次等） |

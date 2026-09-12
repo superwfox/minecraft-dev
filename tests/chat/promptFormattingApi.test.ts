@@ -53,7 +53,8 @@ describe("formatUserPrompt", () => {
         const [url, init] = vi.mocked(fetchMock).mock.calls[0];
         expect(url).toBe("/api/stream");
         const payload = JSON.parse(String(init?.body));
-        expect(payload.model).toBe("deepseek-v4-flash");
+        expect(payload.model).toBe("deepseek-flash");
+        expect(payload.reasoning_effort).toBe("low");
         expect(payload.messages[0].content).toContain("你不是需求审计器");
         expect(payload.messages[0].content).toContain("必须返回 {\"complete\":true}");
         expect(payload.messages[0].content).toContain("不得追问反馈、防刷、重连、背包或已在线玩家");
@@ -83,7 +84,10 @@ describe("formatUserPrompt", () => {
 
             const [url, init] = vi.mocked(fetchMock).mock.calls[0];
             expect(url).toBe("/api/stream");
-            expect(JSON.parse(String(init?.body)).model).toBe("deepseek-v4-flash");
+            expect(JSON.parse(String(init?.body))).toMatchObject({
+                model: "deepseek-flash",
+                reasoning_effort: "low",
+            });
             const headers = new Headers(init?.headers);
             expect(headers.get("X-LLM-Provider")).toBe("deepseek");
             expect(headers.get("X-LLM-Key")).toBe("user-deepseek-key");

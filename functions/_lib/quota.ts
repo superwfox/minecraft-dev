@@ -37,12 +37,17 @@ export interface ModelPricing {
 
 // DeepSeek 官网单价（人民币 / 百万 tokens）：
 // https://api-docs.deepseek.com/zh-cn/quick_start/pricing
-// 高峰为北京时间 09:00-12:00、14:00-18:00，即 UTC 01:00-04:00、06:00-10:00；其余为空闲时段。
+// 高峰为北京时间周一至周五 09:00-12:00、14:00-18:00；其余为空闲时段。
+const FLASH_PRICING: ModelPricing = {
+    offPeak: { cacheHit: 0.02, input: 1.0, output: 4.0 },
+    peak: { cacheHit: 0.04, input: 2.0, output: 8.0 },
+};
+
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-    "deepseek-v4-flash": {
-        offPeak: { cacheHit: 0.05, input: 1.5, output: 4.5 },
-        peak: { cacheHit: 0.10, input: 3.0, output: 9.0 },
-    },
+    "deepseek-flash": FLASH_PRICING,
+    // 官方仍接受的旧 Flash 名称也由 V4.1-Flash 服务，并按新单价计费。
+    "deepseek-v4-flash": FLASH_PRICING,
+    "deepseek-v4-flash-vision-exp": FLASH_PRICING,
     "deepseek-v4-pro": {
         offPeak: { cacheHit: 0.15, input: 4.5, output: 13.5 },
         peak: { cacheHit: 0.30, input: 9.0, output: 27.0 },
@@ -192,8 +197,10 @@ export interface UsageCostEntry {
 }
 
 export function isDeepSeekPeakTime(at: Date | number = Date.now()): boolean {
-    const hour = (at instanceof Date ? at : new Date(at)).getUTCHours();
-    return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
+    const beijingTime = new Date(Number(at) + 8 * 60 * 60 * 1000);
+    const day = beijingTime.getUTCDay();
+    const hour = beijingTime.getUTCHours();
+    return day >= 1 && day <= 5 && ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18));
 }
 
 export function usageCost(

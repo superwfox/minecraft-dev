@@ -1,4 +1,5 @@
 import type { UsageBreakdown, UsageCostEntry } from "./quota";
+import { DEEPSEEK_MODEL } from "./llm";
 import { LEARNING_DISCOVERY_LIMIT_MS } from "./learning/deadline";
 import type {
     KnowledgeNeed,
@@ -8,7 +9,7 @@ import type {
 } from "./learning/types";
 
 const RESPONSES_URL = "https://api.deepseek.com/responses";
-const RESPONSES_MODEL = "deepseek-v4-flash";
+const RESPONSES_MODEL = DEEPSEEK_MODEL;
 const DEFAULT_BUDGET_MS = LEARNING_DISCOVERY_LIMIT_MS;
 const RESERVE_MS = 750;
 const RETRY_BACKOFF_MS = 250;
