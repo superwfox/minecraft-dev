@@ -68,3 +68,4 @@ jobs:
               --head "$UPDATE_BRANCH" \
               --title "$PR_TITLE" \
               --body "$PR_BODY"
+          fi
