@@ -68,6 +68,15 @@ export type LearningProgress = {
     reasonCode?: LearningReasonCode;
 };
 
+export type NegativeFactUsed = {
+    factId: string;
+    symbol: string;
+    dependencyIdentity: string;
+    dependencyFingerprint: string;
+    sourceUrl: string;
+    source: "verified" | "cache";
+};
+
 export type LearningProviderStatus = "completed" | "incomplete" | "failed" | "unknown";
 export type LearningJobTelemetry = {
     version: 1;
@@ -479,6 +488,7 @@ export type GenTask = {
     fixResumeStage: FixResumeStage;
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
+    negativeFactsUsed: NegativeFactUsed[];
     learningDeferred: boolean;
     learningDebugEvents: LearningDebugEvent[];
     learningDebugDroppedEvents: number;
@@ -532,6 +542,7 @@ export const genTask = reactive<GenTask>({
     fixResumeStage: "",
     learningProgress: emptyLearningProgress(),
     knowledgeUsed: [],
+    negativeFactsUsed: [],
     learningDeferred: false,
     learningDebugEvents: [],
     learningDebugDroppedEvents: 0,
@@ -678,6 +689,7 @@ export function resetGenTask() {
     genTask.fixResumeStage = "";
     genTask.learningProgress = emptyLearningProgress();
     genTask.knowledgeUsed = [];
+    genTask.negativeFactsUsed = [];
     genTask.learningDeferred = false;
     genTask.learningDebugEvents = [];
     genTask.learningDebugDroppedEvents = 0;
@@ -769,6 +781,7 @@ function writeGenTaskSnapshot() {
             fixResumeStage: genTask.fixResumeStage,
             learningProgress: genTask.learningProgress,
             knowledgeUsed: genTask.knowledgeUsed,
+            negativeFactsUsed: genTask.negativeFactsUsed,
             learningDeferred: genTask.learningDeferred,
             learningDebugEvents: genTask.learningDebugEvents.slice(-MAX_LEARNING_DEBUG_EVENTS),
             learningDebugDroppedEvents: genTask.learningDebugDroppedEvents,
@@ -866,6 +879,7 @@ export function restoreGenTask(): boolean {
         genTask.fixResumeStage = normalizeFixResumeStage(s.fixResumeStage);
         genTask.learningProgress = normalizeLearningProgress(s.learningProgress);
         genTask.knowledgeUsed = s.knowledgeUsed || [];
+        genTask.negativeFactsUsed = Array.isArray(s.negativeFactsUsed) ? s.negativeFactsUsed.slice(0, 64) : [];
         genTask.learningDeferred = !!s.learningDeferred;
         const rawLearningDebugEvents = Array.isArray(s.learningDebugEvents) ? s.learningDebugEvents : [];
         const boundedLearningDebugEvents = rawLearningDebugEvents.slice(-MAX_LEARNING_DEBUG_EVENTS);
@@ -899,7 +913,7 @@ watch(
     () => [genTask.taskExpiresAt, genTask.phase, genTask.interruptedFrom, genTask.files.length, genTask.currentIndex, genTask.logs.length,
         genTask.error, genTask.errorMeta?.kind, genTask.errorMeta?.code, genTask.errorMeta?.status,
         genTask.files.filter(f => f.status === "done").length,
-        genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length,
+        genTask.learningProgress.status, genTask.learningProgress.revision, genTask.knowledgeUsed.length, genTask.negativeFactsUsed.length,
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
         genTask.preflightStage, genTask.clarifyTodos.length, genTask.clarifyRound,
         genTask.clarifyHistory.length, genTask.moreInputHint,

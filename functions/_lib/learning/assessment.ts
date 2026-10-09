@@ -243,7 +243,7 @@ export interface CompileLearningEligibility {
     dependency?: string;
     integrationKind?: LearningIntegrationKind;
 }
-function dependencyOwnsSymbol(dependency: CompileDependencyContext, symbol: string): boolean {
+export function dependencyOwnsSymbol(dependency: CompileDependencyContext, symbol: string): boolean {
     const { groupId, artifactId } = dependency;
     if (/^(?:org\.bukkit|io\.papermc|com\.destroystokyo)\./.test(symbol)) {
         if (/^(?:io\.papermc|com\.destroystokyo)\./.test(symbol)) return groupId === "io.papermc.paper" && artifactId === "paper-api";

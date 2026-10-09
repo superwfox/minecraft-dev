@@ -8,6 +8,7 @@ import {
     findRunByBranch,
     deleteBranch,
 } from "../../_lib/github";
+import { protectedBuildPath } from "../../_lib/learning/compileApiEvidence";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import {
@@ -395,6 +396,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
         }
 
+        if (state.generatedFiles.some((file: any) => protectedBuildPath(file?.path))) {
+            throw new Error("生成文件包含无效或受保护的构建路径");
+        }
         await renewBuildLease();
         const { sha } = await getDefaultBranchSha(token);
         const branch = `build-${taskId}`;
@@ -416,7 +420,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         await renewBuildLease();
         const treeSha = await createTree(token, sha, treeFiles);
-        await createCommitAndUpdateRef(token, treeSha, sha, branch, `build ${taskId}: ${treeFiles.length} files`);
+        state.buildHeadSha = await createCommitAndUpdateRef(token, treeSha, sha, branch, `build ${taskId}: ${treeFiles.length} files`);
+        state.buildBaseSha = sha;
+        delete state.compileApiEvidence;
         state.logs.push(`已一次性提交 ${treeFiles.length} 个文件`);
 
         const beforeTrigger = new Date(Date.now() - BUILD_RUN_LOOKBACK_MS).toISOString();

@@ -5,6 +5,7 @@ import {
 } from "./plannerAuthorization";
 import type { LearningJobRecord, LearningReasonCode } from "./types";
 import { taskOperationLeaseFromState } from "../taskStore";
+import { currentCompileApiEvidence } from "./compileApiEvidence";
 import {
     currentModelLearningAuthorization,
     sameModelLearningAuthorization,
@@ -40,6 +41,12 @@ export async function learningJobAuthorizationFailure(
             : "planner_authorization_expired";
     if (!currentTaskFence || !expectedTaskFence || currentTaskFence !== expectedTaskFence) {
         return reasonCode;
+    }
+    if (job.work.compileEvidenceContext) {
+        const current = await currentCompileApiEvidence(state);
+        const expected = job.work.compileEvidenceContext;
+        if (!current || current.contextHash !== expected.contextHash || current.pomHash !== expected.pomHash
+            || current.runId !== expected.runId || current.runAttempt !== expected.runAttempt || current.headSha !== expected.headSha) return reasonCode;
     }
 
     if (job.stage === "fix") {

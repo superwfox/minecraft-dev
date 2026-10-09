@@ -1,6 +1,10 @@
 import { discoverLearningSources } from "../../_lib/deepseekResponses";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM } from "../../_lib/llm";
-import { knowledgeLookupKey } from "../../_lib/learning/assessment";
+import { knowledgeLookupKey, learningLookupKeys } from "../../_lib/learning/assessment";
+import { compileNegativeEvidence, currentCompileApiEvidence } from "../../_lib/learning/compileApiEvidence";
+import { getNegativeApiFactsByIds, positiveApiFactsFromKnowledge, prepareVerifiedNegativeApiFact,
+    type NegativeApiFactWriteInput } from "../../_lib/learning/negativeApiFacts";
+import { loadLearningNegativeFacts, resolvedNegativeNeedCount } from "../../_lib/learning/negativeLearning";
 import {
     LEARNING_DISCOVERY_LIMIT_MS,
     LEARNING_MIN_OUTBOUND_MS,
@@ -34,6 +38,7 @@ import {
     acquireLearningJobLease,
     completeLearningJobStep,
     getKnowledgeItemsByIds,
+    findActiveKnowledge,
     getLearningJob,
     knowledgeIdForLearningResult,
     listLearningSources,
@@ -70,6 +75,7 @@ type LearningConflictReason = "revision" | "lease";
 interface LearningStepSideEffects {
     sources?: LearningSourceRecord[];
     knowledge?: KnowledgeItemCreateInput & { knowledgeId: string };
+    negativeFacts?: NegativeApiFactWriteInput[];
 }
 
 const MAX_VERIFICATION_ATTEMPTS = 2;
@@ -174,12 +180,15 @@ function json(value: unknown, status = 200): Response {
     return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
 
-async function snapshot(env: Env, job: LearningJobRecord) {
+async function snapshot(env: Env, job: LearningJobRecord, taskState?: any) {
     const [items, sources] = await Promise.all([
         getKnowledgeItemsByIds(env, learningKnowledgeIds(job)),
         listLearningSources(env, job.jobId, job.ownerUid),
     ]);
-    return learningSnapshot(job, items, sources.length);
+    const raw = taskState ? null : await getOwnedTask(env, job.generationTaskId, job.ownerUid);
+    const state = taskState ?? (raw ? JSON.parse(raw) : {});
+    const negatives = await loadLearningNegativeFacts(env, job, state, items);
+    return learningSnapshot(job, items, sources.length, undefined, negatives);
 }
 
 function storageUnavailable(): Response {
@@ -311,7 +320,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
     const llm = await resolveTaskLLM(context, state);
-    if (!llm) return deepSeekKeyRequiredResponse();
     let forbiddenTerms: string[] = [];
 
     let current: LearningJobRecord | null = null;
@@ -354,11 +362,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         return storageUnavailable();
     }
 
+    const compileEvidence = current.work.compileEvidenceContext ? await currentCompileApiEvidence(state) : null;
+    const compileProofs = current.status === "queued" && compileEvidence
+        ? current.needs.flatMap(need => {
+            const proof = compileNegativeEvidence(need, compileEvidence);
+            return proof ? [{ need, ...proof }] : [];
+        }) : [];
+    if (!llm && !compileProofs.length) return deepSeekKeyRequiredResponse();
     let preflightReason: LearningReasonCode | undefined;
     if (learningJobNeedsFinalization(current)) preflightReason = "job_deadline";
-    else if (state.quotaExhausted && !llm.byok) preflightReason = "quota_exhausted";
-    else if (!llm.canAutoLearn || llm.providerId !== "deepseek") {
-        preflightReason = llm.providerId === "glm"
+    else if (state.quotaExhausted && !llm?.byok) preflightReason = "quota_exhausted";
+    else if (!llm?.canAutoLearn || llm.providerId !== "deepseek") {
+        preflightReason = llm?.providerId === "glm"
             ? "glm_auto_learning_disabled"
             : "auto_learning_disabled";
     }
@@ -460,6 +475,57 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!preflightReason && learningJobNeedsFinalization(leased)) {
         preflightReason = "job_deadline";
     }
+    if (compileProofs.length && preflightReason !== "job_deadline") {
+        try {
+            const authorizationResponse = await revalidateAuthorization(leased.work);
+            if (authorizationResponse) return authorizationResponse;
+            const positives = positiveApiFactsFromKnowledge(await findActiveKnowledge(context.env, learningLookupKeys(leased.needs)));
+            const writes: NegativeApiFactWriteInput[] = [];
+            const negativeResultIds = { ...leased.work.negativeResultIds };
+            const sources: LearningSourceRecord[] = [];
+            const events: LearningDiagnosticEvent[] = [];
+            for (const proof of compileProofs) {
+                const fingerprint = proof.fact.dependencyFingerprint!.replace(/^sha256:/, "");
+                if (positives.some(item => item.symbol === proof.fact.symbol && item.coreType === proof.fact.coreType
+                    && item.mcVersion === proof.fact.mcVersion && item.dependencyIdentity === proof.fact.dependencyIdentity
+                    && item.dependencyFingerprint?.replace(/^sha256:/, "") === fingerprint)) {
+                    events.push(diagnosticEvent({ stage: "verification", status: "warning", code: "api_evidence_conflict",
+                        message: "同一制品的正负证据冲突，已暂停自动采用", needId: proof.need.id }));
+                    continue;
+                }
+                const identityTerms = sharedKnowledgeForbiddenTerms({ taskId, projectName: state.projectName,
+                    packageName: state.packageName, generatedFilePaths: (state.generatedFiles ?? []).map((file: any) => file.path),
+                    clarifyRounds: state.clarifyRounds ?? [] });
+                const commitTerms = [...new Set([...identityTerms, ...unprovenSharedKnowledgeForbiddenTerms(forbiddenTerms, [proof.source])])];
+                const write: NegativeApiFactWriteInput = { fact: proof.fact, evidence: proof.evidence, forbiddenTerms: commitTerms };
+                const prepared = await prepareVerifiedNegativeApiFact(write);
+                const previous = (await getNegativeApiFactsByIds(context.env, [prepared.fact.factId]))[0];
+                if (previous && previous.status !== "active" && previous.evidenceContentHash) {
+                    // Fresh exhaustive verification, not a refresh of a prior model verdict.
+                    write.revalidation = { factId: previous.factId, evidenceContentHash: previous.evidenceContentHash };
+                }
+                writes.push(write);
+                negativeResultIds[proof.need.id] = prepared.fact.factId;
+                sources.push({ ...proof.source, jobId });
+                events.push(diagnosticEvent({ stage: "activation", status: "success", code: "negative_api_verified",
+                    message: `已验证不可用：${proof.fact.symbol}`, needId: proof.need.id }));
+            }
+            const work = { ...appendDiagnostics(leased.work, events), negativeResultIds,
+                sourceIds: [...(leased.work.sourceIds ?? []), ...sources.map(source => source.sourceId)],
+                completedNeeds: 0, currentNeed: leased.needs.find(need => !negativeResultIds[need.id])?.claim.question };
+            const allResolved = leased.needs.every(need => negativeResultIds[need.id]);
+            const conflict = events.some(event => event.code === "api_evidence_conflict");
+            return persist(allResolved ? "ready" : conflict || preflightReason ? "deferred" : "discovering", work,
+                leased.resultIds, allResolved ? undefined : conflict ? "unresolved_knowledge_needs" : preflightReason,
+                { negativeFacts: writes, sources }, true);
+        } catch (error) {
+            console.warn("compile inventory verification failed", error);
+            return persist("deferred", appendDiagnostics(leased.work, [diagnosticEvent({
+                stage: "verification", status: "warning", code: "compile_evidence_rejected",
+                message: "制品证据未通过入库校验，保留任务内约束并继续保守修复",
+            })]), leased.resultIds, "verification_failed");
+        }
+    }
     if (preflightReason) {
         return persist("deferred", {
             ...leased.work,
@@ -507,7 +573,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             discovery = await discoverLearningSources({
                 apiKey: llm.apiKey,
-                needs: leased.needs,
+                needs: leased.needs.filter(need => !leased!.work.negativeResultIds?.[need.id]),
                 budgetMs: discoveryBudget.budgetMs,
             });
         } catch (error) {
@@ -620,15 +686,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
         if (authorizationResponse) return authorizationResponse;
 
-        const accumulatedSources = fetched.sources;
-        const sourceEffects: LearningStepSideEffects = { sources: fetched.sources };
+        const retainedSources = Object.keys(leased.work.negativeResultIds ?? {}).length
+            ? (await listLearningSources(context.env, jobId, uid)).filter(source => source.verificationState === "verified_absent") : [];
+        const accumulatedSources = [...retainedSources, ...fetched.sources];
+        const sourceEffects: LearningStepSideEffects = { sources: accumulatedSources };
         const work = {
             ...appendDiagnostics(leased.work, sourceDiagnosticEvents(fetched.outcomes)),
             searchedSources: fetched.outcomes,
             sourceIds: accumulatedSources.map((source) => source.sourceId),
             telemetry,
         };
-        if (!accumulatedSources.length) {
+        if (!fetched.sources.length) {
             const reasonCode = learningNoSourcesReason(
                 fetched.telemetry,
                 sourceBudget.clippedByJobDeadline,
@@ -658,7 +726,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (completed >= leased!.needs.length) {
                 try {
                     const items = await getKnowledgeItemsByIds(context.env, resultIds);
-                    nextStatus = learningCompletionStatus(leased!.needs.length, items);
+                    const negatives = await loadLearningNegativeFacts(context.env, leased!, state, items);
+                    nextStatus = learningCompletionStatus(leased!.needs.length, [...items,
+                        ...Array.from({ length: resolvedNegativeNeedCount(leased!, negatives) }, () => ({ status: "active" as const }))]);
                     if (nextStatus === "deferred") reasonCode = "unresolved_knowledge_needs";
                 } catch (error) {
                     console.warn("learning result read failed", error);
@@ -676,6 +746,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const need = leased.needs[index];
         if (!need) {
             return advanceVerification(leased.resultIds, leased.work, leased.needs.length);
+        }
+        if (leased.work.negativeResultIds?.[need.id]) {
+            return advanceVerification(leased.resultIds, leased.work, index + 1);
         }
 
         let allSources;
@@ -870,7 +943,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     ...items.filter((item) => item.knowledgeId !== knowledgeId),
                     { status: activation.status },
                 ];
-                nextStatus = learningCompletionStatus(leased.needs.length, completionItems);
+                const negatives = await loadLearningNegativeFacts(context.env, leased, state, items);
+                nextStatus = learningCompletionStatus(leased.needs.length, [...completionItems,
+                    ...Array.from({ length: resolvedNegativeNeedCount(leased, negatives) }, () => ({ status: "active" as const }))]);
                 if (nextStatus === "deferred") reasonCode = "unresolved_knowledge_needs";
             } catch (error) {
                 console.warn("learning result read failed", error);

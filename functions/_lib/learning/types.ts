@@ -244,6 +244,10 @@ export interface LearningJobWork {
     sourceIds?: string[];
     verifications?: VerificationResult[];
     cachedKnowledgeIds?: string[];
+    /** need ID -> committed negative fact ID; kept separate from positive knowledge. */
+    negativeResultIds?: Record<string, string>;
+    cachedNegativeFactIds?: string[];
+    compileEvidenceContext?: { contextHash: string; pomHash: string; runId: number; runAttempt: number; headSha: string };
     verificationAttemptsByNeed?: Record<string, number>;
     taskStateFence?: string;
     plannerAuthorization?: {
@@ -357,6 +361,15 @@ export interface KnowledgeUsed {
     summary: string;
     confidence: number;
     status: "active" | "skipped" | "needs_review";
+}
+
+export interface NegativeFactUsed {
+    factId: string;
+    symbol: string;
+    dependencyIdentity: string;
+    dependencyFingerprint: string;
+    sourceUrl: string;
+    source: "verified" | "cache";
 }
 
 export interface LearningEvidenceSource {

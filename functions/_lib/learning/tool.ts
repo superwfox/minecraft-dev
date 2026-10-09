@@ -51,6 +51,7 @@ export interface ModelChatMessage {
 export interface ModelLearningRequestResult {
     status: Extract<LearningJobStatus, "ready" | "deferred" | "needs_review" | "failed" | "cancelled">;
     reasonCode?: LearningReasonCode;
+    negativeResultIds?: Record<string, string>;
 }
 
 export interface ModelLearningRequest {

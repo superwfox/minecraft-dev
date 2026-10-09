@@ -1,4 +1,8 @@
-import { loadKnowledgeContext } from "./context";
+import { buildKnowledgeContext, loadKnowledgeContext } from "./context";
+import { compileNegativeEvidence, currentCompileApiEvidence } from "./compileApiEvidence";
+import { loadLearningNegativeFacts, loadNegativeNeedCache, negativeFactsUsed } from "./negativeLearning";
+import { knowledgeLookupKey } from "./assessment";
+import { negativeApiFactsContext } from "./negativeApiFacts";
 import { learningJobAuthorizationFailure } from "./authorization";
 import { normalizeLearningReasonCode } from "./debug";
 import { getLatestLearningJobForTask, getLearningJob } from "./store";
@@ -9,7 +13,7 @@ import {
     type ModelLearningRequest,
     type ModelLearningToolResult,
 } from "./tool";
-import type { LearningJobRecord } from "./types";
+import type { LearningJobRecord, NegativeFactUsed } from "./types";
 import { learningJobTiming } from "./deadline";
 
 interface Env {
@@ -37,6 +41,7 @@ export type ModelLearningResolution =
         messages: ModelChatMessage[];
         result: ModelLearningToolResult;
         knowledgeUsed: Awaited<ReturnType<typeof loadKnowledgeContext>>["used"];
+        negativeFactsUsed: NegativeFactUsed[];
     };
 
 export async function resolveModelLearningRequest(input: {
@@ -52,9 +57,9 @@ export async function resolveModelLearningRequest(input: {
     if (!request) return { status: "missing", request: null };
 
     let result = request.result;
+    let job: LearningJobRecord | null = null;
     if (!result) {
         const jobId = typeof input.jobId === "string" ? input.jobId.trim() : "";
-        let job: LearningJobRecord | null;
         try {
             job = jobId ? await getLearningJob(input.env, jobId, input.uid)
                 : await getLatestLearningJobForTask(input.env, input.taskId, input.uid, "tool");
@@ -91,11 +96,28 @@ export async function resolveModelLearningRequest(input: {
         reasonCode: result.reasonCode,
         knowledgeContext: knowledge.context,
     };
+    const evidence = await currentCompileApiEvidence(input.state);
+    const negatives = job
+        ? await loadLearningNegativeFacts(input.env, job, input.state, knowledge.used)
+        : await loadNegativeNeedCache(input.env, input.state, request.needs, knowledge.used);
+    const expectedNegatives = result.negativeResultIds ?? job?.work.negativeResultIds ?? {};
+    if (toolResult.status === "ready" && Object.values(expectedNegatives).some(id => !negatives.some(fact => fact.factId === id))) {
+        toolResult.status = "deferred";
+        toolResult.reasonCode = "unresolved_knowledge_needs";
+    }
+    if (evidence) {
+        const absentKeys = new Set(request.needs.filter(need => compileNegativeEvidence(need, evidence))
+            .map(knowledgeLookupKey));
+        knowledge.used = knowledge.used.filter(item => !absentKeys.has(item.lookupKey));
+        toolResult.knowledgeContext = [buildKnowledgeContext(knowledge.used, input.maxCharacters ?? 6_000).context,
+            negativeApiFactsContext(negatives)].filter(Boolean).join("\n\n");
+    }
     return {
         status: "resolved",
         request,
         messages: modelLearningContinuation(request, toolResult),
         result: toolResult,
         knowledgeUsed: knowledge.used,
+        negativeFactsUsed: negativeFactsUsed(negatives, job?.work.cachedNegativeFactIds ?? Object.values(result.negativeResultIds ?? {})),
     };
 }

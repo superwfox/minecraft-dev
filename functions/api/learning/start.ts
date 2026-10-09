@@ -41,6 +41,8 @@ import {
 } from "../../_lib/learning/store";
 import type { KnowledgeNeed, LearningStage } from "../../_lib/learning/types";
 import { getOwnedTask, putTaskState, taskOperationLeaseFromState } from "../../_lib/taskStore";
+import { compileNegativeEvidence, currentCompileApiEvidence } from "../../_lib/learning/compileApiEvidence";
+import { loadNegativeNeedCache, negativeFactAnswersNeed, negativeFactsUsed } from "../../_lib/learning/negativeLearning";
 
 interface Env {
     DB?: D1Database;
@@ -268,22 +270,34 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     try {
-        const active = await findActiveKnowledge(context.env, lookupKeys);
+        const compileEvidence = await currentCompileApiEvidence(state);
+        const provenAbsentIds = new Set(compileEvidence ? needs.filter(need => compileNegativeEvidence(need, compileEvidence)).map(need => need.id) : []);
+        const cachedPositive = await findActiveKnowledge(context.env, lookupKeys);
+        // An unbound positive SNAPSHOT cache cannot override the actual complete inventory.
+        const absentKeys = new Set(needs.filter(need => provenAbsentIds.has(need.id)).map(knowledgeLookupKey));
+        const active = cachedPositive.filter(item => !absentKeys.has(item.lookupKey));
+        const negatives = await loadNegativeNeedCache(context.env, state, needs, cachedPositive);
         const activeKeys = new Set(active.map((item) => item.lookupKey));
-        const pendingNeeds = needs.filter((need) => !activeKeys.has(knowledgeLookupKey(need)));
+        const pendingNeeds = needs.filter((need) => !activeKeys.has(knowledgeLookupKey(need)) && !negatives.some(fact => negativeFactAnswersNeed(fact, need)));
         if (!pendingNeeds.length) {
             const snapshot = learningSnapshot(null, active, 0, {
                 status: "ready",
                 stage,
                 reasonCode: "knowledge_cache_hit",
-                message: `已复用 ${active.length} 条经过验证的公共知识`,
-            });
+                message: negatives.length ? `命中不可用 API 缓存 ${negatives.length} 条` : `已复用 ${active.length} 条经过验证的公共知识`,
+            }, negatives);
+            if (negatives.length) snapshot.negativeFactsUsed = negativeFactsUsed(negatives, negatives.map(fact => fact.factId));
             try {
                 state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, active);
+                state.negativeFactsUsed = snapshot.negativeFactsUsed ?? [];
                 if (stage === "tool") {
                     setModelLearningRequestResult(state, toolRequestId, {
                         status: "ready",
                         reasonCode: "knowledge_cache_hit",
+                        ...(negatives.length ? { negativeResultIds: Object.fromEntries(needs.flatMap(need => {
+                            const fact = negatives.find(fact => negativeFactAnswersNeed(fact, need));
+                            return fact ? [[need.id, fact.factId]] : [];
+                        })) } : {}),
                     });
                 }
                 await putTaskState(context.env, taskId, state, 3600, uid);
@@ -295,9 +309,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
 
         const llm = await resolveTaskLLM(context, state);
-        if (!llm) return deepSeekKeyRequiredResponse();
+        const hasCompileProof = pendingNeeds.some(need => provenAbsentIds.has(need.id));
+        if (!llm && !hasCompileProof) return deepSeekKeyRequiredResponse();
 
-        if (state.quotaExhausted && !llm.byok) {
+        if (state.quotaExhausted && !llm?.byok && !hasCompileProof) {
             if (stage === "tool") {
                 state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, active);
                 setModelLearningRequestResult(state, toolRequestId, {
@@ -314,8 +329,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
         }
 
-        if (!llm.canAutoLearn) {
-            const reasonCode = llm.providerId === "glm"
+        if (!llm?.canAutoLearn && !hasCompileProof) {
+            const reasonCode = llm?.providerId === "glm"
                 ? "glm_auto_learning_disabled" as const
                 : "auto_learning_disabled" as const;
             if (stage === "tool") {
@@ -330,7 +345,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 status: "deferred",
                 stage,
                 reasonCode,
-                message: llm.providerId === "deepseek"
+                message: llm?.providerId === "deepseek"
                     ? "站点未启用自动联网学习（需配置 DEEPSEEK_RESPONSES_WEB_SEARCH=true），已按现有知识继续"
                     : undefined,
             }));
@@ -361,6 +376,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 lastProgressAt: now,
                 inactivityDeadlineAt: createLearningDeadlineAt(now, LEARNING_JOB_BUDGET_MS),
                 taskStateFence,
+                ...(compileEvidence ? { compileEvidenceContext: {
+                    contextHash: compileEvidence.contextHash, pomHash: compileEvidence.pomHash,
+                    runId: compileEvidence.runId, runAttempt: compileEvidence.runAttempt, headSha: compileEvidence.headSha,
+                } } : {}),
+                ...(negatives.length ? { cachedNegativeFactIds: negatives.map(fact => fact.factId) } : {}),
                 ...(plannerAuthorization ? { plannerAuthorization } : {}),
                 ...(fixAuthorization ? { fixAuthorization } : {}),
                 ...(toolAuthorization ? { toolAuthorization } : {}),
@@ -373,7 +393,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         let job = await createOrGetLearningJob(context.env, jobInput);
         // 旧任务可能已因平台额度耗尽进入终态。DeepSeek BYOK 改用独立重试键，
         // 让用户换成自己的 key 后继续，同时保留旧任务的审计记录。
-        if (llm.byok && isRetryableByokTerminal(job)) {
+        if (llm?.byok && isRetryableByokTerminal(job)) {
             const retryLookupHash = llm.credentialId
                 ? `${jobLookupHash}.deepseek_byok.${llm.credentialId}`
                 : `${jobLookupHash}.deepseek_byok`;
@@ -384,7 +404,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }
         return json(learningSnapshot(job, active, 0, active.length ? {
             message: `已复用 ${active.length} 条公共知识，继续查证 ${pendingNeeds.length} 个缺口`,
-        } : undefined));
+        } : undefined, negatives));
     } catch (error) {
         if (!(error instanceof LearningStoreUnavailableError)) console.warn("learning start failed", error);
         return storageUnavailable();

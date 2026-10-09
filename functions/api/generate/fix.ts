@@ -1,6 +1,8 @@
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
-import { getRunJobs, getJobLogs } from "../../_lib/github";
+import { getRunJobs, getJobLogs, getCompileApiEvidence } from "../../_lib/github";
+import { compileEvidenceFactApplies, compileNegativeEvidence, currentCompileApiEvidence, resolvedCompileDependencies } from "../../_lib/learning/compileApiEvidence";
+import { negativeFactsUsed } from "../../_lib/learning/negativeLearning";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
 import {
@@ -430,7 +432,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ? state.fixLearningRequestId
         : "";
     let fixLearningResolution: ModelLearningResolution | null = null;
-    let dependencyContextHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+    const pomContextHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+    const fetchedCompileEvidence = state.buildHeadSha && state.buildBranch ? await getCompileApiEvidence(token, {
+        runId: Number(state.runId), branch: state.buildBranch || "", headSha: state.buildHeadSha || "",
+        pomHash: pomContextHash, javaRelease: Number(state.javaVersion),
+    }) : null;
+    if (fetchedCompileEvidence) state.compileApiEvidence = fetchedCompileEvidence;
+    else delete state.compileApiEvidence;
+    let dependencyContextHash = pomContextHash + (fetchedCompileEvidence ? `:${fetchedCompileEvidence.contextHash}` : "");
     const preflightOriginKey = `fix:${String(state.fixDiagnosticsFingerprint || "")}:preflight:${dependencyContextHash}`;
     if (mode === "repair" && storedFixLearningRequestId) {
         const clientFailure = learningToolFailures[storedFixLearningRequestId];
@@ -598,7 +607,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             return repairAuthorizationExpired();
         }
 
-        const leasedDependencyContextHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+        const leasedPomHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+        if (fetchedCompileEvidence && fetchedCompileEvidence.pomHash === leasedPomHash
+            && fetchedCompileEvidence.headSha === state.buildHeadSha && fetchedCompileEvidence.runId === Number(state.runId)
+            && fetchedCompileEvidence.javaRelease === Number(state.javaVersion)) state.compileApiEvidence = fetchedCompileEvidence;
+        else delete state.compileApiEvidence;
+        const leasedDependencyContextHash = leasedPomHash + (state.compileApiEvidence ? `:${state.compileApiEvidence.contextHash}` : "");
         if (leasedDependencyContextHash !== dependencyContextHash) {
             // The request was resolved before leasing to preserve its original task fence.
             // Revalidate its dependency scope against the state actually acquired for this repair.
@@ -909,7 +923,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 files: { path: string; content: string; apiSummary?: any }[];
                 knowledgeUsage?: PendingKnowledgeUsage[];
             } | undefined;
-            const dependencies = resolveCompileDependencyContext(state.generatedFiles ?? []);
+            const dependencies = await resolvedCompileDependencies(state);
             const diagnosticNeeds = buildDiagnosticKnowledgeNeeds({
                 diagnostics,
                 previousDiagnostics: pendingSnapshot?.diagnostics,
@@ -1186,6 +1200,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     reasonCode: "negative_api_cache_timeout" }));
             }
             assertRepairLease();
+            const currentEvidence = await currentCompileApiEvidence(state);
+            sharedNegativeFacts = sharedNegativeFacts.filter(fact => compileEvidenceFactApplies(currentEvidence, fact));
             const allPositiveItems = [...knowledge.used, ...(fixLearningResolution?.status === "resolved" ? fixLearningResolution.knowledgeUsed : [])];
             const negativeConstraints = reconcileNegativeApiFacts({
                 facts: [...state.negativeApiFacts, ...sharedNegativeFacts], positiveFacts: positiveApiFactsFromKnowledge(allPositiveItems),
@@ -1208,6 +1224,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "negative_api_applied",
                     symbols: negativeConstraints.active.map((fact) => fact.symbol), count: negativeConstraints.active.length }));
             }
+            const publicApplied = negativeConstraints.active.filter(fact => fact.evidenceKind !== "compiler");
+            if (publicApplied.length) {
+                const freshlyVerified = new Set(fixLearningResolution?.status === "resolved"
+                    ? fixLearningResolution.negativeFactsUsed.filter(fact => fact.source === "verified").map(fact => fact.factId) : []);
+                state.negativeFactsUsed = negativeFactsUsed(publicApplied, publicApplied.filter(fact => !freshlyVerified.has(fact.factId)).map(fact => fact.factId));
+            } else state.negativeFactsUsed = [];
+            await writer.write(sseEvent(encoder, { type: "learning_snapshot",
+                snapshot: { negativeFactsUsed: state.negativeFactsUsed } }));
             state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
             const cacheKeys = new Set(knowledge.used.map((item) => item.lookupKey));
             // Current compiler observations still allow first-time discovery of verified alternatives.
@@ -1239,7 +1263,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     result.knowledgeContext ? "▸ 首次修复前 API 查证已完成，正在应用已验证事实"
                         : `! API 查证未提供可采用事实（${result.reasonCode || result.status}），继续保守修复`);
             } else if (uncachedNeeds.length && !completedPreflight) {
-                if (!context.env.DB || !llm?.canAutoLearn) {
+                const hasCompileProof = !!currentEvidence && uncachedNeeds.some(need => compileNegativeEvidence(need, currentEvidence));
+                if (!context.env.DB || (!llm?.canAutoLearn && !hasCompileProof)) {
                     const reasonCode = !context.env.DB ? "storage_unavailable"
                         : llm?.providerId === "glm" ? "glm_auto_learning_disabled" : "auto_learning_disabled";
                     await recordPreflightOutcome("deferred", reasonCode, `! 首次修复前 Learning 已降级（${reasonCode}），继续按现有知识修复`);
@@ -1339,7 +1364,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 const candidateFiles = state.generatedFiles.map((file: { path: string; content: string }) => file.path === filePath ? { ...file, content } : file);
                 const candidateEnvironment = await buildNegativeApiEnvironment({
                     coreType: state.coreType || "", mcVersion: state.version || "", compileRunId: state.runId,
-                    dependencies: resolveCompileDependencyContext(candidateFiles),
+                    dependencies: await resolvedCompileDependencies(state, candidateFiles),
                     pomContent: candidateFiles.find((file: { path: string }) => /(^|\/)pom\.xml$/i.test(file.path))?.content ?? "",
                 });
                 assertRepairLease();
@@ -1555,7 +1580,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (changedCount > 0 && negativeConstraints.active.length) {
                 const finalEnvironment = await buildNegativeApiEnvironment({
                     coreType: state.coreType || "", mcVersion: state.version || "", compileRunId: state.runId,
-                    dependencies: resolveCompileDependencyContext(state.generatedFiles),
+                    dependencies: await resolvedCompileDependencies(state),
                     pomContent: state.generatedFiles.find((file: { path: string }) => /(^|\/)pom\.xml$/i.test(file.path))?.content ?? "",
                 });
                 assertRepairLease();

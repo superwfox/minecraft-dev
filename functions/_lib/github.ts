@@ -1,9 +1,12 @@
+import { COMPILE_EVIDENCE_MAX_BYTES, COMPILE_EVIDENCE_SCANNER_BLOB, COMPILE_EVIDENCE_STEP,
+    COMPILE_EVIDENCE_WORKFLOW_BLOB, parseCompileApiEvidence, type CompileApiEvidence } from "./learning/compileApiEvidence";
+
 const REPO = "superwfox/minecraft-dev-workflow";
 const BASE = `https://api.github.com/repos/${REPO}`;
 
 function gh(token: string) {
     return {
-        Authorization: `Bearer ${token}`,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         Accept: "application/vnd.github+json",
         "Content-Type": "application/json",
         "User-Agent": "mc-devtool",
@@ -159,6 +162,66 @@ export async function getJobLogs(token: string, jobId: number): Promise<string> 
     });
     if (!resp.ok) throw new Error(`Failed to fetch job logs: ${resp.status}`);
     return await resp.text();
+}
+
+async function boundedLogText(response: Response): Promise<string> {
+    const maximum = COMPILE_EVIDENCE_MAX_BYTES + 32_768;
+    if (!response.ok || Number(response.headers.get("Content-Length")) > maximum || !response.body) throw new Error("compile_evidence_log_unavailable");
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let size = 0, text = "";
+    try {
+        while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > maximum) throw new Error("compile_evidence_log_too_large");
+            text += decoder.decode(chunk.value, { stream: true });
+        }
+        return text + decoder.decode();
+    } finally { await reader.cancel(); }
+}
+
+export async function getCompileApiEvidence(token: string, input: {
+    runId: number; branch: string; headSha: string; pomHash: string; javaRelease: number;
+}): Promise<CompileApiEvidence | null> {
+    // Historical builds and legacy dispatch state remain task-local.
+    if (!Number.isSafeInteger(input.runId) || input.runId <= 0 || !/^[a-f0-9]{40}$/.test(input.headSha || "")
+        || !/^build-[A-Za-z0-9_-]{8,80}$/.test(input.branch || "")) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    const init = { signal: controller.signal };
+    try {
+        const run: any = await (await ghFetch(token, `/actions/runs/${input.runId}`, init)).json();
+        if (run.head_sha !== input.headSha || run.head_branch !== input.branch || run.event !== "workflow_dispatch"
+            || run.path !== ".github/workflows/maven.yml" || run.status !== "completed"
+            || !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1) return null;
+        const files = await Promise.all([
+            ghFetch(token, `/contents/.github/workflows/maven.yml?ref=${input.headSha}`, init).then(response => response.json() as Promise<any>),
+            ghFetch(token, `/contents/tools/compile_api_evidence.py?ref=${input.headSha}`, init).then(response => response.json() as Promise<any>),
+        ]);
+        if (files[0].sha !== COMPILE_EVIDENCE_WORKFLOW_BLOB || files[1].sha !== COMPILE_EVIDENCE_SCANNER_BLOB) return null;
+        const data: any = await (await ghFetch(token, `/actions/runs/${input.runId}/attempts/${run.run_attempt}/jobs?per_page=100`, init)).json();
+        const jobs = (data.jobs ?? []).filter((job: any) => job.name === "verify" && job.head_sha === input.headSha);
+        if (jobs.length !== 1 || !Array.isArray(jobs[0].steps)) return null;
+        const job = jobs[0];
+        const indexes = job.steps.map((step: any, index: number) => step.name === COMPILE_EVIDENCE_STEP ? index : -1).filter((index: number) => index >= 0);
+        if (indexes.length !== 1) return null;
+        const stepIndex = indexes[0];
+        if (job.steps[stepIndex].status !== "completed" || job.steps[stepIndex].conclusion !== "success") return null;
+        // Step log API takes a zero-based position, unlike the steps[].number field.
+        const endpoint = `${BASE}/actions/jobs/${job.id}/steps/${stepIndex}/logs`;
+        let response = await fetch(endpoint, { headers: { ...gh(token), "X-GitHub-Api-Version": "2026-03-10" }, redirect: "manual", signal: controller.signal });
+        if (response.status === 302) {
+            const location = response.headers.get("Location");
+            if (!location || new URL(location).protocol !== "https:") return null;
+            // Do not forward the GitHub token to the signed log download host.
+            response = await fetch(location, { signal: controller.signal });
+        }
+        const log = await boundedLogText(response);
+        return await parseCompileApiEvidence(log, { ...input, runAttempt: run.run_attempt,
+            attestation: { workflowBlob: files[0].sha, scannerBlob: files[1].sha, jobId: job.id, stepIndex } });
+    } catch { return null; }
+    finally { clearTimeout(timer); }
 }
 
 export async function deleteBranch(token: string, name: string) {
