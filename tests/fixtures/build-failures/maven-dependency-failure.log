@@ -1,0 +1,3 @@
+[ERROR] Failed to execute goal on project example: Could not resolve dependencies for project dev.example:plugin:jar:1.0
+[ERROR] Could not collect dependencies at com.sk89q.worldguard:worldguard-bukkit:jar:7.0.9
+[ERROR] Failed to read artifact descriptor for com.sk89q.worldguard:worldguard-bukkit:jar:7.0.9

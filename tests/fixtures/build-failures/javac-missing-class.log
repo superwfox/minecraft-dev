@@ -1,0 +1,14 @@
+2026-10-08T17:31:57.0453551Z src/main/java/com/tahai/maceshieldbreak/ShieldBlockListener.java:3: error: cannot find symbol
+2026-10-08T17:31:57.0474643Z import io.papermc.paper.event.player.PlayerShieldBlockEvent;
+2026-10-08T17:31:57.0484340Z                                     ^
+2026-10-08T17:31:57.0514268Z   symbol:   class PlayerShieldBlockEvent
+2026-10-08T17:31:57.0515110Z   location: package io.papermc.paper.event.player
+2026-10-08T17:31:57.1815124Z src/main/java/com/tahai/maceshieldbreak/ShieldBlockListener.java:22: error: cannot find symbol
+2026-10-08T17:31:57.1816293Z     public void onShieldBlock(PlayerShieldBlockEvent event) {
+2026-10-08T17:31:57.1816953Z                               ^
+2026-10-08T17:31:57.1817460Z   symbol:   class PlayerShieldBlockEvent
+2026-10-08T17:31:57.1818211Z   location: class ShieldBlockListener
+2026-10-08T17:31:57.4069885Z Note: src/main/java/com/tahai/maceshieldbreak/MaceCommand.java uses or overrides a deprecated API.
+2026-10-08T17:31:57.4121915Z Note: Recompile with -Xlint:deprecation for details.
+2026-10-08T17:31:57.4123826Z 2 errors
+2026-10-08T17:31:57.4350181Z ##[error]Process completed with exit code 1.
