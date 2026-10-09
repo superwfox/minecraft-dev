@@ -19,7 +19,8 @@ export type LearningNeedTriggerReason =
     | "nms_version_sensitive"
     | "reflection_contract"
     | "external_plugin_contract"
-    | "persistent_diagnostic_gap";
+    | "persistent_diagnostic_gap"
+    | "compile_api_gap";
 
 export interface KnowledgeNeed {
     id: string;

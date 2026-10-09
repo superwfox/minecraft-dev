@@ -5,7 +5,11 @@ import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../..
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, type LLMProvider } from "../../_lib/llm";
 import {
     buildDiagnosticKnowledgeNeeds,
+    assessCompileLearningEligibility,
+    compileDependencyContextHash,
     filterFixKnowledgeNeeds,
+    knowledgeLookupKey,
+    resolveCompileDependencyContext,
 } from "../../_lib/learning/assessment";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import {
@@ -15,7 +19,7 @@ import {
     type FixRepairAuthorization,
 } from "../../_lib/learning/fixAuthorization";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
-import type { KnowledgeNeed } from "../../_lib/learning/types";
+import type { KnowledgeNeed, LearningReasonCode } from "../../_lib/learning/types";
 import {
     acquireTaskOperationLease,
     getOwnedTask,
@@ -49,9 +53,11 @@ import {
 } from "../../_lib/buildRepairRecovery";
 import {
     createModelLearningRequest,
+    createDiagnosticLearningRequest,
     learningToolDefinition,
     putModelLearningRequest,
     removeModelLearningRequest,
+    setModelLearningRequestResult,
     type ModelChatMessage,
     type ModelLearningRequest,
 } from "../../_lib/learning/tool";
@@ -59,6 +65,7 @@ import {
     resolveModelLearningRequest,
     type ModelLearningResolution,
 } from "../../_lib/learning/toolRuntime";
+import { LEARNING_JOB_BUDGET_MS } from "../../_lib/learning/deadline";
 import { assertOpenAIResponse, OpenAIUpstreamHttpError } from "../../_lib/openAIStream";
 import {
     abortOnWriteFailure,
@@ -362,6 +369,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const learningToolJobs = body.learningToolJobs && typeof body.learningToolJobs === "object"
         ? body.learningToolJobs as Record<string, string>
         : {};
+    const learningToolFailures = body.learningToolFailures && typeof body.learningToolFailures === "object"
+        ? body.learningToolFailures as Record<string, unknown> : {};
     const token = context.env.GITHUB_PAT;
     const uid: string = (context.data as any)?.uid || "";
 
@@ -407,7 +416,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         ? state.fixLearningRequestId
         : "";
     let fixLearningResolution: ModelLearningResolution | null = null;
+    let dependencyContextHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+    const preflightOriginKey = `fix:${String(state.fixDiagnosticsFingerprint || "")}:preflight:${dependencyContextHash}`;
     if (mode === "repair" && storedFixLearningRequestId) {
+        const clientFailure = learningToolFailures[storedFixLearningRequestId];
+        if (typeof clientFailure === "string"
+            && ["client_deadline", "client_network", "storage_unavailable", "internal_error"].includes(clientFailure)) {
+            setModelLearningRequestResult(state, storedFixLearningRequestId, {
+                status: "deferred", reasonCode: clientFailure as LearningReasonCode,
+            });
+        }
         fixLearningResolution = await resolveModelLearningRequest({
             env: context.env,
             state,
@@ -421,7 +439,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             && fixLearningResolution.request.origin === "fix"
             && fixLearningResolution.request.originKey.startsWith(
                 `fix:${String(state.fixDiagnosticsFingerprint || "")}:`,
-            );
+            ) && (fixLearningResolution.request.targetPath !== "" || fixLearningResolution.request.originKey === preflightOriginKey);
+        if (fixLearningResolution.status === "pending" && matchesCurrentDiagnostics
+            && !fixLearningResolution.request.targetPath
+            && (fixLearningResolution.jobDeadlineAt
+                ? Date.now() >= fixLearningResolution.jobDeadlineAt
+                : Date.now() - fixLearningResolution.request.createdAt >= LEARNING_JOB_BUDGET_MS)) {
+            setModelLearningRequestResult(state, storedFixLearningRequestId, { status: "deferred", reasonCode: "job_deadline" });
+            fixLearningResolution = await resolveModelLearningRequest({ env: context.env, state, uid, taskId,
+                requestId: storedFixLearningRequestId, maxCharacters: 6_000 });
+        }
         if (fixLearningResolution.status === "pending" && matchesCurrentDiagnostics) {
             const request = fixLearningResolution.request;
             return new Response(JSON.stringify({
@@ -432,6 +459,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     origin: request.origin,
                     targetPath: request.targetPath,
                     questions: request.needs.map((need) => need.claim.question),
+                    trigger: request.targetPath ? "model" : "compile_diagnostic",
                 }],
             }), { headers: { "Content-Type": "application/json" } });
         }
@@ -555,6 +583,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await releaseRepairLease().catch((error) => console.warn("repair lease release failed", error));
             return repairAuthorizationExpired();
         }
+
+        const leasedDependencyContextHash = await compileDependencyContextHash(state.generatedFiles ?? []);
+        if (leasedDependencyContextHash !== dependencyContextHash) {
+            // The request was resolved before leasing to preserve its original task fence.
+            // Revalidate its dependency scope against the state actually acquired for this repair.
+            fixLearningResolution = { status: "missing", request: null };
+            if (storedFixLearningRequestId) removeModelLearningRequest(state, storedFixLearningRequestId);
+            delete state.fixLearningRequestId;
+            delete state.fixLearningOutcome;
+        }
+        dependencyContextHash = leasedDependencyContextHash;
 
         repairResumeSnapshot = JSON.parse(JSON.stringify(state));
         state.status = "repairing";
@@ -847,6 +886,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 已提取 ${diagnostics.length} 条构建诊断` }));
             await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "diagnostic_parsed",
                 runId: state.runId, fingerprint, count: diagnostics.length, diagnostics }));
+
             const pendingSnapshot = state.pendingFixSnapshot as {
                 attempt: number;
                 runId: number;
@@ -855,6 +895,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 files: { path: string; content: string; apiSummary?: any }[];
                 knowledgeUsage?: PendingKnowledgeUsage[];
             } | undefined;
+            const dependencies = resolveCompileDependencyContext(state.generatedFiles ?? []);
             const diagnosticNeeds = buildDiagnosticKnowledgeNeeds({
                 diagnostics,
                 previousDiagnostics: pendingSnapshot?.diagnostics,
@@ -862,11 +903,27 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 mcVersion: state.version,
                 projectPackage: state.packageName,
                 externalDeps: state.grade?.vector?.external_deps ?? [],
+                dependencies,
+                generatedFiles: state.generatedFiles ?? [],
             });
             state.fixKnowledgeNeeds = filterFixKnowledgeNeeds(diagnosticNeeds, {
                 repairAttempts: state.repairAttempts,
             }).accepted;
             state.fixDiagnosticsFingerprint = fingerprint;
+            for (const diagnostic of diagnostics) {
+                const eligibility = assessCompileLearningEligibility({ diagnostic, mcVersion: state.version,
+                    projectPackage: state.packageName, dependencies, generatedFiles: state.generatedFiles ?? [] });
+                if (eligibility.decision === "LEARN") {
+                    await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "api_symbol_identified",
+                        symbol: eligibility.symbol, dependency: eligibility.dependency }));
+                }
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix",
+                    msg: eligibility.decision === "LEARN" ? "learning_eligible" : "learning_skipped",
+                    decision: eligibility.decision, reasonCode: eligibility.reason,
+                    ...(eligibility.symbol ? { symbol: eligibility.symbol } : {}),
+                    ...(eligibility.dependency ? { dependency: eligibility.dependency } : {}),
+                }));
+            }
 
             if (mode === "diagnose") {
                 state.lastBuildDiagnostics = diagnostics;
@@ -891,7 +948,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.fixRepairAuthorization = repairAuthorization;
                 delete state.fixLearningAuthorization;
                 const msg = state.fixKnowledgeNeeds.length
-                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个外部 API 技术缺口；DS 可在修复时主动调用 Learning`
+                    ? `▸ 已识别 ${state.fixKnowledgeNeeds.length} 个版本明确的外部 API 缺口；首次修复前先复用知识或查证`
                     : "▸ 构建诊断已就绪，交由 DS 生成修复候选";
                 state.logs.push(msg);
                 await persistState(true);
@@ -1074,6 +1131,62 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             });
             assertRepairLease();
             state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+            const cacheKeys = new Set(knowledge.used.map((item) => item.lookupKey));
+            const uncachedNeeds = fixNeeds.filter((need) => !cacheKeys.has(knowledgeLookupKey(need)));
+            const isResolvedPreflight = fixLearningResolution?.status === "resolved"
+                && fixLearningResolution.request.originKey === `fix:${fingerprint}:preflight:${dependencyContextHash}`;
+            const completedPreflight = state.fixLearningOutcome?.fingerprint === fingerprint
+                && state.fixLearningOutcome?.dependencyContextHash === dependencyContextHash
+                && ["ready", "deferred", "needs_review", "failed", "cancelled"].includes(state.fixLearningOutcome?.status);
+            const recordPreflightOutcome = async (status: string, reasonCode: string, msg: string) => {
+                state.fixLearningOutcome = { status, reasonCode, fingerprint, dependencyContextHash };
+                state.logs.push(msg);
+                await writer.write(sseEvent(encoder, { type: "log", msg }));
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix",
+                    msg: reasonCode === "knowledge_cache_hit" ? "learning_cache_hit" : status === "ready" ? "learning_verified" : "learning_skipped",
+                    status, reasonCode }));
+            };
+            if (fixNeeds.length && !uncachedNeeds.length) {
+                await recordPreflightOutcome("ready", "knowledge_cache_hit", `▸ 修复前已命中 ${knowledge.used.length} 条已验证公共知识`);
+            } else if (isResolvedPreflight && fixLearningResolution?.status === "resolved") {
+                // Store terminal results under the repair lease so refresh cannot restart a failed lookup.
+                setModelLearningRequestResult(state, fixLearningResolution.request.requestId, {
+                    status: fixLearningResolution.result.status, reasonCode: fixLearningResolution.result.reasonCode,
+                });
+                const result = fixLearningResolution.result;
+                await recordPreflightOutcome(result.status, result.reasonCode || "unresolved_knowledge_needs",
+                    result.knowledgeContext ? "▸ 首次修复前 API 查证已完成，正在应用已验证事实"
+                        : `! API 查证未提供可采用事实（${result.reasonCode || result.status}），继续保守修复`);
+            } else if (uncachedNeeds.length && !completedPreflight) {
+                if (!context.env.DB || !llm?.canAutoLearn) {
+                    const reasonCode = !context.env.DB ? "storage_unavailable"
+                        : llm?.providerId === "glm" ? "glm_auto_learning_disabled" : "auto_learning_disabled";
+                    await recordPreflightOutcome("deferred", reasonCode, `! 首次修复前 Learning 已降级（${reasonCode}），继续按现有知识修复`);
+                } else {
+                    const request = await createDiagnosticLearningRequest({
+                        originKey: `fix:${fingerprint}:preflight:${dependencyContextHash}`, needs: uncachedNeeds,
+                    });
+                    putModelLearningRequest(state, request);
+                    state.fixLearningRequestId = request.requestId;
+                    state.fixLearningOutcome = { status: "queued", reasonCode: "compile_api_gap", fingerprint, dependencyContextHash };
+                    state.status = "error";
+                    state.error = null;
+                    delete state.repairStartedAt;
+                    const msg = "▸ 首次修复前正在查证版本明确的公共 API 缺口";
+                    state.logs.push(msg);
+                    await persistState(true);
+                    await writer.write(sseEvent(encoder, { type: "log", msg }));
+                    await writer.write(sseEvent(encoder, { type: "result", fixed: 0, changed: 0,
+                        learningToolRequests: [{ requestId: request.requestId, origin: request.origin,
+                            targetPath: request.targetPath, trigger: "compile_diagnostic",
+                            questions: request.needs.map((need) => need.claim.question) }],
+                        repairAuthorization: requestedRepairAuthorization }));
+                    await writer.write(encoder.encode("data: [DONE]\n\n"));
+                    return;
+                }
+            }
+            const learnedContext = fixLearningResolution?.status === "resolved" ? fixLearningResolution.result.knowledgeContext : "";
+            const fixKnowledgeContext = [knowledge.context, learnedContext && learnedContext !== knowledge.context ? learnedContext : ""].filter(Boolean).join("\n\n");
             if (fixLearningResolution?.status === "resolved") {
                 state.knowledgeUsed = mergeKnowledgeUsed(
                     state.knowledgeUsed,
@@ -1088,9 +1201,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }));
             }
             let previousFixLearningRequest = fixLearningResolution?.status === "resolved"
+                && !!fixLearningResolution.request.targetPath
                 ? fixLearningResolution.request
                 : null;
             let fixContinuationMessages = fixLearningResolution?.status === "resolved"
+                && !!fixLearningResolution.request.targetPath
                 ? fixLearningResolution.messages
                 : null;
             const expectedFixLearningOriginKey = `fix:${fingerprint}:${filesToFix[0]}`;
@@ -1127,7 +1242,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             };
 
             const repairAttempt = (Number(state.repairAttempts) || 0) + 1;
-            state.repairAttempts = repairAttempt;
             let changedCount = 0;
             const changedFiles: string[] = [];
             const skippedFiles: string[] = [];
@@ -1174,7 +1288,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     summaries,
                     fileRole,
                     apiContractCtx,
-                    knowledge.context,
+                    fixKnowledgeContext,
                     progressSummary(progress, rolledBackFiles),
                 );
                 const isLearningToolTurn = filePath === filesToFix[0];
@@ -1219,7 +1333,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         }
                         putModelLearningRequest(state, learningRequest);
                         state.fixLearningRequestId = learningRequest.requestId;
-                        state.repairAttempts = Math.max(0, repairAttempt - 1);
                         state.status = "error";
                         state.error = null;
                         delete state.repairStartedAt;
@@ -1264,7 +1377,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         summaries,
                         fileRole,
                         apiContractCtx,
-                        knowledge.context,
+                        fixKnowledgeContext,
                         `${progressSummary(progress, rolledBackFiles)}\n上一候选仍有确定性问题：${knownApiIssues.join("；")}`,
                     );
                     fixRes = await callAIStream(
@@ -1368,6 +1481,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 knowledgeUsage: appliedKnowledgeUsage.filter((usage) => changedFiles.includes(usage.path)),
                 at: Date.now(),
             };
+            // Count only an applied candidate that will be submitted for build verification.
+            state.repairAttempts = repairAttempt;
 
             // Clear error state so rebuild can proceed
             state.status = "fixed";
