@@ -1,0 +1,6 @@
+src/main/java/dev/example/ShieldListener.java:14: error: cannot find symbol
+        player.breakShield(20);
+              ^
+  symbol:   method breakShield(int)
+  location: variable player of type org.bukkit.entity.Player
+1 error

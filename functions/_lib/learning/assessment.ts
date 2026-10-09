@@ -202,19 +202,29 @@ const PUBLIC_API_SIMPLE_TYPES: Record<string, string> = {
 
 function diagnosticText(diagnostic: BuildDiagnostic): string { return [diagnostic.message, ...diagnostic.details].join(" ").replace(/\s+/g, " ").trim(); }
 function normalizeDependencyName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]/g, ""); }
-function publicSymbolFromDiagnostic(text: string, projectPackage?: string): string {
+export function publicSymbolFromDiagnostic(text: string, projectPackage?: string): string {
+    const missing = text.match(/\bsymbol:\s+(?:variable|method|class|interface|enum|constructor)\s+([A-Za-z_$][\w$]*)/i)?.[1];
+    const packageLocation = text.match(/\blocation:\s+package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/i)?.[1];
+    const location = text.match(/\blocation:\s+(?:class|interface|enum)\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/i)?.[1]
+        ?? text.match(/\blocation:\s+variable\s+\S+\s+of type\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/i)?.[1];
+    const qualifiedType = location && (PUBLIC_API_SIMPLE_TYPES[location] || (location.includes(".") ? location : ""));
+    const resolvedSymbol = missing && packageLocation ? `${packageLocation}.${missing}`
+        : qualifiedType ? (missing && missing !== location && !qualifiedType.endsWith(`.${missing}`) ? `${qualifiedType}.${missing}` : qualifiedType) : "";
+    const ownPackage = projectPackage?.trim().toLowerCase();
+    const isPublic = (candidate: string) => {
+        const lower = candidate.toLowerCase();
+        return !(ownPackage && (lower === ownPackage || lower.startsWith(`${ownPackage}.`)))
+            && PUBLIC_PACKAGE_PREFIXES.some((prefix) => lower === prefix || lower.startsWith(`${prefix}.`));
+    };
+    if (resolvedSymbol) return isPublic(resolvedSymbol) ? resolvedSymbol : "";
+    // A namespace mentioned in a parameter or local source line does not identify an unresolved symbol.
+    if (missing) return "";
     const missingPackage = text.match(/\bpackage\s+([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+)\s+does not exist\b/i)?.[1];
     const candidates = [...(missingPackage ? [missingPackage] : []), ...(text.match(/\b(?:[a-z_][\w$]*\.){2,}[A-Za-z_$][\w$]*/g) ?? [])];
-    const ownPackage = projectPackage?.trim().toLowerCase();
     for (const candidate of candidates) {
-        const normalized = candidate.replace(/[.,;:]+$/, ""); const lower = normalized.toLowerCase();
-        if (ownPackage && (lower === ownPackage || lower.startsWith(`${ownPackage}.`))) continue;
-        if (PUBLIC_PACKAGE_PREFIXES.some((prefix) => lower === prefix || lower.startsWith(`${prefix}.`))) return normalized;
+        const normalized = candidate.replace(/[.,;:]+$/, "");
+        if (isPublic(normalized)) return normalized;
     }
-    const location = text.match(/\blocation:\s+(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)/i)?.[1];
-    const missing = text.match(/\bsymbol:\s+(?:variable|method|class|interface)\s+([A-Za-z_$][\w$]*)/i)?.[1];
-    const qualifiedType = location && PUBLIC_API_SIMPLE_TYPES[location];
-    if (qualifiedType) return missing && missing !== location ? `${qualifiedType}.${missing}` : qualifiedType;
     return "";
 }
 function dependencyFromDiagnostic(text: string, externalDeps: string[]): string { const normalizedText = normalizeDependencyName(text); return externalDeps.find((dependency) => { const key = normalizeDependencyName(dependency); return key.length >= 3 && normalizedText.includes(key); }) ?? ""; }

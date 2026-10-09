@@ -34,6 +34,7 @@ import {
 } from "../../_lib/apiContracts";
 import {
     compareDiagnostics,
+    diagnosticIdentityKey,
     diagnosticsFingerprint,
     errorLogExcerpt,
     formatDiagnostics,
@@ -291,9 +292,9 @@ function knowledgeOutcomeForPath(
 ): "resolved" | "persisted" | "introduced" {
     const before = previous.filter((item) => matchesPath(filePath, item.path));
     const after = current.filter((item) => matchesPath(filePath, item.path));
-    const beforeKeys = new Set(before.map((item) => item.key));
-    if (after.some((item) => !beforeKeys.has(item.key))) return "introduced";
-    if (after.some((item) => beforeKeys.has(item.key))) return "persisted";
+    const beforeKeys = new Set(before.map(diagnosticIdentityKey));
+    if (after.some((item) => !beforeKeys.has(diagnosticIdentityKey(item)))) return "introduced";
+    if (after.some((item) => beforeKeys.has(diagnosticIdentityKey(item)))) return "persisted";
     return "resolved";
 }
 
@@ -844,7 +845,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }
 
             await writer.write(sseEvent(encoder, { type: "log", msg: `▸ 已提取 ${diagnostics.length} 条构建诊断` }));
-
+            await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "diagnostic_parsed",
+                runId: state.runId, fingerprint, count: diagnostics.length, diagnostics }));
             const pendingSnapshot = state.pendingFixSnapshot as {
                 attempt: number;
                 runId: number;

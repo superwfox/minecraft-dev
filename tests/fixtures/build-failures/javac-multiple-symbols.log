@@ -1,0 +1,16 @@
+[ERROR] /workspace/src/main/java/dev/example/Listener.java:[3,37] cannot find symbol
+[ERROR] import io.papermc.paper.event.player.ClassA;
+[ERROR]                                     ^
+[ERROR]   symbol:   class ClassA
+[ERROR]   location: package io.papermc.paper.event.player
+[ERROR] /workspace/src/main/java/dev/example/Listener.java:[4,37] cannot find symbol
+[ERROR] import io.papermc.paper.event.player.ClassB;
+[ERROR]                                     ^
+[ERROR]   symbol:   class ClassB
+[ERROR]   location: package io.papermc.paper.event.player
+[ERROR] /workspace/src/main/java/dev/example/Listener.java:[18,9] cannot find symbol
+[ERROR]         ClassA event = null;
+[ERROR]         ^
+[ERROR]   symbol:   class ClassA
+[ERROR]   location: package io.papermc.paper.event.player
+[INFO] 3 errors
