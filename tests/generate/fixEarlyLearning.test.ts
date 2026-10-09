@@ -7,9 +7,9 @@ const mocks = vi.hoisted(() => ({
     raw: "", job: null as LearningJobRecord | null,
     active: [] as (Pick<KnowledgeItemRecord, "lookupKey" | "knowledgeId" | "revision"> & Partial<KnowledgeItemRecord>)[],
     sharedNegativeFacts: [] as NegativeApiFact[],
-    canAutoLearn: true, mutatePomOnLease: false, getLogs: vi.fn(), createJob: vi.fn(), discover: vi.fn(), model: vi.fn(),
+    canAutoLearn: true, mutatePomOnLease: false, getLogs: vi.fn(), getEvidence: vi.fn(), createJob: vi.fn(), discover: vi.fn(), model: vi.fn(),
 }));
-vi.mock("../../functions/_lib/github", () => ({ getRunJobs: async () => [{ id: 452, conclusion: "failure" }], getJobLogs: mocks.getLogs }));
+vi.mock("../../functions/_lib/github", () => ({ getRunJobs: async () => [{ id: 452, conclusion: "failure" }], getJobLogs: mocks.getLogs, getCompileApiEvidence: mocks.getEvidence }));
 vi.mock("../../functions/_lib/llm", async (original) => ({ ...await original<Record<string, unknown>>(),
     resolveTaskLLM: async () => ({ providerId: "deepseek", url: "https://model.test/chat/completions", apiKey: "test", byok: true,
         credentialId: "test", learningCacheRead: true, canAutoLearn: mocks.canAutoLearn, modelFor: () => "test-model" }),
@@ -58,6 +58,7 @@ import { onRequestPost as startLearning } from "../../functions/api/learning/sta
 import { onRequestPost as stepLearning } from "../../functions/api/learning/step";
 import { onRequestGet as learningStatus } from "../../functions/api/learning/status";
 import { knowledgeLookupKey } from "../../functions/_lib/learning/assessment";
+import { attestedReport, COORDINATE, FINGERPRINT } from "../learning/compileEvidenceFixtures";
 
 const rawLog = readFileSync(new URL("../fixtures/build-failures/javac-missing-class.log", import.meta.url), "utf8");
 const filePath = "src/main/java/com/tahai/maceshieldbreak/ShieldBlockListener.java";
@@ -102,6 +103,7 @@ beforeEach(() => {
             { path: filePath, content: originalSource }, { path: "pom.xml", content: "<project><dependencies><dependency><groupId>io.papermc.paper</groupId><artifactId>paper-api</artifactId><version>1.21-R0.1-SNAPSHOT</version><scope>provided</scope></dependency></dependencies></project>" },
         ] });
     mocks.getLogs.mockResolvedValue(rawLog);
+    mocks.getEvidence.mockResolvedValue(null);
     mocks.createJob.mockImplementation(async (_env: unknown, input: any) => {
         if (mocks.job) return mocks.job;
         mocks.job = { ...input, jobId: "learning-452", status: "queued", resultIds: [], revision: 0,
@@ -323,18 +325,20 @@ describe("compiler-scoped unavailable symbols in the actual Fixer endpoint", () 
         expect(String(mocks.model.mock.calls[0][1].body)).toContain("org.bukkit.Particle#SLIME");
     });
 
-    it("answers a model signature lookup from exact shared unavailable knowledge without discovery", async () => {
+    it("answers a model signature lookup from a matching attested artifact cache without discovery", async () => {
         const initial = JSON.parse(mocks.raw);
-        initial.generatedFiles.find((file: { path: string }) => file.path === "pom.xml").content =
-            initial.generatedFiles.find((file: { path: string }) => file.path === "pom.xml").content.replace("1.21-R0.1-SNAPSHOT", "1.21-R0.1");
+        const evidence = await attestedReport();
+        initial.buildHeadSha = evidence.headSha; initial.buildBranch = "build-task-12345"; initial.javaVersion = "21";
+        mocks.getEvidence.mockResolvedValue(evidence);
         mocks.raw = JSON.stringify(initial);
-        const coordinate = "io.papermc.paper:paper-api:1.21-R0.1";
+        const coordinate = COORDINATE;
         const now = Date.now();
-        mocks.sharedNegativeFacts = [{ factId: "official-absence", symbol: unavailableSymbol,
-            coreType: "paper", mcVersion: "1.21", dependencyIdentity: coordinate,
-            assertion: "unavailable", assertionScope: "versioned_api", evidenceKind: "official",
+        mocks.sharedNegativeFacts = [{ factId: "neg_" + "b".repeat(64), symbol: unavailableSymbol,
+            coreType: "paper", mcVersion: "1.21", dependencyIdentity: coordinate, dependencyFingerprint: FINGERPRINT,
+            assertion: "unavailable", assertionScope: "versioned_api", evidenceKind: "artifact",
             confidence: 1, status: "active", createdAt: now - 1, expiresAt: now + 86_400_000,
-            verificationMethod: "official_versioned_inventory", verifiedBy: "deterministic",
+            verificationMethod: "artifact_symbol_inventory", verifiedBy: "deterministic",
+            evidenceSourceId: "src_jar_test", evidenceContentHash: FINGERPRINT, evidenceSourceUrl: evidence.dependencies[0].sourceUrl,
         }];
         await fix("diagnose");
         const args = { subject: unavailableSymbol,
@@ -367,5 +371,19 @@ describe("compiler-scoped unavailable symbols in the actual Fixer endpoint", () 
         expect(JSON.parse(toolMessage.content).verifiedKnowledge).toContain("当前编译依赖环境中不可用");
         expect(JSON.parse(toolMessage.content).verifiedKnowledge).toContain(unavailableSymbol);
         expect(secondRequest).not.toHaveProperty("tools");
+    });
+
+    it("keeps a legacy build without attestation task-local even when a public negative cache exists", async () => {
+        const now = Date.now();
+        mocks.sharedNegativeFacts = [{ factId: "neg_" + "b".repeat(64), symbol: unavailableSymbol,
+            coreType: "paper", mcVersion: "1.21", dependencyIdentity: COORDINATE, dependencyFingerprint: FINGERPRINT,
+            assertion: "unavailable", assertionScope: "versioned_api", evidenceKind: "artifact",
+            confidence: 1, status: "active", createdAt: now - 1, expiresAt: now + 86400000,
+            verificationMethod: "artifact_symbol_inventory", verifiedBy: "deterministic" }];
+        await fix("diagnose");
+        expect(await fix("repair")).toHaveProperty("learningToolRequests");
+        expect(mocks.model).not.toHaveBeenCalled();
+        expect(JSON.parse(mocks.raw).negativeApiFacts).toEqual([expect.objectContaining({ assertionScope: "compile_environment" })]);
+        expect(JSON.parse(mocks.raw).negativeFactsUsed).toEqual([]);
     });
 });

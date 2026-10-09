@@ -1,0 +1,155 @@
+name: Build Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Temporary build branch (build-*)
+        required: true
+        type: string
+      java_version:
+        description: Java release
+        required: true
+        default: '21'
+        type: choice
+        options:
+          - '8'
+          - '11'
+          - '17'
+          - '21'
+          - '25'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-build-${{ inputs.branch }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          BUILD_REF: ${{ inputs.branch }}
+          JAVA_RELEASE: ${{ inputs.java_version }}
+        shell: bash
+        run: |
+          [[ "$BUILD_REF" =~ ^build-[A-Za-z0-9_-]{8,80}$ ]] || { echo 'Invalid build branch' >&2; exit 2; }
+          [[ "$JAVA_RELEASE" =~ ^(8|11|17|21|25)$ ]] || { echo 'Invalid Java release' >&2; exit 2; }
+          [[ "$GITHUB_REF_NAME" == "$BUILD_REF" ]] || { echo 'Dispatch ref must match build branch' >&2; exit 2; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+
+      - name: Verify controlled Maven model
+        shell: bash
+        run: |
+          test -f pom.xml || { echo '::error::Missing pom.xml' >&2; exit 2; }
+          test ! -e .mvn || { echo '::error::.mvn is not allowed in build branches' >&2; exit 2; }
+          if grep -Eiq '<(extensions|profiles|pluginRepositories)([ >])' pom.xml; then
+            echo '::error::Disallowed Maven model section: extensions, profiles or pluginRepositories' >&2
+            exit 2
+          fi
+          if grep -Fq '<tahai.safe-build.schema>1</tahai.safe-build.schema>' pom.xml; then
+            echo 'Safe build schema marker detected.'
+          else
+            echo '::warning::Legacy generated POM without tahai.safe-build.schema=1; structural safety checks passed.'
+          fi
+
+      - name: Freeze compile evidence producer
+        continue-on-error: true
+        shell: bash
+        run: |
+          cp -- tools/compile_api_evidence.py "$RUNNER_TEMP/compile_api_evidence.py"
+          chmod 400 "$RUNNER_TEMP/compile_api_evidence.py"
+
+      - name: Resolve compile classpath only
+        shell: bash
+        run: |
+          mkdir -p target
+          mvn --batch-mode --no-transfer-progress \
+            org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath \
+            -Dmdep.includeScope=compile \
+            -Dmdep.outputFile=target/verify.classpath
+
+      - name: Collect compile API evidence v1
+        continue-on-error: true
+        env:
+          JAVA_RELEASE: ${{ inputs.java_version }}
+        shell: bash
+        run: |
+          python3 "$RUNNER_TEMP/compile_api_evidence.py" --java-release "$JAVA_RELEASE"
+
+      - name: Verify with javac (annotation processing disabled)
+        env:
+          JAVA_RELEASE: ${{ inputs.java_version }}
+        shell: bash
+        run: |
+          mapfile -d '' sources < <(find src/main/java -type f -name '*.java' -print0)
+          [[ ${#sources[@]} -gt 0 ]] || { echo 'No Java sources' >&2; exit 3; }
+          classpath="$(cat target/verify.classpath)"
+          mkdir -p target/verify-classes
+          if [[ "$JAVA_RELEASE" == '8' ]]; then
+            javac -encoding UTF-8 -source 8 -target 8 -proc:none \
+              -classpath "$classpath" -d target/verify-classes "${sources[@]}"
+          else
+            javac -encoding UTF-8 --release "$JAVA_RELEASE" -proc:none \
+              -classpath "$classpath" -d target/verify-classes "${sources[@]}"
+          fi
+
+  package:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+
+      - name: Package controlled project
+        shell: bash
+        run: |
+          test -f pom.xml || { echo '::error::Missing pom.xml' >&2; exit 2; }
+          test ! -e .mvn || { echo '::error::.mvn is not allowed in build branches' >&2; exit 2; }
+          if grep -Eiq '<(extensions|profiles|pluginRepositories)([ >])' pom.xml; then
+            echo '::error::Disallowed Maven model section: extensions, profiles or pluginRepositories' >&2
+            exit 2
+          fi
+          mvn --batch-mode --no-transfer-progress -Dmaven.compiler.proc=none -Dmaven.test.skip=true clean package
+
+      - name: Select plugin JAR
+        shell: bash
+        run: |
+          mkdir -p artifact
+          mapfile -t jars < <(find target -maxdepth 1 -type f -name '*.jar' ! -name 'original-*' -print)
+          [[ ${#jars[@]} -eq 1 ]] || { printf 'Expected one plugin JAR, found %s\n' "${#jars[@]}" >&2; exit 3; }
+          cp -- "${jars[0]}" artifact/plugin.jar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-jar
+          path: artifact/plugin.jar
+          if-no-files-found: error
+          retention-days: 1

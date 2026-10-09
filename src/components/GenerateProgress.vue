@@ -98,6 +98,16 @@
           本次查证已降级，不阻断后续生成
         </div>
       </section>
+      <section v-if="genTask.negativeFactsUsed.length" class="negative-api-evidence" aria-label="不可用 API 证据">
+        <article v-for="fact in genTask.negativeFactsUsed" :key="fact.factId" class="negative-api-fact">
+          <span class="negative-api-status">{{ fact.source === "cache" ? "命中不可用 API 缓存" : "已验证不可用" }}</span>
+          <code>{{ fact.symbol }}</code>
+          <span class="negative-api-dependency">{{ fact.dependencyIdentity }}</span>
+          <a v-if="fact.sourceUrl?.startsWith('https://')" :href="fact.sourceUrl" target="_blank" rel="noopener noreferrer"
+             class="negative-api-source">公开制品证据</a>
+        </article>
+      </section>
+
       <LearningEvidence :task-id="genTask.taskId" :knowledge-count="evidenceKnowledgeCount"
                         :searched-source-count="genTask.learningProgress.searchedSourceCount"
                         :learning-job-id="genTask.learningProgress.jobId"
@@ -594,6 +604,12 @@ watch(() => genTask.streamingContent, async () => {
 </script>
 
 <style scoped>
+.negative-api-evidence { display: grid; gap: 10px; margin: 14px 0; }
+.negative-api-fact { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 14px 16px; border: 1px solid var(--line, #474743); border-radius: 12px; }
+.negative-api-status { display: inline-block; padding: 6px 10px; line-height: 1.45; background: rgba(217, 119, 6, .10); color: var(--text-primary, #925208); border-radius: 7px; }
+.negative-api-fact code { min-width: 0; overflow-wrap: anywhere; }
+.negative-api-dependency { color: var(--text-secondary, #697386); overflow-wrap: anywhere; font-size: 12px; }
+.negative-api-fact .negative-api-source { display: inline-flex; align-items: center; padding: 6px 10px; line-height: 1.45; color: var(--oak, #c6b07d); border: 1px solid var(--line, #474743); border-radius: 7px; text-decoration: none; }
 .gen-wrap {
   display: flex;
   flex-direction: column;

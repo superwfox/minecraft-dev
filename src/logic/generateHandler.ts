@@ -718,7 +718,12 @@ function applyLearningSnapshot(snapshot: any) {
             else genTask.knowledgeUsed.push(item);
         }
     }
-    genTask.learningDeferred = !!snapshot?.learningDeferred;
+    if (Array.isArray(snapshot?.negativeFactsUsed)) {
+        genTask.negativeFactsUsed = snapshot.negativeFactsUsed.filter((item: any) => item
+            && typeof item.factId === "string" && typeof item.symbol === "string"
+            && typeof item.dependencyIdentity === "string" && ["verified", "cache"].includes(item.source)).slice(0, 64);
+    }
+    if (typeof snapshot?.learningDeferred === "boolean") genTask.learningDeferred = snapshot.learningDeferred;
 }
 
 function learningRetryAfterMs(response: Response): number | undefined {
@@ -1610,6 +1615,9 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
 
                 try {
                     switch (evt.type) {
+                        case "learning_snapshot":
+                            applyLearningSnapshot(evt.snapshot);
+                            break;
                         case "phase":
                             if (opts?.preflightStage || evt.stage) activatePreflight(evt.stage || evt.phase);
                             // 桶模式：path 字段表示具体文件；非桶模式：file 字段表示当前文件

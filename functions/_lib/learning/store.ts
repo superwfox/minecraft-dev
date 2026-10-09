@@ -11,6 +11,7 @@ import type {
     LearningSourceRecord,
     LearningStage,
 } from "./types";
+import { negativeApiFactWriteStatements, prepareVerifiedNegativeApiFact, type NegativeApiFactWriteInput } from "./negativeApiFacts";
 
 export interface LearningStoreEnv {
     DB?: D1Database;
@@ -294,6 +295,7 @@ export async function completeLearningJobStep(
         taskStateFence?: string;
         sources?: LearningSourceRecord[];
         knowledge?: KnowledgeItemCreateInput & { knowledgeId: string };
+        negativeFacts?: NegativeApiFactWriteInput[];
         now?: number;
     },
 ): Promise<LearningJobRecord | null> {
@@ -303,7 +305,8 @@ export async function completeLearningJobStep(
     const sources = input.sources ?? [];
     const knowledge = input.knowledge;
 
-    if ((input.sources || knowledge) && input.taskStateFence) {
+    if (input.negativeFacts?.length && !input.taskStateFence) throw new Error("negative_api_fact_missing_task_fence");
+    if ((input.sources || knowledge || input.negativeFacts?.length) && input.taskStateFence) {
         statements.push(db.prepare(`
             UPDATE learning_jobs
             SET lease_until = CASE
@@ -630,12 +633,24 @@ export async function completeLearningJobStep(
         }
     }
 
+    for (const negative of input.negativeFacts ?? []) {
+        const prepared = await prepareVerifiedNegativeApiFact({ ...negative, now });
+        statements.push(...negativeApiFactWriteStatements(db, prepared, {
+            jobId: input.jobId, ownerUid: input.ownerUid, revision: input.expectedRevision, token: input.leaseToken,
+        }));
+    }
+    const hasNegativeResults = Object.keys(input.work.negativeResultIds ?? {}).length > 0;
+    const validNegativeResults = `NOT EXISTS (
+        SELECT 1 FROM json_each(?6, '$.negativeResultIds') AS result
+        LEFT JOIN negative_api_facts AS fact ON fact.fact_id = result.value
+        WHERE fact.fact_id IS NULL OR fact.status <> 'active' OR fact.expires_at <= ?9
+    )`;
     statements.push(db.prepare(`
         UPDATE learning_jobs
-        SET status = ?5,
+        SET status = ${hasNegativeResults ? `CASE WHEN ?5 = 'ready' AND NOT (${validNegativeResults}) THEN 'deferred' ELSE ?5 END` : "?5"},
             work_json = ?6,
             result_ids_json = ?7,
-            error = ?8,
+            error = ${hasNegativeResults ? `CASE WHEN ?5 = 'ready' AND NOT (${validNegativeResults}) THEN 'unresolved_knowledge_needs' ELSE ?8 END` : "?8"},
             lease_token = '',
             lease_until = 0,
             revision = revision + 1,

@@ -385,17 +385,16 @@ function sharedEvidenceValid(fact: NegativeApiFact, evidence: SharedNegativeApiE
         && ["javadoc", "documentation"].includes(evidence.source.sourceType);
 }
 
-export async function persistVerifiedNegativeApiFact(
-    env: LearningStoreEnv,
-    input: {
-        fact: NegativeApiFact;
-        evidence: SharedNegativeApiEvidence;
-        forbiddenTerms?: string[];
-        /** Explicit fresh inventory verification against the last reviewed record. */
-        revalidation?: { factId: string; evidenceContentHash: string };
-        now?: number;
-    },
-): Promise<NegativeApiFact> {
+export interface NegativeApiFactWriteInput {
+    fact: NegativeApiFact;
+    evidence: SharedNegativeApiEvidence;
+    forbiddenTerms?: string[];
+    /** Explicit fresh inventory verification against the last reviewed record. */
+    revalidation?: { factId: string; evidenceContentHash: string };
+    now?: number;
+}
+
+export async function prepareVerifiedNegativeApiFact(input: NegativeApiFactWriteInput) {
     const now = input.now ?? Date.now();
     const fact = { ...input.fact, symbol: canonicalNegativeApiSymbol(input.fact.symbol) };
     const evidence = { ...input.evidence, symbol: canonicalNegativeApiSymbol(input.evidence.symbol) };
@@ -426,20 +425,31 @@ export async function persistVerifiedNegativeApiFact(
     if (input.revalidation && (input.revalidation.factId !== factId || !HASH.test(input.revalidation.evidenceContentHash))) {
         throw new Error("negative_api_fact_revision_conflict");
     }
-    if (!env.DB) throw new LearningStoreUnavailableError();
-    await env.DB.prepare(`
+    return { fact: { ...fact, factId, dependencyFingerprint, expiresAt }, evidence, revalidation: input.revalidation, now };
+}
+
+export function negativeApiFactWriteStatements(db: D1Database, prepared: Awaited<ReturnType<typeof prepareVerifiedNegativeApiFact>>,
+    lease?: { jobId: string; ownerUid: string; revision: number; token: string }) {
+    const { fact, evidence, revalidation, now } = prepared;
+    const guard = (offset: number) => lease ? ` AND EXISTS (
+        SELECT 1 FROM learning_jobs WHERE job_id = ?${offset} AND owner_uid = ?${offset + 1}
+        AND revision = ?${offset + 2} AND lease_token = ?${offset + 3} AND lease_until > ?${offset + 4}
+    )` : "";
+    const leaseValues = lease ? [lease.jobId, lease.ownerUid, lease.revision, lease.token, now] : [];
+    const insert = db.prepare(`
         INSERT OR IGNORE INTO negative_api_facts (
             fact_id, symbol, core_type, mc_version, dependency_identity, dependency_fingerprint,
             assertion, assertion_scope, evidence_kind, evidence_source_id, evidence_content_hash,
             verification_method, confidence, status, created_at, expires_at, updated_at, evidence_source_url, verified_by
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unavailable', 'versioned_api', ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?13, ?14, ?15, ?16)
-    `).bind(factId, fact.symbol, fact.coreType, fact.mcVersion, fact.dependencyIdentity,
-        dependencyFingerprint, fact.evidenceKind, input.evidence.source.sourceId,
-        input.evidence.source.contentHash, input.evidence.verificationMethod, fact.confidence,
-        fact.createdAt, expiresAt, now, input.evidence.source.canonicalUrl, input.evidence.verifiedBy).run();
+        ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'unavailable', 'versioned_api', ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?13, ?14, ?15, ?16
+        WHERE 1 = 1${guard(17)}
+    `).bind(fact.factId, fact.symbol, fact.coreType, fact.mcVersion, fact.dependencyIdentity,
+        fact.dependencyFingerprint, fact.evidenceKind, evidence.source.sourceId,
+        evidence.source.contentHash, evidence.verificationMethod, fact.confidence,
+        fact.createdAt, fact.expiresAt, now, evidence.source.canonicalUrl, evidence.verifiedBy, ...leaseValues);
     // A fresh exhaustive verification can renew an expired active fact. Suspended
     // and invalidated conclusions require an explicit compare-and-swap revalidation.
-    await env.DB.prepare(`
+    const update = db.prepare(`
         UPDATE negative_api_facts
         SET evidence_kind = ?2, evidence_source_id = ?3, evidence_content_hash = ?4,
             verification_method = ?5, confidence = ?6, created_at = ?7, expires_at = ?8, updated_at = ?9,
@@ -447,14 +457,32 @@ export async function persistVerifiedNegativeApiFact(
         WHERE fact_id = ?1 AND (
             (status = 'active' AND expires_at <= ?9)
             OR (?10 <> '' AND status IN ('suspended', 'invalidated') AND evidence_content_hash = ?10 AND updated_at < ?7)
-        )
-    `).bind(factId, fact.evidenceKind, input.evidence.source.sourceId, input.evidence.source.contentHash,
-        input.evidence.verificationMethod, fact.confidence, fact.createdAt, expiresAt, now,
-        input.revalidation?.evidenceContentHash || "", input.evidence.source.canonicalUrl, input.evidence.verifiedBy).run();
+        )${guard(13)}
+    `).bind(fact.factId, fact.evidenceKind, evidence.source.sourceId, evidence.source.contentHash,
+        evidence.verificationMethod, fact.confidence, fact.createdAt, fact.expiresAt, now,
+        revalidation?.evidenceContentHash || "", evidence.source.canonicalUrl, evidence.verifiedBy, ...leaseValues);
+    return [insert, update];
+}
+
+export async function persistVerifiedNegativeApiFact(env: LearningStoreEnv, input: NegativeApiFactWriteInput): Promise<NegativeApiFact> {
+    const prepared = await prepareVerifiedNegativeApiFact(input);
+    const { fact, revalidation } = prepared;
+    const factId = fact.factId;
+    if (!env.DB) throw new LearningStoreUnavailableError();
+    for (const statement of negativeApiFactWriteStatements(env.DB, prepared)) await statement.run();
     const row = await env.DB.prepare("SELECT * FROM negative_api_facts WHERE fact_id = ?1").bind(factId).first<NegativeApiFactRow>();
     if (!row) throw new Error("negative_api_fact_not_persisted");
-    if (input.revalidation && row.status !== "active") throw new Error("negative_api_fact_revision_conflict");
+    if (revalidation && row.status !== "active") throw new Error("negative_api_fact_revision_conflict");
     return mapFact(row);
+}
+
+export async function getNegativeApiFactsByIds(env: LearningStoreEnv, ids: string[]): Promise<NegativeApiFact[]> {
+    const unique = [...new Set(ids)].filter(id => /^neg_[a-f0-9]{64}$/.test(id)).slice(0, 64);
+    if (!unique.length) return [];
+    if (!env.DB) throw new LearningStoreUnavailableError();
+    const rows = await env.DB.prepare(`SELECT * FROM negative_api_facts WHERE fact_id IN (${unique.map((_, index) => `?${index + 1}`).join(",")})`)
+        .bind(...unique).all<NegativeApiFactRow>();
+    return (rows.results ?? []).map(mapFact);
 }
 
 interface NegativeApiFactRow {

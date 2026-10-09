@@ -12,7 +12,10 @@ import type {
     LearningProgress,
     LearningReasonCode,
     LearningStage,
+    NegativeFactUsed,
 } from "./types";
+import type { NegativeApiFact } from "./negativeApiFacts";
+import { learningNegativeFactIds, negativeFactsUsed, resolvedNegativeNeedCount } from "./negativeLearning";
 
 const STATUS_MESSAGES: Record<LearningJobRecord["status"], string> = {
     queued: "准备查证技术资料",
@@ -29,6 +32,7 @@ const STATUS_MESSAGES: Record<LearningJobRecord["status"], string> = {
 export interface PublicLearningSnapshot {
     learningProgress: LearningProgress;
     knowledgeUsed: KnowledgeUsed[];
+    negativeFactsUsed?: NegativeFactUsed[];
     learningDeferred: boolean;
     debugMeta?: LearningDebugMeta;
 }
@@ -74,18 +78,21 @@ export function learningSnapshot(
         message?: string;
         stage?: LearningStage;
     },
+    negativeFacts: NegativeApiFact[] = [],
 ): PublicLearningSnapshot {
-    const status = fallback?.status ?? job?.status ?? "idle";
+    const invalidNegativeReady = job?.status === "ready" && Object.keys(job.work.negativeResultIds ?? {}).length > resolvedNegativeNeedCount(job, negativeFacts);
+    const status = fallback?.status ?? (invalidNegativeReady ? "deferred" : job?.status ?? "idle");
     const terminalFallback = status === "deferred" || status === "failed" || status === "cancelled"
         ? "internal_error"
         : undefined;
-    const reasonCode = fallback?.reasonCode
+    const reasonCode = fallback?.reasonCode ?? (invalidNegativeReady ? "unresolved_knowledge_needs" : undefined)
         ?? normalizeLearningReasonCode(job?.error, terminalFallback);
     const timing = job ? learningJobTiming(job) : undefined;
     const remainingMs = job ? learningJobRemainingMs(job) : undefined;
     const completedNeeds = Math.max(0, Math.min(
         job?.needs.length ?? 0,
-        Number(job?.work.completedNeeds) || (job?.status === "ready" ? job.needs.length : 0),
+        invalidNegativeReady && job ? items.filter(item => item.status === "active").length + resolvedNegativeNeedCount(job, negativeFacts)
+            : Number(job?.work.completedNeeds) || (job?.status === "ready" ? job.needs.length : 0),
     ));
     return {
         learningProgress: {
@@ -106,6 +113,9 @@ export function learningSnapshot(
             sourceCount,
             searchedSourceCount: job?.work.searchedSources?.length ?? 0,
             message: fallback?.message
+                || (negativeFacts.length && !reasonCode ? status === "ready"
+                    ? `已验证不可用 ${negativeFacts.length} 个 API，技术证据已准备完成`
+                    : `已取得 ${negativeFacts.length} 条不可用 API 证据，继续查证剩余缺口` : "")
                 || (reasonCode ? learningReasonMessage(reasonCode) : job ? STATUS_MESSAGES[job.status] : ""),
             reasonCode,
         },
@@ -115,6 +125,7 @@ export function learningSnapshot(
             confidence: item.confidence,
             status: publicStatus(item),
         })),
+        ...(negativeFacts.length || learningNegativeFactIds(job).length ? { negativeFactsUsed: negativeFactsUsed(negativeFacts, job?.work.cachedNegativeFactIds) } : {}),
         learningDeferred: status === "deferred" || status === "failed" || status === "cancelled",
         debugMeta: job ? buildLearningDebugMeta(job, {
             reasonCode,

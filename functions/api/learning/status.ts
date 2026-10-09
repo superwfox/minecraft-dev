@@ -9,6 +9,7 @@ import {
 } from "../../_lib/learning/store";
 import type { LearningStage } from "../../_lib/learning/types";
 import { getOwnedTask } from "../../_lib/taskStore";
+import { loadLearningNegativeFacts } from "../../_lib/learning/negativeLearning";
 
 interface Env {
     DB?: D1Database;
@@ -57,7 +58,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             getKnowledgeItemsByIds(context.env, ids),
             job ? listLearningSources(context.env, job.jobId, uid) : Promise.resolve([]),
         ]);
-        return json(learningSnapshot(job, items, sources.length));
+        const negatives = await loadLearningNegativeFacts(context.env, job, state, items);
+        return json(learningSnapshot(job, items, sources.length, undefined, negatives));
     } catch (error) {
         if (!(error instanceof LearningStoreUnavailableError)) console.warn("learning status failed", error);
         return json({

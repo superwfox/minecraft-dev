@@ -42,7 +42,6 @@ __screenshots__/
 *.timestamp-*-*.mjs
 
 .dev.vars
-public/maven.yml
 
 # Wrangler
 .wrangler/
