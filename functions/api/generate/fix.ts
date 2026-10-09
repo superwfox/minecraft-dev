@@ -11,7 +11,20 @@ import {
     knowledgeLookupKey,
     resolveCompileDependencyContext,
 } from "../../_lib/learning/assessment";
-import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import { buildKnowledgeContext, loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
+import {
+    buildNegativeApiEnvironment,
+    canonicalNegativeApiSymbol,
+    createCompilerNegativeApiFacts,
+    dependencyIdentity,
+    findActiveNegativeApiFacts,
+    mergeTaskNegativeApiFacts,
+    negativeApiFactsContext,
+    positiveApiFactsFromKnowledge,
+    reconcileNegativeApiFacts,
+    validateNegativeApiCandidate,
+    type NegativeApiFact,
+} from "../../_lib/learning/negativeApiFacts";
 import {
     createFixRepairAuthorization,
     currentFixRepairAuthorization,
@@ -55,6 +68,7 @@ import {
     createModelLearningRequest,
     createDiagnosticLearningRequest,
     learningToolDefinition,
+    modelLearningContinuation,
     putModelLearningRequest,
     removeModelLearningRequest,
     setModelLearningRequestResult,
@@ -910,10 +924,20 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 repairAttempts: state.repairAttempts,
             }).accepted;
             state.fixDiagnosticsFingerprint = fingerprint;
+            const confirmedApiDiagnostics: BuildDiagnostic[] = [];
+            const confirmedDependencies = new Map<string, typeof dependencies[number]>();
+            const canonicalDiagnosticSymbols = new Map<string, string>();
             for (const diagnostic of diagnostics) {
                 const eligibility = assessCompileLearningEligibility({ diagnostic, mcVersion: state.version,
                     projectPackage: state.packageName, dependencies, generatedFiles: state.generatedFiles ?? [] });
                 if (eligibility.decision === "LEARN") {
+                    const dependency = dependencies.find((item) => dependencyIdentity(item) === eligibility.dependency);
+                    if (eligibility.symbol && dependency) {
+                        confirmedApiDiagnostics.push({ ...diagnostic, qualifiedSymbol: eligibility.symbol });
+                        const symbol = canonicalNegativeApiSymbol(eligibility.symbol, diagnostic.symbolKind);
+                        confirmedDependencies.set(symbol, dependency);
+                        canonicalDiagnosticSymbols.set(eligibility.symbol, symbol);
+                    }
                     await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "api_symbol_identified",
                         symbol: eligibility.symbol, dependency: eligibility.dependency }));
                 }
@@ -924,6 +948,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     ...(eligibility.dependency ? { dependency: eligibility.dependency } : {}),
                 }));
             }
+            const pomContent = state.generatedFiles?.find((file: { path: string }) => /(^|\/)pom\.xml$/i.test(file.path))?.content ?? "";
+            const negativeEnvironment = await buildNegativeApiEnvironment({
+                coreType: state.coreType || "", mcVersion: state.version || "", dependencies, pomContent, compileRunId: state.runId,
+            });
+            const compilerFacts = await createCompilerNegativeApiFacts({
+                taskId, compileRunId: state.runId, diagnostics: confirmedApiDiagnostics, environment: negativeEnvironment,
+                dependencyForSymbol: (symbol) => confirmedDependencies.get(symbol),
+            });
+            assertRepairLease();
+            state.negativeApiFacts = mergeTaskNegativeApiFacts(state.negativeApiFacts, compilerFacts, taskId, negativeEnvironment);
 
             if (mode === "diagnose") {
                 state.lastBuildDiagnostics = diagnostics;
@@ -1130,9 +1164,56 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 title: "构建修复已验证公共技术知识",
             });
             assertRepairLease();
+            let sharedNegativeFacts: NegativeApiFact[] = [];
+            const canonicalNeedSymbol = (symbol: string) => canonicalDiagnosticSymbols.get(symbol) || canonicalNegativeApiSymbol(symbol);
+            let negativeLookupTimer: ReturnType<typeof setTimeout> | undefined;
+            let negativeLookupTimedOut = false;
+            try {
+                sharedNegativeFacts = await Promise.race([
+                    findActiveNegativeApiFacts(context.env, { symbols: fixNeeds.map((need) => canonicalNeedSymbol(need.scope.symbol || "")), environment: negativeEnvironment }),
+                    new Promise<NegativeApiFact[]>((resolve) => {
+                        negativeLookupTimer = setTimeout(() => { negativeLookupTimedOut = true; resolve([]); }, 1_500);
+                    }),
+                ]);
+            } catch {
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "learning_skipped",
+                    reasonCode: "negative_api_storage_unavailable" }));
+            } finally {
+                if (negativeLookupTimer !== undefined) clearTimeout(negativeLookupTimer);
+            }
+            if (negativeLookupTimedOut) {
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "learning_skipped",
+                    reasonCode: "negative_api_cache_timeout" }));
+            }
+            assertRepairLease();
+            const allPositiveItems = [...knowledge.used, ...(fixLearningResolution?.status === "resolved" ? fixLearningResolution.knowledgeUsed : [])];
+            const negativeConstraints = reconcileNegativeApiFacts({
+                facts: [...state.negativeApiFacts, ...sharedNegativeFacts], positiveFacts: positiveApiFactsFromKnowledge(allPositiveItems),
+                environment: negativeEnvironment, taskId,
+            });
+            const suspendedIds = new Set(negativeConstraints.suspendedKnowledgeIds);
+            knowledge.used = knowledge.used.filter((item) => !suspendedIds.has(item.knowledgeId));
+            if (Array.isArray(state.knowledgeUsed)) {
+                state.knowledgeUsed = state.knowledgeUsed.filter((item: { knowledgeId: string }) => !suspendedIds.has(item.knowledgeId));
+            }
+            if (negativeConstraints.conflicts.length) {
+                const msg = "! 同一依赖环境的 API 正负证据冲突，已暂停双方自动采用；需要重新验证实际编译依赖";
+                state.logs.push(msg);
+                state.negativeApiConflicts = negativeConstraints.conflicts.map((fact) => ({ symbol: fact.symbol, dependencyIdentity: fact.dependencyIdentity }));
+                await writer.write(sseEvent(encoder, { type: "log", msg }));
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "learning_skipped",
+                    reasonCode: "api_evidence_conflict", symbols: negativeConstraints.conflicts.map((fact) => fact.symbol) }));
+            } else delete state.negativeApiConflicts;
+            if (negativeConstraints.active.length) {
+                await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "negative_api_applied",
+                    symbols: negativeConstraints.active.map((fact) => fact.symbol), count: negativeConstraints.active.length }));
+            }
             state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
             const cacheKeys = new Set(knowledge.used.map((item) => item.lookupKey));
-            const uncachedNeeds = fixNeeds.filter((need) => !cacheKeys.has(knowledgeLookupKey(need)));
+            // Current compiler observations still allow first-time discovery of verified alternatives.
+            // A shared verified absence is already a scoped cache answer and avoids redundant networking.
+            const sharedUnavailable = new Set(negativeConstraints.active.filter((fact) => fact.evidenceKind !== "compiler").map((fact) => canonicalNegativeApiSymbol(fact.symbol)));
+            const uncachedNeeds = fixNeeds.filter((need) => !cacheKeys.has(knowledgeLookupKey(need)) && !sharedUnavailable.has(canonicalNeedSymbol(need.scope.symbol || "")));
             const isResolvedPreflight = fixLearningResolution?.status === "resolved"
                 && fixLearningResolution.request.originKey === `fix:${fingerprint}:preflight:${dependencyContextHash}`;
             const completedPreflight = state.fixLearningOutcome?.fingerprint === fingerprint
@@ -1147,7 +1228,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     status, reasonCode }));
             };
             if (fixNeeds.length && !uncachedNeeds.length) {
-                await recordPreflightOutcome("ready", "knowledge_cache_hit", `▸ 修复前已命中 ${knowledge.used.length} 条已验证公共知识`);
+                await recordPreflightOutcome("ready", "knowledge_cache_hit", `▸ 修复前已命中 ${knowledge.used.length} 条已验证公共知识、${sharedUnavailable.size} 条依赖范围内的不可用 API 事实`);
             } else if (isResolvedPreflight && fixLearningResolution?.status === "resolved") {
                 // Store terminal results under the repair lease so refresh cannot restart a failed lookup.
                 setModelLearningRequestResult(state, fixLearningResolution.request.requestId, {
@@ -1185,9 +1266,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     return;
                 }
             }
-            const learnedContext = fixLearningResolution?.status === "resolved" ? fixLearningResolution.result.knowledgeContext : "";
-            const fixKnowledgeContext = [knowledge.context, learnedContext && learnedContext !== knowledge.context ? learnedContext : ""].filter(Boolean).join("\n\n");
+            const safePositiveItems = allPositiveItems.filter((item) => !suspendedIds.has(item.knowledgeId));
+            const positiveContext = suspendedIds.size
+                ? buildKnowledgeContext(safePositiveItems, 6_000, "构建修复已验证公共技术知识").context
+                : [knowledge.context, fixLearningResolution?.status === "resolved" && fixLearningResolution.result.knowledgeContext !== knowledge.context
+                    ? fixLearningResolution.result.knowledgeContext : ""].filter(Boolean).join("\n\n");
+            const fixKnowledgeContext = [positiveContext, negativeApiFactsContext(negativeConstraints.active)].filter(Boolean).join("\n\n");
             if (fixLearningResolution?.status === "resolved") {
+                fixLearningResolution.knowledgeUsed = fixLearningResolution.knowledgeUsed.filter((item) => !suspendedIds.has(item.knowledgeId));
                 state.knowledgeUsed = mergeKnowledgeUsed(
                     state.knowledgeUsed,
                     fixLearningResolution.knowledgeUsed,
@@ -1206,6 +1292,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 : null;
             let fixContinuationMessages = fixLearningResolution?.status === "resolved"
                 && !!fixLearningResolution.request.targetPath
+                && !negativeConstraints.active.length && !negativeConstraints.conflicts.length
                 ? fixLearningResolution.messages
                 : null;
             const expectedFixLearningOriginKey = `fix:${fingerprint}:${filesToFix[0]}`;
@@ -1247,6 +1334,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const skippedFiles: string[] = [];
             const beforeContents = new Map<string, string>();
             const beforeSummaries = new Map<string, any>();
+            let candidateValidationReason = "";
+            const candidateApiIssues = async (filePath: string, content: string): Promise<string[]> => {
+                const candidateFiles = state.generatedFiles.map((file: { path: string; content: string }) => file.path === filePath ? { ...file, content } : file);
+                const candidateEnvironment = await buildNegativeApiEnvironment({
+                    coreType: state.coreType || "", mcVersion: state.version || "", compileRunId: state.runId,
+                    dependencies: resolveCompileDependencyContext(candidateFiles),
+                    pomContent: candidateFiles.find((file: { path: string }) => /(^|\/)pom\.xml$/i.test(file.path))?.content ?? "",
+                });
+                assertRepairLease();
+                const violations = validateNegativeApiCandidate({ files: candidateFiles, facts: negativeConstraints.active,
+                    environment: candidateEnvironment, taskId }).filter((item) => item.path === filePath);
+                if (violations.length) {
+                    await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "fix_candidate_rejected",
+                        reasonCode: "negative_api_reference", symbols: violations.map((item) => item.symbol), path: filePath }));
+                }
+                return [...findKnownApiIssues({ ...apiContractInput, generatedFiles: candidateFiles }, content),
+                    ...violations.map((item) => `当前编译依赖不可用符号：${item.symbol}`)];
+            };
             for (const filePath of filesToFix) {
                 assertRepairLease();
                 const fileEntry = state.generatedFiles.find((f: any) => f.path === filePath);
@@ -1314,7 +1419,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 );
                 await charge(fixRes);
                 if (isLearningToolTurn) {
-                    const learningRequest = tools.length ? await createModelLearningRequest({
+                    let learningRequest = tools.length ? await createModelLearningRequest({
                         message: fixRes.message,
                         messages,
                         origin: "fix",
@@ -1327,6 +1432,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                             ? state.grade.vector.external_deps
                             : [],
                     }) : null;
+                    if (learningRequest && learningRequest.needs.every((need) => need.claim.answerType === "signature"
+                        && need.scope.coreType === negativeEnvironment.coreType && need.scope.mcVersion === negativeEnvironment.mcVersion
+                        && negativeConstraints.active.some((fact) => fact.evidenceKind !== "compiler"
+                            && fact.dependencyIdentity === need.scope.dependency
+                            && canonicalNegativeApiSymbol(fact.symbol) === canonicalNeedSymbol(need.scope.symbol || "")))) {
+                        const cachedMessages = modelLearningContinuation(learningRequest, {
+                            status: "ready", reasonCode: "knowledge_cache_hit",
+                            knowledgeContext: negativeApiFactsContext(negativeConstraints.active),
+                        });
+                        await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "learning_cache_hit",
+                            reasonCode: "negative_api_cache_hit", count: learningRequest.needs.length }));
+                        // Answer the already-verified signature query once, without external discovery
+                        // or another tool round. Alternative implementation questions remain eligible.
+                        fixRes = await callAIStream(llm, prompt.system, prompt.user, writer, encoder,
+                            repairAbort.signal, charge, cachedMessages);
+                        await charge(fixRes);
+                        learningRequest = null;
+                    }
                     if (learningRequest) {
                         if (previousFixLearningRequest) {
                             removeModelLearningRequest(state, previousFixLearningRequest.requestId);
@@ -1364,7 +1487,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 }
                 markKnowledgeApplied(filePath);
                 let fixedContent = stripFences(fixRes.content).trim();
-                let knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
+                let knownApiIssues = await candidateApiIssues(filePath, fixedContent);
                 if (knownApiIssues.length) {
                     const retryMsg = `! 修正候选仍违反 API 契约，正在重新生成：${knownApiIssues.join("；")}`;
                     state.logs.push(retryMsg);
@@ -1392,7 +1515,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     markKnowledgeApplied(filePath);
                     await charge(fixRes);
                     fixedContent = stripFences(fixRes.content).trim();
-                    knownApiIssues = findKnownApiIssues(apiContractInput, fixedContent);
+                    knownApiIssues = await candidateApiIssues(filePath, fixedContent);
                 }
 
                 if (knownApiIssues.length) {
@@ -1429,6 +1552,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 state.logs.push(msg);
             }
 
+            if (changedCount > 0 && negativeConstraints.active.length) {
+                const finalEnvironment = await buildNegativeApiEnvironment({
+                    coreType: state.coreType || "", mcVersion: state.version || "", compileRunId: state.runId,
+                    dependencies: resolveCompileDependencyContext(state.generatedFiles),
+                    pomContent: state.generatedFiles.find((file: { path: string }) => /(^|\/)pom\.xml$/i.test(file.path))?.content ?? "",
+                });
+                assertRepairLease();
+                const violations = validateNegativeApiCandidate({ files: state.generatedFiles, facts: negativeConstraints.active,
+                    environment: finalEnvironment, taskId });
+                if (violations.length) {
+                    candidateValidationReason = "完整修复候选仍引用当前依赖中不可用的 API，已恢复本轮修改并停止重新构建";
+                    for (const path of changedFiles) {
+                        const file = state.generatedFiles.find((item: { path: string }) => item.path === path);
+                        if (file) {
+                            file.content = beforeContents.get(path) ?? file.content;
+                            file.apiSummary = beforeSummaries.get(path) ?? null;
+                        }
+                        if (!skippedFiles.includes(path)) skippedFiles.push(path);
+                    }
+                    changedFiles.length = 0;
+                    changedCount = 0;
+                    await writer.write(sseEvent(encoder, { type: "debug", scope: "build-fix", msg: "fix_candidate_rejected",
+                        reasonCode: "negative_api_remaining", symbols: [...new Set(violations.map((item) => item.symbol))],
+                        paths: [...new Set(violations.map((item) => item.path))] }));
+                }
+            }
+
             revokeFixAuthorizations(state);
 
             const failedRunId = state.runId;
@@ -1453,7 +1603,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }));
 
             if (changedCount === 0) {
-                const reason = "自动修复未产生任何有效文件变更，已停止重新构建";
+                const reason = candidateValidationReason || "自动修复未产生任何有效文件变更，已停止重新构建";
                 state.status = "error";
                 state.error = reason;
                 state.logs.push(`! ${reason}`);

@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LearningJobRecord } from "../../functions/_lib/learning/types";
+import type { KnowledgeItemRecord, LearningJobRecord } from "../../functions/_lib/learning/types";
+import type { NegativeApiFact } from "../../functions/_lib/learning/negativeApiFacts";
 
 const mocks = vi.hoisted(() => ({
-    raw: "", job: null as LearningJobRecord | null, active: [] as { lookupKey: string; knowledgeId: string; revision: number }[],
+    raw: "", job: null as LearningJobRecord | null,
+    active: [] as (Pick<KnowledgeItemRecord, "lookupKey" | "knowledgeId" | "revision"> & Partial<KnowledgeItemRecord>)[],
+    sharedNegativeFacts: [] as NegativeApiFact[],
     canAutoLearn: true, mutatePomOnLease: false, getLogs: vi.fn(), createJob: vi.fn(), discover: vi.fn(), model: vi.fn(),
 }));
 vi.mock("../../functions/_lib/github", () => ({ getRunJobs: async () => [{ id: 452, conclusion: "failure" }], getJobLogs: mocks.getLogs }));
@@ -46,6 +49,9 @@ vi.mock("../../functions/_lib/learning/store", async (original) => ({ ...await o
     },
 }));
 vi.mock("../../functions/_lib/deepseekResponses", async (original) => ({ ...await original<Record<string, unknown>>(), discoverLearningSources: mocks.discover }));
+vi.mock("../../functions/_lib/learning/negativeApiFacts", async (original) => ({ ...await original<Record<string, unknown>>(),
+    findActiveNegativeApiFacts: async () => mocks.sharedNegativeFacts,
+}));
 
 import { onRequestPost as fixBuild } from "../../functions/api/generate/fix";
 import { onRequestPost as startLearning } from "../../functions/api/learning/start";
@@ -57,6 +63,11 @@ const rawLog = readFileSync(new URL("../fixtures/build-failures/javac-missing-cl
 const filePath = "src/main/java/com/tahai/maceshieldbreak/ShieldBlockListener.java";
 const originalSource = "package com.tahai.maceshieldbreak; import io.papermc.paper.event.player.PlayerShieldBlockEvent; class ShieldBlockListener {}";
 const fixedSource = "package com.tahai.maceshieldbreak; class ShieldBlockListener { void start() {} }";
+const unavailableSymbol = "io.papermc.paper.event.player.PlayerShieldBlockEvent";
+
+function modelResponse(content: string): Response {
+    return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`, { status: 200 });
+}
 
 function context(path: string, body?: unknown): { context: any; waits: Promise<unknown>[] } {
     const waits: Promise<unknown>[] = [];
@@ -84,7 +95,7 @@ async function learnStep(): Promise<any> {
 }
 
 beforeEach(() => {
-    mocks.canAutoLearn = true; mocks.mutatePomOnLease = false; mocks.active = []; mocks.job = null;
+    mocks.canAutoLearn = true; mocks.mutatePomOnLease = false; mocks.active = []; mocks.job = null; mocks.sharedNegativeFacts = [];
     mocks.raw = JSON.stringify({ taskId: "task-1", uid: "user-1", status: "error", runId: 452, repairAttempts: 0,
         coreType: "paper", version: "1.21", packageName: "com.tahai.maceshieldbreak", projectName: "MaceShieldBreak",
         grade: { vector: { external_deps: [] } }, logs: [], generatedFiles: [
@@ -97,8 +108,7 @@ beforeEach(() => {
             leaseToken: "", leaseUntil: 0, error: "", createdAt: Date.now(), updatedAt: Date.now() };
         return mocks.job;
     });
-    mocks.model.mockImplementation(async () => new Response(
-        `data: ${JSON.stringify({ choices: [{ delta: { content: fixedSource } }] })}\n\ndata: [DONE]\n\n`, { status: 200 }));
+    mocks.model.mockImplementation(async () => modelResponse(fixedSource));
     vi.stubGlobal("fetch", mocks.model);
 });
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
@@ -147,7 +157,7 @@ describe("compiler-driven learning before the first Fixer call", () => {
 
     it("shows disabled learning honestly and does not charge an unchanged candidate as a repair", async () => {
         mocks.canAutoLearn = false;
-        mocks.model.mockResolvedValue(new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: originalSource } }] })}\n\ndata: [DONE]\n\n`));
+        mocks.model.mockImplementation(async () => modelResponse(originalSource));
         await fix("diagnose");
         expect((await fix("repair")).changed).toBe(0);
         expect(JSON.parse(mocks.raw).repairAttempts).toBe(0);
@@ -187,5 +197,175 @@ describe("compiler-driven learning before the first Fixer call", () => {
         mocks.mutatePomOnLease = true;
         expect((await fix("repair")).changed).toBe(1);
         expect(String(mocks.model.mock.calls[0][1].body)).not.toContain("VERIFIED PUBLIC API FACT");
+    });
+});
+
+describe("compiler-scoped unavailable symbols in the actual Fixer endpoint", () => {
+    it("deduplicates current-task compiler facts and replaces a rejected first candidate in one repair", async () => {
+        mocks.canAutoLearn = false;
+        await fix("diagnose");
+        const diagnosed = JSON.parse(mocks.raw);
+        expect(diagnosed.negativeApiFacts).toHaveLength(1);
+        const factId = diagnosed.negativeApiFacts[0].factId;
+        expect(diagnosed.negativeApiFacts[0]).toMatchObject({
+            symbol: unavailableSymbol, taskId: "task-1", compileRunId: 452, coreType: "paper", mcVersion: "1.21",
+            dependencyIdentity: "io.papermc.paper:paper-api:1.21-R0.1-SNAPSHOT",
+            assertion: "unavailable", assertionScope: "compile_environment", evidenceKind: "compiler", status: "active",
+        });
+        expect(diagnosed.negativeApiFacts[0].classpathFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(diagnosed.negativeApiFacts[0]).not.toHaveProperty("dependencyFingerprint");
+        await fix("diagnose");
+        expect(JSON.parse(mocks.raw).negativeApiFacts).toHaveLength(1);
+        expect(JSON.parse(mocks.raw).negativeApiFacts[0].factId).toBe(factId);
+
+        mocks.model.mockImplementationOnce(async () => modelResponse(originalSource))
+            .mockImplementationOnce(async () => modelResponse(fixedSource));
+        expect((await fix("repair")).changed).toBe(1);
+        const stored = JSON.parse(mocks.raw);
+        expect(mocks.model).toHaveBeenCalledTimes(2);
+        expect(stored.repairAttempts).toBe(1);
+        expect(stored.pendingFixSnapshot.changedFiles).toEqual([filePath]);
+        expect(stored.generatedFiles.find((file: { path: string }) => file.path === filePath).content).toBe(fixedSource);
+        expect(String(mocks.model.mock.calls[0][1].body)).toContain("已确认以下完整限定符号在当前编译依赖环境中不可用");
+        expect(mocks.createJob).not.toHaveBeenCalled();
+    });
+
+    it("rejects two candidates that repeat the exact unavailable symbol without a rebuild attempt", async () => {
+        mocks.canAutoLearn = false;
+        await fix("diagnose");
+        mocks.model.mockImplementation(async () => modelResponse(originalSource));
+        const rejected = await fix("repair");
+        expect(rejected.changed).toBe(0);
+        expect(mocks.model).toHaveBeenCalledTimes(2);
+        const stored = JSON.parse(mocks.raw);
+        expect(stored.repairAttempts).toBe(0);
+        expect(stored.status).toBe("error");
+        expect(stored).not.toHaveProperty("pendingFixSnapshot");
+        expect(stored.generatedFiles.find((file: { path: string }) => file.path === filePath).content).toBe(originalSource);
+        expect(stored.buildFixHistory.at(-1)).toMatchObject({ status: "no-change", changedFiles: [] });
+        expect(mocks.createJob).not.toHaveBeenCalled();
+    });
+
+    it("suspends exact-scope positive and negative conflicts before constructing model context", async () => {
+        mocks.canAutoLearn = false;
+        await fix("diagnose");
+        const state = JSON.parse(mocks.raw);
+        const fact = state.negativeApiFacts[0];
+        const now = Date.now();
+        mocks.active = [{
+            knowledgeId: "conflicting-positive", lookupKey: knowledgeLookupKey(state.fixKnowledgeNeeds[0]), revision: 1,
+            kind: "fact", status: "active", scope: { symbol: unavailableSymbol, coreType: "paper", mcVersion: "1.21",
+                dependency: fact.dependencyIdentity },
+            payload: { assertion: "available", dependencyIdentity: fact.dependencyIdentity, classpathFingerprint: fact.classpathFingerprint },
+            summary: "CONFLICTING POSITIVE ASSERTS EVENT EXISTS", risk: "medium", confidence: 1,
+            validFrom: now, expiresAt: now + 86_400_000, reviewNote: "", createdAt: now, updatedAt: now,
+        }];
+        expect((await fix("repair")).changed).toBe(1);
+        expect(mocks.model).toHaveBeenCalledTimes(1);
+        const body = String(mocks.model.mock.calls[0][1].body);
+        expect(body).not.toContain("VERIFIED PUBLIC API FACT");
+        expect(body).not.toContain("CONFLICTING POSITIVE ASSERTS EVENT EXISTS");
+        expect(body).not.toContain("已确认以下完整限定符号在当前编译依赖环境中不可用");
+        expect(JSON.parse(mocks.raw).negativeApiConflicts).toEqual([{ symbol: unavailableSymbol, dependencyIdentity: fact.dependencyIdentity }]);
+        expect(JSON.parse(mocks.raw).knowledgeUsed ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ knowledgeId: "conflicting-positive" })]));
+    });
+
+    it("restores all provisional edits when the combined candidate still references an unavailable symbol", async () => {
+        mocks.canAutoLearn = false;
+        const secondPath = "src/main/java/com/tahai/maceshieldbreak/SecondListener.java";
+        const secondSource = `package com.tahai.maceshieldbreak; import ${unavailableSymbol}; class SecondListener {}`;
+        const initial = JSON.parse(mocks.raw);
+        initial.generatedFiles.push({ path: secondPath, content: secondSource });
+        mocks.raw = JSON.stringify(initial);
+        mocks.getLogs.mockResolvedValue(`${rawLog}\n${secondPath}:3: error: cannot find symbol\nimport ${unavailableSymbol};\n                                     ^\n  symbol: class PlayerShieldBlockEvent\n  location: package io.papermc.paper.event.player`);
+        await fix("diagnose");
+        expect(JSON.parse(mocks.raw).negativeApiFacts).toHaveLength(1);
+        mocks.model.mockImplementationOnce(async () => modelResponse(fixedSource))
+            .mockImplementationOnce(async () => modelResponse(secondSource))
+            .mockImplementationOnce(async () => modelResponse(secondSource));
+        const rejected = await fix("repair");
+        expect(rejected.changed).toBe(0);
+        expect(mocks.model).toHaveBeenCalledTimes(3);
+        const stored = JSON.parse(mocks.raw);
+        expect(stored.status).toBe("error");
+        expect(stored.repairAttempts).toBe(0);
+        expect(stored).not.toHaveProperty("pendingFixSnapshot");
+        expect(stored.generatedFiles.find((file: { path: string }) => file.path === filePath).content).toBe(originalSource);
+        expect(stored.generatedFiles.find((file: { path: string }) => file.path === secondPath).content).toBe(secondSource);
+    });
+
+    it("records and rejects the first imported enum miss with a canonical member identity", async () => {
+        mocks.canAutoLearn = false;
+        const enumSource = "package com.tahai.maceshieldbreak; import org.bukkit.Particle; class ShieldBlockListener { Object effect = Particle.SLIME; }";
+        const initial = JSON.parse(mocks.raw);
+        initial.generatedFiles.find((file: { path: string }) => file.path === filePath).content = enumSource;
+        mocks.raw = JSON.stringify(initial);
+        mocks.getLogs.mockResolvedValue([
+            `2026-10-08T17:31:57.0453551Z ${filePath}:3: error: cannot find symbol`,
+            "2026-10-08T17:31:57.0474643Z     Object effect = Particle.SLIME;",
+            "2026-10-08T17:31:57.0484340Z                             ^",
+            "2026-10-08T17:31:57.0514268Z   symbol: variable SLIME",
+            "2026-10-08T17:31:57.0515110Z   location: class Particle",
+        ].join("\n"));
+        await fix("diagnose");
+        expect(JSON.parse(mocks.raw).negativeApiFacts).toEqual([expect.objectContaining({
+            symbol: "org.bukkit.Particle#SLIME", assertionScope: "compile_environment", evidenceKind: "compiler",
+            dependencyIdentity: "io.papermc.paper:paper-api:1.21-R0.1-SNAPSHOT", taskId: "task-1", compileRunId: 452,
+        })]);
+        mocks.model.mockImplementation(async () => modelResponse(enumSource));
+        const rejected = await fix("repair");
+        expect(rejected.changed).toBe(0);
+        expect(mocks.model).toHaveBeenCalledTimes(2);
+        const stored = JSON.parse(mocks.raw);
+        expect(stored.repairAttempts).toBe(0);
+        expect(stored).not.toHaveProperty("pendingFixSnapshot");
+        expect(stored.generatedFiles.find((file: { path: string }) => file.path === filePath).content).toBe(enumSource);
+        expect(String(mocks.model.mock.calls[0][1].body)).toContain("org.bukkit.Particle#SLIME");
+    });
+
+    it("answers a model signature lookup from exact shared unavailable knowledge without discovery", async () => {
+        const initial = JSON.parse(mocks.raw);
+        initial.generatedFiles.find((file: { path: string }) => file.path === "pom.xml").content =
+            initial.generatedFiles.find((file: { path: string }) => file.path === "pom.xml").content.replace("1.21-R0.1-SNAPSHOT", "1.21-R0.1");
+        mocks.raw = JSON.stringify(initial);
+        const coordinate = "io.papermc.paper:paper-api:1.21-R0.1";
+        const now = Date.now();
+        mocks.sharedNegativeFacts = [{ factId: "official-absence", symbol: unavailableSymbol,
+            coreType: "paper", mcVersion: "1.21", dependencyIdentity: coordinate,
+            assertion: "unavailable", assertionScope: "versioned_api", evidenceKind: "official",
+            confidence: 1, status: "active", createdAt: now - 1, expiresAt: now + 86_400_000,
+            verificationMethod: "official_versioned_inventory", verifiedBy: "deterministic",
+        }];
+        await fix("diagnose");
+        const args = { subject: unavailableSymbol,
+            question: `What is the exact ${unavailableSymbol} API signature in ${coordinate}?`,
+            answerType: "signature", sourcePolicy: "api_signature", integrationKind: "public_api",
+            dependency: coordinate, packageName: "io.papermc.paper.event.player", symbol: unavailableSymbol,
+            searchQueries: [`${unavailableSymbol} ${coordinate} official versioned Javadoc`],
+            acceptanceCriteria: [`Official versioned API documentation confirms the signature for ${coordinate}.`],
+        };
+        mocks.model.mockImplementationOnce(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: {
+            tool_calls: [{ index: 0, id: "call-shared-absence", type: "function", function: {
+                name: "learn_public_api", arguments: JSON.stringify(args),
+            } }],
+        } }] })}\n\ndata: [DONE]\n\n`, { status: 200 }))
+            .mockImplementationOnce(async () => modelResponse(fixedSource));
+        const repaired = await fix("repair");
+        expect(repaired.changed).toBe(1);
+        expect(repaired).not.toHaveProperty("learningToolRequests");
+        expect(mocks.model).toHaveBeenCalledTimes(2);
+        expect(mocks.createJob).not.toHaveBeenCalled();
+        expect(mocks.discover).not.toHaveBeenCalled();
+        const stored = JSON.parse(mocks.raw);
+        expect(stored.repairAttempts).toBe(1);
+        expect(stored).not.toHaveProperty("fixLearningRequestId");
+        expect(stored).not.toHaveProperty("modelLearningRequests");
+        const secondRequest = JSON.parse(String(mocks.model.mock.calls[1][1].body));
+        const toolMessage = secondRequest.messages.find((message: { role: string }) => message.role === "tool");
+        expect(toolMessage.tool_call_id).toBe("call-shared-absence");
+        expect(JSON.parse(toolMessage.content)).toMatchObject({ status: "ready", reasonCode: "knowledge_cache_hit" });
+        expect(JSON.parse(toolMessage.content).verifiedKnowledge).toContain("当前编译依赖环境中不可用");
+        expect(JSON.parse(toolMessage.content).verifiedKnowledge).toContain(unavailableSymbol);
+        expect(secondRequest).not.toHaveProperty("tools");
     });
 });
