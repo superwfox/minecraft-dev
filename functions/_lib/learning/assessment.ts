@@ -1,4 +1,5 @@
 import { isBuildInfrastructureDiagnostic, type BuildDiagnostic } from "../buildDiagnostics";
+import { parsePomDependencies } from "../apiContracts";
 import type {
     KnowledgeAnswerType,
     KnowledgeKind,
@@ -18,7 +19,7 @@ const ANSWER_TYPES = new Set<KnowledgeAnswerType>(["signature", "coordinate", "b
 const RISKS = new Set<KnowledgeRisk>(["low", "medium", "high"]);
 const SOURCE_POLICIES = new Set<SourcePolicy>(["api_signature", "dependency", "behavior", "release"]);
 const INTEGRATION_KINDS = new Set<LearningIntegrationKind>(["public_api", "nms", "craftbukkit", "version_reflection", "external_plugin"]);
-const TRIGGER_REASONS = new Set<LearningNeedTriggerReason>(["nms_version_sensitive", "reflection_contract", "external_plugin_contract", "persistent_diagnostic_gap"]);
+const TRIGGER_REASONS = new Set<LearningNeedTriggerReason>(["nms_version_sensitive", "reflection_contract", "external_plugin_contract", "persistent_diagnostic_gap", "compile_api_gap"]);
 const GENERIC_SUBJECTS = new Set(["api", "paper api", "bukkit api", "spigot api", "minecraft", "minecraft plugin", "插件开发", "learn", "learning", "学习"]);
 
 function clean(value: unknown, max = 500): string {
@@ -168,8 +169,12 @@ export function filterFixKnowledgeNeeds(needs: KnowledgeNeed[], input: { repairA
     const repairAttempts = Math.max(0, Math.floor(Number(input.repairAttempts) || 0)); const accepted: KnowledgeNeed[] = [], rejected: KnowledgeNeedRejection[] = [];
     needs.forEach((need, index) => {
         let reason = "";
-        if (repairAttempts < 1) reason = "repair_not_attempted";
+        const firstCompileGap = need.trigger === "contract_miss" && need.triggerReason === "compile_api_gap"
+            && need.specificity === "exact" && !!need.scope.symbol && !!need.scope.dependency;
+        if (repairAttempts < 1 && !firstCompileGap) reason = "repair_not_attempted";
         else if (need.kind !== "fact") reason = "fix_strategy_not_allowed";
+        else if (firstCompileGap && !need.integrationKind) reason = "missing_integration_classification";
+        else if (firstCompileGap) reason = "";
         else if (need.trigger !== "diagnostic_repeat") reason = "fix_trigger_not_diagnostic_repeat";
         else if (!need.integrationKind) reason = "missing_integration_classification";
         else if (need.triggerReason !== "persistent_diagnostic_gap") reason = "fix_not_persistent_diagnostic_gap";
@@ -201,6 +206,111 @@ const PUBLIC_API_SIMPLE_TYPES: Record<string, string> = {
 };
 
 function diagnosticText(diagnostic: BuildDiagnostic): string { return [diagnostic.message, ...diagnostic.details].join(" ").replace(/\s+/g, " ").trim(); }
+
+/** Declared compile coordinates from the generated POM; this does not attest to a resolved SNAPSHOT JAR. */
+export interface CompileDependencyContext {
+    groupId: string;
+    artifactId: string;
+    version: string;
+    scope?: string;
+}
+export function resolveCompileDependencyContext(files: { path: string; content?: string }[]): CompileDependencyContext[] {
+    const pom = files.find((file) => /(^|\/)pom\.xml$/i.test(file.path));
+    // Dependency-management entries and profiles do not establish an active compile dependency.
+    const content = (pom?.content ?? "").replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<(dependencyManagement|profiles|build|reporting)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+        .replace(/<dependency\b[^>]*>([\s\S]*?)<\/dependency>/gi, (block, body: string) => {
+            const type = body.match(/<type\s*>([\s\S]*?)<\/type>/i)?.[1]?.trim();
+            const classifier = body.match(/<classifier\s*>([\s\S]*?)<\/classifier>/i)?.[1]?.trim();
+            return classifier || (type && type !== "jar") ? "" : block;
+        });
+    return parsePomDependencies(content).filter((dependency) =>
+        !["test", "runtime", "import"].includes(dependency.scope?.toLowerCase() ?? "")
+        && !!dependency.version && !/[${}\[\](),]/.test(dependency.version)
+        && !/^(?:LATEST|RELEASE)$/i.test(dependency.version));
+}
+export async function compileDependencyContextHash(files: { path: string; content?: string }[]): Promise<string> {
+    // Include the full POM to invalidate authorization on properties, scopes, profiles and exclusions too.
+    const pom = files.find((file) => /(^|\/)pom\.xml$/i.test(file.path));
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pom?.content ?? ""));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export interface CompileLearningEligibility {
+    decision: "LEARN" | "REPAIR_DIRECTLY" | "INSUFFICIENT_CONTEXT";
+    reason: string;
+    symbol?: string;
+    dependency?: string;
+    integrationKind?: LearningIntegrationKind;
+}
+function dependencyOwnsSymbol(dependency: CompileDependencyContext, symbol: string): boolean {
+    const { groupId, artifactId } = dependency;
+    if (/^(?:org\.bukkit|io\.papermc|com\.destroystokyo)\./.test(symbol)) {
+        if (/^(?:io\.papermc|com\.destroystokyo)\./.test(symbol)) return groupId === "io.papermc.paper" && artifactId === "paper-api";
+        return (groupId === "io.papermc.paper" && artifactId === "paper-api")
+            || (groupId === "org.spigotmc" && artifactId === "spigot-api")
+            || (groupId === "org.bukkit" && artifactId === "bukkit");
+    }
+    if (symbol.startsWith("net.kyori.adventure.")) return groupId === "net.kyori" && artifactId === "adventure-api";
+    if (symbol.startsWith("me.clip.placeholderapi.")) return groupId === "me.clip" && artifactId === "placeholderapi";
+    if (symbol.startsWith("net.milkbowl.vault.")) return groupId === "com.github.MilkBowl" && artifactId === "VaultAPI";
+    if (symbol.startsWith("com.sk89q.worldguard.")) return groupId === "com.sk89q.worldguard" && artifactId === "worldguard-bukkit";
+    if (symbol.startsWith("com.sk89q.worldedit.")) return groupId === "com.sk89q.worldedit" && ["worldedit-bukkit", "worldedit-core"].includes(artifactId);
+    return false;
+}
+export function assessCompileLearningEligibility(input: {
+    diagnostic: BuildDiagnostic;
+    mcVersion?: string;
+    projectPackage?: string;
+    dependencies: CompileDependencyContext[];
+    knownApiSymbols?: string[];
+    generatedFiles?: { path: string; content?: string }[];
+}): CompileLearningEligibility {
+    const text = diagnosticText(input.diagnostic);
+    if (input.diagnostic.category !== "compile" || isBuildInfrastructureDiagnostic(input.diagnostic)) {
+        return { decision: "REPAIR_DIRECTLY", reason: "not_compile_api_gap" };
+    }
+    if (!/(?:cannot find symbol|package\s+[\w.]+\s+does not exist)/i.test(text)) {
+        return { decision: "REPAIR_DIRECTLY", reason: "implementation_error" };
+    }
+    if (input.diagnostic.errorKind && !["missing_symbol", "missing_package"].includes(input.diagnostic.errorKind)) {
+        return { decision: "REPAIR_DIRECTLY", reason: "implementation_error" };
+    }
+    const ownPackage = input.projectPackage?.trim();
+    if (ownPackage && new RegExp(`\\b(?:location:\\s+(?:class|interface)|package)\\s+${ownPackage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\.|\\b)`, "i").test(text)) {
+        return { decision: "REPAIR_DIRECTLY", reason: "project_internal_symbol" };
+    }
+    const simpleLocation = text.match(/\blocation:\s+(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)(?![\w$.])/i)?.[1];
+    if (simpleLocation && /\bsymbol:\s+(?:method|variable)\s+/i.test(text)
+        && input.generatedFiles?.some((file) => new RegExp(`\\b(?:class|interface|enum|record)\\s+${simpleLocation}\\b`).test(file.content ?? ""))) {
+        return { decision: "REPAIR_DIRECTLY", reason: "project_internal_symbol" };
+    }
+    const symbol = publicSymbolFromDiagnostic(text, input.projectPackage);
+    if (!symbol || !/\.[A-Z_$]/.test(symbol)) return { decision: "INSUFFICIENT_CONTEXT", reason: "symbol_identity_unresolved" };
+    if (simpleLocation && PUBLIC_API_SIMPLE_TYPES[simpleLocation]) {
+        const files = input.generatedFiles ?? [];
+        const publicType = PUBLIC_API_SIMPLE_TYPES[simpleLocation];
+        if (files.some((file) => new RegExp(`\\b(?:class|interface|enum|record)\\s+${simpleLocation}\\b`).test(file.content ?? ""))) {
+            return { decision: "REPAIR_DIRECTLY", reason: "project_shadow_type" };
+        }
+        const file = files.find((candidate) => candidate.path === input.diagnostic.path || candidate.path.endsWith(input.diagnostic.path));
+        if (!new RegExp(`\\bimport\\s+${publicType.replace(/\./g, "\\.")}\\s*;`).test(file?.content ?? "")) {
+            return { decision: "INSUFFICIENT_CONTEXT", reason: "public_type_context_unresolved", symbol };
+        }
+    }
+    if (input.knownApiSymbols?.includes(symbol)) return { decision: "REPAIR_DIRECTLY", reason: "static_contract_covered", symbol };
+    if (!input.mcVersion?.trim()) return { decision: "INSUFFICIENT_CONTEXT", reason: "target_version_missing", symbol };
+    const matches = input.dependencies.filter((dependency) => dependencyOwnsSymbol(dependency, symbol));
+    if (matches.length !== 1) return { decision: "INSUFFICIENT_CONTEXT", reason: matches.length ? "dependency_identity_ambiguous" : "dependency_identity_unresolved", symbol };
+    const dependency = matches[0];
+    if (["paper-api", "spigot-api", "bukkit"].includes(dependency.artifactId)
+        && dependency.version !== input.mcVersion && !dependency.version.startsWith(`${input.mcVersion}-`)) {
+        return { decision: "INSUFFICIENT_CONTEXT", reason: "target_dependency_version_mismatch", symbol };
+    }
+    const coordinate = `${dependency.groupId}:${dependency.artifactId}:${dependency.version}`;
+    return { decision: "LEARN", reason: "compile_api_gap", symbol, dependency: coordinate,
+        integrationKind: diagnosticIntegrationKind(symbol, "", text) };
+}
 function normalizeDependencyName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]/g, ""); }
 export function publicSymbolFromDiagnostic(text: string, projectPackage?: string): string {
     const missing = text.match(/\bsymbol:\s+(?:variable|method|class|interface|enum|constructor)\s+([A-Za-z_$][\w$]*)/i)?.[1];
@@ -267,9 +377,28 @@ function sameDiagnosticKnowledgeContract(current: DiagnosticKnowledgeIdentity, p
     return family(current.integrationKind) === family(previous.integrationKind) && (!!(current.symbolKey && current.symbolKey === previous.symbolKey) || !!current.packageKey && current.packageKey === previous.packageKey);
 }
 
-export function buildDiagnosticKnowledgeNeeds(input: { diagnostics: BuildDiagnostic[]; previousDiagnostics?: BuildDiagnostic[]; coreType?: string; mcVersion?: string; projectPackage?: string; externalDeps?: string[]; limit?: number; }): KnowledgeNeed[] {
+export function buildDiagnosticKnowledgeNeeds(input: { diagnostics: BuildDiagnostic[]; previousDiagnostics?: BuildDiagnostic[]; coreType?: string; mcVersion?: string; projectPackage?: string; externalDeps?: string[]; dependencies?: CompileDependencyContext[]; generatedFiles?: { path: string; content?: string }[]; limit?: number; }): KnowledgeNeed[] {
     const limit = Math.max(0, Math.min(3, Math.floor(input.limit ?? 3)));
-    if (!limit || !input.mcVersion || !input.previousDiagnostics?.length || input.diagnostics.some(isBuildInfrastructureDiagnostic)) return [];
+    if (!limit || !input.mcVersion || input.diagnostics.some(isBuildInfrastructureDiagnostic)) return [];
+    if (input.dependencies) {
+        const needs: KnowledgeNeed[] = [];
+        for (const diagnostic of input.diagnostics) {
+            const eligibility = assessCompileLearningEligibility({ diagnostic, mcVersion: input.mcVersion,
+                projectPackage: input.projectPackage, dependencies: input.dependencies, generatedFiles: input.generatedFiles });
+            if (eligibility.decision !== "LEARN" || !eligibility.symbol || !eligibility.dependency || !eligibility.integrationKind) continue;
+            const { symbol, dependency, integrationKind } = eligibility;
+            needs.push({ id: `compile-${needs.length + 1}`, kind: "fact", trigger: "contract_miss", specificity: "exact",
+                claim: { subject: symbol, question: `What is the exact API signature and import for ${symbol} in ${dependency}, targeting ${input.coreType || "Minecraft"} ${input.mcVersion}?`, answerType: "signature" },
+                scope: { coreType: input.coreType, mcVersion: input.mcVersion, dependency, packageName: packageOfSymbol(symbol), symbol },
+                risk: "medium", sourcePolicy: "api_signature", integrationKind, triggerReason: "compile_api_gap",
+                searchQueries: [`${symbol} ${dependency} official versioned Javadoc`, `${symbol} ${dependency} immutable API source`],
+                acceptanceCriteria: [`Official versioned documentation or artifact evidence establishes ${symbol} for ${dependency}.`,
+                    "Do not infer API availability from an unversioned search result or absence of search results; distinguish declared SNAPSHOT coordinates from a resolved artifact."],
+            });
+        }
+        return assessKnowledgeNeeds(deduplicateKnowledgeNeeds(needs).slice(0, limit), { coreType: input.coreType, mcVersion: input.mcVersion }, limit).accepted;
+    }
+    if (!input.previousDiagnostics?.length) return [];
     const externalDeps = cleanList(input.externalDeps, 8, 120);
     const previousIdentities = input.previousDiagnostics.filter((d) => !isBuildInfrastructureDiagnostic(d)).map((d) => diagnosticKnowledgeIdentity(d, externalDeps, input.projectPackage)).filter((x): x is DiagnosticKnowledgeIdentity => !!x);
     if (!previousIdentities.length) return [];

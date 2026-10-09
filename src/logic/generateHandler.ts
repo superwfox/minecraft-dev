@@ -1477,7 +1477,7 @@ async function runModelLearningToolRequests(
         const question = Array.isArray(request.questions)
             ? request.questions.find((item: unknown) => typeof item === "string")
             : "";
-        appendGenLog(`▸ DS 主动调用 Learning${question ? `：${question}` : ""}`);
+        appendGenLog(`▸ ${request.trigger === "compile_diagnostic" ? "首次修复前查证公共 API" : "DS 主动调用 Learning"}${question ? `：${question}` : ""}`);
         await runLearning(requestId, { continuation });
         continuation?.assertActive();
         if (genTask.learningProgress.jobId) {
@@ -2180,6 +2180,7 @@ async function streamBuildFix(
     repairAuthorization?: FixRepairAuthorization,
     learningToolJobs: Record<string, string> = {},
     learningContinuation?: LearningContinuationDeadline,
+    learningToolFailures: Record<string, string> = {},
 ): Promise<any> {
     const rootSignal = generationSignal();
     const signal = learningContinuation?.signal ?? rootSignal;
@@ -2194,6 +2195,7 @@ async function streamBuildFix(
                 mode,
                 ...(mode === "repair" ? { repairAuthorization } : {}),
                 ...(mode === "repair" ? { learningToolJobs } : {}),
+                ...(mode === "repair" ? { learningToolFailures } : {}),
             }),
             signal,
         });
@@ -2231,6 +2233,7 @@ async function repairWithLearningTools(
     repairAuthorization: FixRepairAuthorization,
 ): Promise<any> {
     const learningToolJobs: Record<string, string> = {};
+    const learningToolFailures: Record<string, string> = {};
     let learningContinuation: LearningContinuationDeadline | undefined;
     try {
         while (true) {
@@ -2241,6 +2244,7 @@ async function repairWithLearningTools(
                 repairAuthorization,
                 learningToolJobs,
                 learningContinuation,
+                learningToolFailures,
             );
             if (!modelLearningToolRequests(result?.learningToolRequests).length) {
                 return result;
@@ -2256,6 +2260,14 @@ async function repairWithLearningTools(
                 learningContinuation,
             )) {
                 return result;
+            }
+            // A local networking/deadline failure supplies no facts, but may safely release the Fixer.
+            const reason = genTask.learningProgress.reasonCode;
+            if (genTask.learningProgress.status === "deferred"
+                && ["client_deadline", "client_network", "storage_unavailable", "internal_error"].includes(reason)) {
+                for (const request of modelLearningToolRequests(result?.learningToolRequests)) {
+                    learningToolFailures[String(request.requestId)] = reason;
+                }
             }
         }
     } finally {
@@ -2342,7 +2354,7 @@ async function resumeFixingStage(taskId: string, stage: FixResumeStage): Promise
             throw new Error(diagnosis?.reason || "服务端未返回当前构建的修复授权");
         }
         if (stage === "learning") {
-            appendGenLog("↻ 页面恢复：旧版预判学习阶段已迁移为 DS 工具调用，继续修复");
+            appendGenLog("↻ 页面恢复：继续当前 API 查证请求并恢复修复");
         }
 
         genTask.fixResumeStage = "repairing";

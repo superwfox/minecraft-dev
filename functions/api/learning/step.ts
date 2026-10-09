@@ -279,6 +279,7 @@ function learningReasonFor(
         reflection_contract: "目标版本的 Spigot/Paper 反射契约需要公开来源核对",
         external_plugin_contract: "用户明确要求的第三方插件或 API 契约需要公开来源核对",
         persistent_diagnostic_gap: "普通修复后仍存在外部 API 或版本契约诊断缺口",
+        compile_api_gap: "首次编译诊断已识别准确公共符号和 POM 目标依赖，需要版本化公开证据核对",
     };
     return { code, message: messages[code] };
 }

@@ -1,7 +1,7 @@
 import { loadKnowledgeContext } from "./context";
 import { learningJobAuthorizationFailure } from "./authorization";
 import { normalizeLearningReasonCode } from "./debug";
-import { getLearningJob } from "./store";
+import { getLatestLearningJobForTask, getLearningJob } from "./store";
 import {
     getModelLearningRequest,
     modelLearningContinuation,
@@ -10,6 +10,7 @@ import {
     type ModelLearningToolResult,
 } from "./tool";
 import type { LearningJobRecord } from "./types";
+import { learningJobTiming } from "./deadline";
 
 interface Env {
     DB?: D1Database;
@@ -28,6 +29,7 @@ export type ModelLearningResolution =
     | {
         status: "pending";
         request: ModelLearningRequest;
+        jobDeadlineAt?: number;
     }
     | {
         status: "resolved";
@@ -52,8 +54,13 @@ export async function resolveModelLearningRequest(input: {
     let result = request.result;
     if (!result) {
         const jobId = typeof input.jobId === "string" ? input.jobId.trim() : "";
-        if (!jobId) return { status: "pending", request };
-        const job = await getLearningJob(input.env, jobId, input.uid);
+        let job: LearningJobRecord | null;
+        try {
+            job = jobId ? await getLearningJob(input.env, jobId, input.uid)
+                : await getLatestLearningJobForTask(input.env, input.taskId, input.uid, "tool");
+        } catch {
+            return { status: "pending", request };
+        }
         if (!job
             || job.generationTaskId !== input.taskId
             || job.stage !== "tool"
@@ -61,7 +68,7 @@ export async function resolveModelLearningRequest(input: {
             || await learningJobAuthorizationFailure(input.state, job)) {
             return { status: "pending", request };
         }
-        if (!TERMINAL_STATUSES.has(job.status)) return { status: "pending", request };
+        if (!TERMINAL_STATUSES.has(job.status)) return { status: "pending", request, jobDeadlineAt: learningJobTiming(job).deadlineAt };
         result = {
             status: job.status as ModelLearningToolResult["status"],
             reasonCode: normalizeLearningReasonCode(

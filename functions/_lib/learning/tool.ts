@@ -216,10 +216,14 @@ function hasNamespace(value: string, prefixes: string[]): boolean {
 }
 
 function allowedExternalDependency(dependency: string, allowed: string[]): boolean {
-    const keys = (value: string) => new Set([
-        identifierKey(value),
-        ...value.split(/[:/@\s]+/).map(identifierKey),
-    ].filter((key) => key.length >= 3));
+    const aliases: Record<string, string> = {
+        worldguardbukkit: "worldguard", worldeditbukkit: "worldedit", worldeditcore: "worldedit", vaultapi: "vault",
+    };
+    const keys = (value: string) => {
+        const identifiers = [identifierKey(value), ...value.split(/[:/@\s]+/).map(identifierKey)];
+        return new Set(identifiers.flatMap((key) => aliases[key] ? [key, aliases[key]] : [key])
+            .filter((key) => key.length >= 3));
+    };
     const requested = keys(dependency);
     if (!requested.size) return false;
     return allowed.some((candidate) => {
@@ -458,6 +462,28 @@ export async function createModelLearningRequest(input: {
             ...input.messages,
             assistantMessage(input.message, calls),
         ]),
+    };
+}
+
+/** Reuse the tool authorization and job lifecycle for compiler-driven preflight learning. */
+export async function createDiagnosticLearningRequest(input: {
+    originKey: string;
+    needs: KnowledgeNeed[];
+}): Promise<ModelLearningRequest> {
+    const needs = assessKnowledgeNeeds(input.needs, {}, 3).accepted;
+    if (!needs.length || needs.length !== input.needs.length) throw new Error("learning_tool_arguments_invalid");
+    return {
+        schemaVersion: "model_learning_tool.v1",
+        requestId: `learnreq_${crypto.randomUUID().replace(/-/g, "")}`,
+        origin: "fix",
+        originKey: clean(input.originKey, 500),
+        targetPath: "",
+        round: 1,
+        createdAt: Date.now(),
+        lookupHash: await learningLookupHash(needs),
+        needs,
+        callNeedIds: {},
+        messages: [],
     };
 }
 
