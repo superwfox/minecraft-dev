@@ -1,4 +1,4 @@
-import { treeBuilderPrompt, skillPlannerContext } from "../../_lib/prompts";
+import { treeBuilderPrompt, skillTreeContext } from "../../_lib/prompts";
 import { applyTreeToolCalls, createInitialTree, deriveGenerationPlan, MAX_TREE_ROUNDS, publicTreeView, treePromptSnapshot, treeToolDefinitions, validateProjectTree, type ProjectTree, type TreeSession } from "../../_lib/projectTree";
 import { consumeChatStream } from "../../_lib/modelStream";
 import { getSkillBundles } from "../../_lib/skills";
@@ -8,6 +8,7 @@ import { deduplicateKnowledgeNeeds } from "../../_lib/learning/assessment";
 import { createModelLearningRequest, LEARNING_TOOL_NAME, learningToolDefinition, putModelLearningRequest, removeModelLearningRequest, type ModelChatMessage } from "../../_lib/learning/tool";
 import { resolveModelLearningRequest, type ModelLearningResolution } from "../../_lib/learning/toolRuntime";
 import { settleTaskCostQuota, usageCost, type UsageBreakdown } from "../../_lib/quota";
+import { publicPathChecks } from "../../_lib/projectPathReview";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor } from "../../_lib/llm";
 import {
     acquireTaskOperationLease,
@@ -98,7 +99,7 @@ async function writeSSE(
 function normalizedTreeInput(body: Record<string, unknown>): Record<string, unknown> {
     return { action: body.action, correction: typeof body.correction === "string" ? body.correction.trim() : "", focusIds: Array.isArray(body.focusIds) ? body.focusIds : [], skillIds: Array.isArray(body.skillIds) ? body.skillIds : [] };
 }
-function hasExplicitTreeInput(_body: unknown): boolean { return true; }
+function hasExplicitTreeInput(body: Record<string, unknown>): boolean { return ["action", "correction", "focusIds", "skillIds"].some(key => Object.prototype.hasOwnProperty.call(body, key)); }
 
 function treeError(error: unknown): {
     message: string;
@@ -179,12 +180,6 @@ async function handleTreeRequest(
         return preflightJsonError("缺少有效 treeRequestId", "INVALID_TREE_REQUEST_ID", 400);
     }
 
-    const suppliedInput = normalizedTreeInput(body);
-    const suppliedInputHash = await withPreflightDeadline(
-        () => preflightInputHash(suppliedInput),
-        operationDeadline.signal,
-        "计算结构规划请求标识超时",
-    );
     const hasExplicitInput = hasExplicitTreeInput(body);
     let raw = await withPreflightDeadline(
         () => getOwnedTask(context.env, taskId, uid),
@@ -195,6 +190,10 @@ async function handleTreeRequest(
     let state = JSON.parse(raw);
     if (!state.clarifyDone) return preflightJsonError("请先完成需求确认", "CLARIFY_REQUIRED", 409);
     if (state.tree?.status === "locked") return preflightJsonError("结构树已锁定", "TREE_LOCKED", 409);
+    const immediateRecord = findPreflightOperation(state, "tree", requestId);
+    if (!hasExplicitInput && immediateRecord) Object.assign(body, immediateRecord.input);
+    const suppliedInput = normalizedTreeInput(body);
+    const suppliedInputHash = await withPreflightDeadline(() => preflightInputHash(suppliedInput), operationDeadline.signal, "计算结构规划请求标识超时");
     if (!["build", "refine", "continue"].includes(body.action)) return preflightJsonError("无效的结构规划操作", "INVALID_TREE_ACTION", 400);
     const llm = await withPreflightDeadline(
         () => resolveTaskLLM(context, state),
@@ -203,7 +202,6 @@ async function handleTreeRequest(
     );
     if (!llm) return deepSeekKeyRequiredResponse();
 
-    const immediateRecord = findPreflightOperation(state, "tree", requestId);
     if (immediateRecord && hasExplicitInput && immediateRecord.inputHash !== suppliedInputHash) {
         return preflightJsonError("同一 treeRequestId 携带了不同输入", "TREE_REQUEST_CONFLICT", 409);
     }
@@ -684,7 +682,7 @@ async function handleTreeRequest(
                         return target ? `${id}（${target.title}）` : id;
                     }), round, maxRounds: MAX_TREE_ROUNDS,
                     apiContractContext: buildApiContractContext({ coreType: state.coreType, version: state.version, externalDeps, generatedFiles: [] }),
-                    knowledgeContext: knowledge.context, skillContext: state.skills?.length ? skillPlannerContext(state.skills) : "",
+                    knowledgeContext: knowledge.context, skillContext: state.skills?.length ? skillTreeContext(state.skills) : "",
                 });
                 const messages: ModelChatMessage[] = learningResolution?.status === "resolved"
                     && session.learningRequestId === learningResolution.request.requestId
@@ -949,12 +947,16 @@ const onTreeRound: PagesFunction<Env> = async (context) => {
 function json(data: unknown, status = 200): Response {
     return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
+function pendingTreeOperation(state: { treeOperations?: { requestId: string; status: string; billingSettled: boolean; input: Record<string, unknown> }[] }) {
+    return [...(state.treeOperations ?? [])].reverse().find(operation => operation.status !== "cancelled" && (operation.status !== "completed" || !operation.billingSettled));
+}
 export const onRequestGet: PagesFunction<Env> = async context => {
     const taskId = new URL(context.request.url).searchParams.get("taskId") ?? "";
     const raw = await getOwnedTask(context.env, taskId, String(context.data.uid ?? ""));
     if (!raw) return preflightJsonError("任务不存在", "TASK_NOT_FOUND", 404);
     const state = JSON.parse(raw);
-    return json({ tree: state.tree ? publicTreeView(state.tree) : null, session: state.treeSession ?? null, nodeChecks: state.nodeChecks ?? {} });
+    const pending = pendingTreeOperation(state);
+    return json({ tree: state.tree ? publicTreeView(state.tree) : null, session: state.treeSession ?? null, pendingOperation: pending ? { requestId: pending.requestId, input: pending.input } : null, nodeChecks: state.nodeChecks ?? {}, pathChecks: publicPathChecks(state), generation: { plan: state.plan ?? [], currentBucket: state.currentBucket ?? 0, fileStatuses: state.fileStatuses ?? {} } });
 };
 export const onRequestPost: PagesFunction<Env> = async context => {
     let body: { taskId?: string; action?: string; revision?: number };
@@ -976,12 +978,13 @@ export const onRequestPost: PagesFunction<Env> = async context => {
         if (!tree) return preflightJsonError("结构树尚未就绪", "TREE_NOT_READY", 409);
         const result = () => ({ ok: true, tree: publicTreeView(tree), plan: state.plan, bucketPaths: state.buckets.map((bucket: { path: string }[]) => bucket.map(file => file.path)) });
         if (tree.status === "locked" && tree.lockedRevision === body.revision) return json(result());
+        if (pendingTreeOperation(state)) return preflightJsonError("结构规划仍有待恢复或结算的请求，请先恢复原操作", "TREE_SETTLEMENT_PENDING", 409);
         if (tree.revision !== body.revision) return preflightJsonError("结构树已更新，请重新确认", "TREE_REVISION_MISMATCH", 409, undefined, { tree: publicTreeView(tree) });
         if (tree.status !== "ready") return preflightJsonError("结构树尚未就绪", "TREE_NOT_READY", 409);
         const issues = validateProjectTree(tree);
         if (issues.length) return preflightJsonError("结构树仍有待处理问题", "TREE_INVALID", 409, undefined, { issues });
         const derived = deriveGenerationPlan(tree);
-        Object.assign(state, derived, tree.project, { status: "generating", fileStatuses: Object.fromEntries(derived.plan.map(file => [file.path, "pending"])), generationCheckpoints: {}, currentBucket: 0, generatedFiles: [], currentFileIndex: 0, nodeChecks: {} });
+        Object.assign(state, derived, tree.project, { status: "generating", fileStatuses: Object.fromEntries(derived.plan.map(file => [file.path, "pending"])), generationCheckpoints: {}, currentBucket: 0, generatedFiles: [], currentFileIndex: 0, nodeChecks: {}, pathReviews: {}, sourceFingerprint: "", compileCheck: null });
         tree.status = "locked"; tree.lockedRevision = tree.revision;
         const committed = await putTaskWithOperationLease(context.env, taskId, JSON.stringify(state), token, mode, 3600, uid, true);
         if (!committed) throw new TreeLeaseLostError();

@@ -19,10 +19,12 @@ export interface TreeNode {
     id: string; moduleId: string; kind: GeneratorType; title: string; responsibility: string;
     depends: string[]; contract: NodeContract; tag: "gui" | null; pairId: string; origin: TreeNodeOrigin;
 }
+export interface TreeStep { id: string; title: string; kind: string; summary: string; fileIds: string[] }
+export interface TreePath { id: string; title: string; nodes: TreeStep[] }
 export interface ProjectTree {
     schemaVersion: 1; revision: number; lockedRevision: number | null; status: TreeStatus;
     project: { projectName: string; packageName: string; javaVersion: string; summary: string; externalDeps: string[] };
-    modules: TreeModule[]; nodes: TreeNode[]; knowledgeNeeds: KnowledgeNeed[];
+    modules: TreeModule[]; nodes: TreeNode[]; paths?: TreePath[]; knowledgeNeeds: KnowledgeNeed[];
 }
 export interface TreeIssue { code: string; message: string; targetId?: string }
 export interface TreeOpResult { index: number; tool: string; ok: boolean; summary: string; error?: string }
@@ -39,7 +41,7 @@ export const MAX_TREE_NODES = 40;
 export const MAX_TREE_ROUNDS = 8;
 export const MAX_TREE_TOOL_CALLS = 60;
 export const SYSTEM_MODULE_IDS = ["_build", "_resources", "_root"] as const;
-export const TREE_TOOL_NAMES = ["set_project", "upsert_module", "upsert_node", "remove_items", "merge_nodes", "finish_tree"] as const;
+export const TREE_TOOL_NAMES = ["set_project", "upsert_module", "upsert_node", "upsert_path", "remove_path", "remove_items", "merge_nodes", "finish_tree"] as const;
 export const JAVA_KEYWORDS = new Set("abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while _ var record yield sealed permits non-sealed true false null".split(" "));
 const JAVA_KINDS: GeneratorType[] = ["CommandGen", "ListenerGen", "TaskGen", "ManagerGen", "ConfigClassGen", "ModelGen", "EnumGen", "UtilGen"];
 const lower = (value: string) => value.toLowerCase();
@@ -61,7 +63,7 @@ export function createInitialTree(_coreType: string, version: string): ProjectTr
         { id: "plugin.yml", moduleId: "_resources", kind: "ConfigGen", title: "插件描述", responsibility: "声明插件、命令、权限与外部依赖" },
         { id: "Main", moduleId: "_root", kind: "MainGen", title: "插件主类", responsibility: "插件生命周期、命令监听注册、任务调度与数据落盘" },
     ].map(node => ({ ...node, kind: node.kind as GeneratorType, depends: [], contract: emptyNodeContract(), tag: null, pairId: "", origin: "system" as const }));
-    return { schemaVersion: 1, revision: 0, lockedRevision: null, status: "drafting", project: { projectName: "", packageName: "", javaVersion: javaVersionFor(version), summary: "", externalDeps: [] }, modules, nodes, knowledgeNeeds: [] };
+    return { schemaVersion: 1, revision: 0, lockedRevision: null, status: "drafting", project: { projectName: "", packageName: "", javaVersion: javaVersionFor(version), summary: "", externalDeps: [] }, modules, nodes, paths: [], knowledgeNeeds: [] };
 }
 export function nodePackage(tree: ProjectTree, node: TreeNode): string {
     return node.moduleId === "_root" ? tree.project.packageName : `${tree.project.packageName}.${node.moduleId}`;
@@ -96,6 +98,8 @@ export function treeToolDefinitions() {
         ["set_project", "设置项目名、摘要和外部插件依赖", obj({ projectName: str(40), summary: str(1000), externalDeps: list(str(41), 4) })],
         ["upsert_module", "新增或更新业务模块（Java 子包）", obj({ id: str(24), title: str(20), responsibility: str(300) })],
         ["upsert_node", "新增、移动或整体替换文件节点及其成员契约", node],
+        ["upsert_path", "新增或整体替换一条需求行为路径；nodes 按执行顺序排列，每步绑定已有文件 id，跨路径可以共享文件", obj({ id: str(48), title: str(40), nodes: { ...list(obj({ id: str(64), title: str(40), kind: str(16), summary: str(600), fileIds: { ...list(str(48), 8), minItems: 1 } }), 12), minItems: 1 } })],
+        ["remove_path", "删除不再需要的行为路径，不删除其实现文件", obj({ id: str(48), reason: str() })],
         ["remove_items", "删除模块或节点并清理依赖", obj({ moduleIds: list(str(24), 10), nodeIds: list(str(48), 40), reason: str() })],
         ["merge_nodes", "合并节点并重写依赖与 GUI 配对引用", obj({ sourceIds: { ...list(str(48), 6), minItems: 2 }, target: node, reason: str() })],
         ["finish_tree", "完成结构规划并提交校验", obj({ summary: str(1000) })],
@@ -192,12 +196,33 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                 const exists = next.nodes.some(n => n.id === args.id);
                 const node = upsertNode(next, args);
                 summary = exists ? `✎ 节点 ${node.id}` : `＋ 节点 ${node.moduleId}/${node.id}`;
+            } else if (tool === "upsert_path") {
+                const id = text(args.id, 48);
+                requireValue(/^[a-z][a-z0-9-]{1,47}$/.test(id), "路径 id 必须为小写英文、数字或连字符");
+                next.paths ??= [];
+                const existing = next.paths.find(path => path.id === id);
+                requireValue(!!existing || next.paths.length < 10, "最多 10 条行为路径");
+                const nodes = boundedRecords(args.nodes, 12).map(step => ({ id: text(step.id, 64), title: text(step.title, 40), kind: text(step.kind, 16), summary: text(step.summary, 600), fileIds: strings(step.fileIds, 8) }));
+                requireValue(nodes.length > 0 && nodes.every(step => /^[a-z][a-z0-9-]{1,63}$/.test(step.id) && step.fileIds.length > 0), "步骤 id 不合法或未绑定实现文件");
+                requireValue(nodes.every(step => step.fileIds.every(fileId => next.nodes.some(node => node.id === fileId))), "步骤绑定了不存在的文件");
+                const allStepIds = [...next.paths.filter(path => path.id !== id).flatMap(path => path.nodes.map(step => step.id)), ...nodes.map(step => step.id)];
+                requireValue(new Set(allStepIds).size === allStepIds.length && !allStepIds.includes("main-entry"), "步骤 id 必须在全项目唯一");
+                requireValue(allStepIds.length <= 80, "最多 80 个业务步骤");
+                const path: TreePath = { id, title: text(args.title, 40), nodes };
+                if (existing) next.paths.splice(next.paths.indexOf(existing), 1, path); else next.paths.push(path);
+                summary = `${existing ? "✎" : "＋"} 路径 ${path.title}（${nodes.length} 步）`;
+            } else if (tool === "remove_path") {
+                const id = text(args.id, 48);
+                requireValue(next.paths?.some(path => path.id === id), "行为路径不存在");
+                next.paths = next.paths.filter(path => path.id !== id);
+                summary = `－ 路径 ${id}`;
             } else if (tool === "remove_items") {
                 const moduleIds = strings(args.moduleIds, 10), nodeIds = strings(args.nodeIds, 40);
                 requireValue(!moduleIds.some(id => id.startsWith("_")) && !next.nodes.some(n => n.origin === "system" && nodeIds.includes(n.id)), "系统模块和节点不可删除");
                 const removed = new Set(next.nodes.filter(n => nodeIds.includes(n.id) || moduleIds.includes(n.moduleId)).map(n => n.id));
                 next.modules = next.modules.filter(m => !moduleIds.includes(m.id));
                 next.nodes = next.nodes.filter(n => !removed.has(n.id)).map(n => ({ ...n, depends: n.depends.filter(id => !removed.has(id)), pairId: removed.has(n.pairId) ? "" : n.pairId }));
+                for (const path of next.paths ?? []) for (const step of path.nodes) step.fileIds = step.fileIds.filter(id => !removed.has(id));
                 summary = `－ 节点 ${[...removed].join("、")}`;
             } else if (tool === "merge_nodes") {
                 const sourceIds = strings(args.sourceIds, 6);
@@ -211,6 +236,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                     node.pairId = sourceIds.includes(node.pairId) ? target.id : node.pairId;
                     if (node.pairId === node.id) node.pairId = "";
                 }
+                for (const path of next.paths ?? []) for (const step of path.nodes) step.fileIds = unique(step.fileIds.map(id => sourceIds.includes(id) ? target.id : id));
                 summary = `⇄ 合并 ${sourceIds.join("、")} → ${target.id}`;
             } else if (tool === "finish_tree") { summary = "✓ 提交结构树"; finishRequested = true; }
             else throw new Error("未知结构树工具");
@@ -227,6 +253,17 @@ export function validateProjectTree(tree: ProjectTree): TreeIssue[] {
     const add = (code: string, message: string, targetId?: string) => issues.push({ code, message, ...(targetId ? { targetId } : {}) });
     if (!tree.project.projectName) add("PROJECT_NOT_SET", "请设置项目名称");
     if (!tree.nodes.some(n => n.origin !== "system")) add("NO_BUSINESS_NODE", "请添加业务文件节点");
+    if (!tree.paths?.length) add("NO_BEHAVIOR_PATH", "请按需求添加行为路径与步骤，并绑定实现文件");
+    const stepIds = new Set<string>();
+    for (const path of tree.paths ?? []) {
+        if (!path.nodes.length) add("EMPTY_PATH", `路径 ${path.title} 没有步骤`, path.id);
+        for (const step of path.nodes) {
+            if (stepIds.has(step.id) || step.id === "main-entry") add("DUPLICATE_STEP", `步骤 id 重复：${step.id}`, path.id);
+            stepIds.add(step.id);
+            if (!step.fileIds.length || step.fileIds.some(id => !tree.nodes.some(node => node.id === id))) add("INVALID_FILE_BINDING", `步骤 ${step.title} 的实现文件绑定不完整`, step.id);
+        }
+    }
+    if ((tree.paths?.length ?? 0) > 10 || stepIds.size > 80) add("PATH_LIMIT_EXCEEDED", "行为路径或步骤超出上限");
     for (const module of tree.modules) if (module.kind !== "system" && !tree.nodes.some(n => n.moduleId === module.id)) add("EMPTY_MODULE", `模块 ${module.id} 没有节点`, module.id);
     const byId = new Map(tree.nodes.map(n => [n.id, n]));
     const commandNames = new Set<string>();
@@ -316,6 +353,6 @@ export function contractSignatureLines(node: TreeNode): string[] {
     return [...c.constructors.map(m => `public ${node.id}(${m.params})`), ...c.methods.map(m => `public ${m.isStatic ? "static " : ""}${m.returns} ${m.name}(${m.params})`), ...c.events.map(e => `监听 ${e}`), ...c.commands.map(cmd => `命令 /${cmd.name}${cmd.aliases.length ? `（别名 ${cmd.aliases.join(", ")}）` : ""} 权限 ${cmd.permission || "无"} 用法 ${cmd.usage} ${cmd.description}`), ...(c.schedule ? [`调度 ${c.schedule.mode} 延迟 ${c.schedule.delayTicks} ticks 周期 ${c.schedule.periodTicks} ticks`] : []), ...c.configKeys.map(k => `配置 ${k}`), ...(c.lifecycle ? [`生命周期 ${c.lifecycle}`] : [])];
 }
 export function treePromptSnapshot(tree: ProjectTree): string {
-    return [`项目 ${JSON.stringify(tree.project)} 修订 ${tree.revision}`, ...tree.modules.flatMap(module => [`模块 ${module.id}（${module.title}）：${module.responsibility}`, ...tree.nodes.filter(n => n.moduleId === module.id).flatMap(n => [`  ${n.id} [${n.kind}] ${nodePath(tree, n)}：${n.responsibility}；依赖 ${n.depends.join(",")}；GUI ${n.pairId}`, ...contractSignatureLines(n).map(line => `    ${line}`)])])].join("\n");
+    return [`项目 ${JSON.stringify(tree.project)} 修订 ${tree.revision}`, `行为路径：${JSON.stringify(tree.paths ?? [])}`, ...tree.modules.flatMap(module => [`模块 ${module.id}（${module.title}）：${module.responsibility}`, ...tree.nodes.filter(n => n.moduleId === module.id).flatMap(n => [`  ${n.id} [${n.kind}] ${nodePath(tree, n)}：${n.responsibility}；依赖 ${n.depends.join(",")}；GUI ${n.pairId}`, ...contractSignatureLines(n).map(line => `    ${line}`)])])].join("\n");
 }
 export function projectExternalDeps(state: { tree?: { project?: { externalDeps?: string[] } } | null }): string[] { return state.tree?.project?.externalDeps ?? []; }

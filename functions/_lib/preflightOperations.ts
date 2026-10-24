@@ -1,4 +1,4 @@
-export type PreflightStage = "clarify" | "grade" | "tree";
+export type PreflightStage = "clarify" | "tree";
 export type PreflightOperationStatus = "running" | "retryable" | "cancelled" | "completed";
 
 export interface PreflightOperationRecord {

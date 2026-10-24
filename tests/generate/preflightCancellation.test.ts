@@ -40,12 +40,12 @@ import {
     preflightOperations,
 } from "../../functions/_lib/preflightOperations";
 import { onRequestPost as clarify } from "../../functions/api/generate/clarify";
-import { onRequestPost as grade } from "../../functions/api/generate/grade";
+import { onRequestPost as tree } from "../../functions/api/generate/tree";
 
-type Stage = "clarify" | "grade";
+type Stage = "clarify" | "tree";
 
 const CLARIFY_REQUEST_ID = `clarify_${"a".repeat(16)}`;
-const GRADE_REQUEST_ID = `grade_${"b".repeat(16)}`;
+const TREE_REQUEST_ID = `tree_${"b".repeat(16)}`;
 
 function baseState(stage: Stage): Record<string, unknown> {
     return {
@@ -55,9 +55,9 @@ function baseState(stage: Stage): Record<string, unknown> {
         coreType: "Paper",
         version: "1.21.4",
         clarifyRounds: [],
-        clarifyDone: stage === "grade",
+        clarifyDone: stage === "tree",
         preflightProtocolVersion: 1,
-        clarifyOperations: stage === "grade" ? [{
+        clarifyOperations: stage === "tree" ? [{
             requestId: CLARIFY_REQUEST_ID,
             inputHash: "clarify-input",
             input: {},
@@ -67,8 +67,8 @@ function baseState(stage: Stage): Record<string, unknown> {
             startedAt: 1,
             completedAt: 2,
         }] : [],
-        gradeOperations: [],
-        grade: null,
+        treeOperations: [],
+        tree: null,
         knowledgeNeeds: [],
         skills: [],
         logs: [],
@@ -78,7 +78,7 @@ function baseState(stage: Stage): Record<string, unknown> {
 function makeContext(stage: Stage, signal: AbortSignal, waitUntilPromises: Promise<unknown>[]): any {
     const requestBody = stage === "clarify"
         ? { taskId: "task-1", clarifyRequestId: CLARIFY_REQUEST_ID }
-        : { taskId: "task-1", gradeRequestId: GRADE_REQUEST_ID };
+        : { taskId: "task-1", treeRequestId: TREE_REQUEST_ID, action: "build" };
     return {
         request: new Request(`https://example.test/api/generate/${stage}`, {
             method: "POST",
@@ -157,7 +157,7 @@ async function expectRecoverableDisconnect(stage: Stage): Promise<void> {
     }) as unknown as typeof fetch;
     vi.stubGlobal("fetch", fetchMock);
 
-    const handler = stage === "clarify" ? clarify : grade;
+    const handler = stage === "clarify" ? clarify : tree;
     const response = await handler(makeContext(stage, clientAbort.signal, waitUntilPromises));
     const responseText = response.text();
     await fetchStarted;
@@ -175,7 +175,7 @@ async function expectRecoverableDisconnect(stage: Stage): Promise<void> {
     const operations = preflightOperations(state, stage);
     const record = operations.at(-1);
     expect(record).toMatchObject({
-        requestId: stage === "clarify" ? CLARIFY_REQUEST_ID : GRADE_REQUEST_ID,
+        requestId: stage === "clarify" ? CLARIFY_REQUEST_ID : TREE_REQUEST_ID,
         status: "retryable",
         billingSettled: true,
         lastError: "传输连接已中断，可恢复当前请求",
@@ -220,7 +220,7 @@ describe("preflight client disconnect recovery", () => {
         await expectRecoverableDisconnect("clarify");
     });
 
-    it("stops Grade upstream work and preserves a recoverable request without fabricated usage", async () => {
-        await expectRecoverableDisconnect("grade");
+    it("stops Tree upstream work and preserves a recoverable request without fabricated usage", async () => {
+        await expectRecoverableDisconnect("tree");
     });
 });

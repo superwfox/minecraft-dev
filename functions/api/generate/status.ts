@@ -4,6 +4,7 @@ import { compareDiagnostics } from "../../_lib/buildDiagnostics";
 import { buildRepairRecoverySnapshot } from "../../_lib/buildRepairRecovery";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 import { currentFixRepairAuthorization } from "../../_lib/learning/fixAuthorization";
+import { publicPathChecks } from "../../_lib/projectPathReview";
 
 interface Env {
     DB?: D1Database;
@@ -43,6 +44,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const raw = await getOwnedTask(context.env, taskId, uid);
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
+    if (state.status === "done" && state.artifactId) return new Response(JSON.stringify({ status: "done", artifactReady: true, pathChecks: publicPathChecks(state) }), { headers: { "Content-Type": "application/json" } });
     const now = Date.now();
     const repairAuthorization = currentFixRepairAuthorization(state);
     const operationLease = context.env.DB ? taskOperationLeaseFromState(state) : null;
@@ -99,7 +101,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         });
     }
 
-    const { status, conclusion } = await getRunStatus(token, state.runId);
+    const { status, conclusion, headSha } = await getRunStatus(token, state.runId);
+    if (state.compileCheck && headSha !== state.compileCheck.headSha) return new Response(JSON.stringify({ status: "error", error: "构建提交与当前待验证代码不一致", code: "BUILD_REVISION_MISMATCH", pathChecks: publicPathChecks(state) }), { status: 409, headers: { "Content-Type": "application/json" } });
 
     if (status !== "completed") {
         // 仅在首次发现 runId 时落一次；若本次已完成，则与终态合并为下方一次写入。
@@ -116,6 +119,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         if (artifact) {
             state.artifactId = artifact.id;
             state.status = "done";
+            if (state.compileCheck && state.compileCheck.headSha === state.buildHeadSha) { state.compileCheck.status = "passed"; state.compileCheck.runId = state.runId; }
             delete state.fixLearningAuthorization;
             delete state.fixRepairAuthorization;
             delete state.fixKnowledgeNeeds;
@@ -151,6 +155,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         }
     } else {
         state.status = "error";
+        if (state.compileCheck && state.compileCheck.headSha === state.buildHeadSha) { state.compileCheck.status = "failed"; state.compileCheck.runId = state.runId; }
         state.error = `构建失败: ${conclusion}`;
         delete state.fixLearningAuthorization;
         delete state.fixRepairAuthorization;
@@ -176,5 +181,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         conclusion,
         artifactReady: !!state.artifactId,
         error: state.error,
+        pathChecks: publicPathChecks(state),
     }), { headers: { "Content-Type": "application/json" } });
 };

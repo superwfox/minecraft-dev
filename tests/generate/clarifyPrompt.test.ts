@@ -2,7 +2,7 @@ import {describe, expect, it} from "vitest";
 import {
     fileGenPrompt,
     plannerClarifyPrompt,
-    plannerPrompt,
+    treeBuilderPrompt,
 } from "../../functions/_lib/prompts";
 
 describe("simple requirement prompt defaults", () => {
@@ -23,11 +23,7 @@ describe("simple requirement prompt defaults", () => {
     });
 
     it("carries lightweight defaults and inventory safety into planning and generation", () => {
-        const plan = plannerPrompt(
-            "玩家进入服务器时发放 1 颗钻石",
-            "PAPER",
-            "26.2",
-        );
+        const plan = treeBuilderPrompt({ userPrompt: "玩家进入服务器时发放 1 颗钻石", coreType: "PAPER", version: "26.2", treeSnapshot: "", issues: [], lastResults: [], mode: "build", correction: "", focusIds: [], round: 1, maxRounds: 8 });
         const file = fileGenPrompt(
             "src/main/java/com/tahai/joinreward/JoinListener.java",
             "玩家加入后发放 1 颗钻石",

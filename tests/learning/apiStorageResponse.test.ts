@@ -39,8 +39,9 @@ describe("learning storage failure responses", () => {
     it("keeps start retryable instead of inventing a terminal progress snapshot", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => undefined);
         const need = makeNeed({
+            trigger: "diagnostic_repeat",
             integrationKind: "external_plugin",
-            triggerReason: "external_plugin_contract",
+            triggerReason: "persistent_diagnostic_gap",
             claim: {
                 subject: "FancyHooksAPI#resolve",
                 question: "What is the exact FancyHooksAPI#resolve contract for Paper 1.21.4?",
@@ -57,16 +58,19 @@ describe("learning storage failure responses", () => {
             coreType: "paper",
             version: "1.21.4",
             userPrompt: "Integrate FancyHooks into the plugin.",
-            grade: {
-                paths: [],
-                vector: { external_deps: ["FancyHooks"] },
-                knowledgeNeeds: [need],
-            },
+            tree: { project: { externalDeps: ["FancyHooks"] } },
+            status: "error",
+            runId: 202,
+            repairAttempts: 1,
+            fixDiagnosticsFingerprint: "a1b2c3d4",
+            fixLearningAuthorization: { runId: 202, previousRunId: 101, diagnosticsFingerprint: "a1b2c3d4", repairAttempts: 1 },
+            pendingFixSnapshot: { attempt: 1, runId: 101, diagnostics: [{ key: "compile:a" }] },
+            fixKnowledgeNeeds: [need],
         });
         const response = await startLearning(context(new Request("https://example.test/api/learning/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taskId: "task-1", stage: "planner", remainingMs: 300_000 }),
+            body: JSON.stringify({ taskId: "task-1", stage: "fix", fixAuthorization: { runId: 202, previousRunId: 101, diagnosticsFingerprint: "a1b2c3d4", repairAttempts: 1 } }),
         }), raw));
 
         await expectBareStorageUnavailable(response);
@@ -74,7 +78,7 @@ describe("learning storage failure responses", () => {
 
     it("keeps step retryable when the authoritative job cannot be read", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => undefined);
-        const raw = JSON.stringify({ uid: "user-1", status: "planning" });
+        const raw = JSON.stringify({ uid: "user-1", status: "tree_planning" });
         const response = await stepLearning(context(new Request("https://example.test/api/learning/step", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -86,9 +90,9 @@ describe("learning storage failure responses", () => {
 
     it("keeps status retryable when exact-job reconciliation storage is unavailable", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => undefined);
-        const raw = JSON.stringify({ uid: "user-1", status: "planning" });
+        const raw = JSON.stringify({ uid: "user-1", status: "tree_planning" });
         const response = await getLearningStatus(context(new Request(
-            "https://example.test/api/learning/status?taskId=task-1&jobId=learn-test&stage=planner",
+            "https://example.test/api/learning/status?taskId=task-1&jobId=learn-test&stage=tool",
         ), raw));
 
         await expectBareStorageUnavailable(response);

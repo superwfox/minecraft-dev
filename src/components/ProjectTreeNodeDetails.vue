@@ -16,6 +16,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowUpRight, Check, Circle, CircleAlert, Copy } from "lucide-vue-next";
 import { genTask } from "../logic/generateState";
 import { contractSignatureLines } from "../logic/projectTree";
+import { loadNodeContent } from "../logic/generateHandler";
 const props = defineProps<{ nodeId: string }>();
 defineEmits<{ navigate: [id: string] }>();
 const node = computed(() => genTask.tree?.nodes.find(node => node.id === props.nodeId));
@@ -37,13 +38,12 @@ async function loadCode() {
   if (!current || file.value?.content !== undefined || file.value?.status !== "done") return;
   loading.value = true;
   try {
-    const { loadNodeContent } = await import("../logic/generateHandler");
     const content = await loadNodeContent(current.path);
     if (sequence === loadSequence) loadedCode.value = content;
   } catch { if (sequence === loadSequence) codeError.value = "源码读取失败"; }
   finally { if (sequence === loadSequence) loading.value = false; }
 }
-watch(() => [props.nodeId, file.value?.status], loadCode, { immediate: true });
+watch(() => [props.nodeId, file.value?.status, file.value?.content], loadCode, { immediate: true });
 async function copy(value: string, target: "path" | "code" = "path") {
   copyError.value = false;
   try { await navigator.clipboard.writeText(value); copied.value = target; }

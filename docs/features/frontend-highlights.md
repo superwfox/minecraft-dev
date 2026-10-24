@@ -135,7 +135,7 @@ function animate() {
 
 ### 4. 窗棂回纹界面
 
-导航、聊天框、生成进度和弹窗采用黑色素面、麦色强调、直角细框与对称凸型角花。独立结构参考保存在 `参考/refer.html`，样稿保留归档时的配色；技能卡面和手牌交互暂时保留原样。
+导航、聊天框、生成进度和弹窗采用黑色素面、麦色强调、直角细框与对称凸型角花。独立结构参考保存在 `ref/refer.html`，样稿保留归档时的配色；技能卡面和手牌交互暂时保留原样。
 
 `src/ui/lattice.ts` 提供全局 `v-lattice` 指令，`src/styles/lattice.css` 维护共享外观。组件原有样式归入 `legacy` 层，共享主题与窗棂层依次覆盖，保证按钮不会因嵌套或 scoped 样式而改变。
 
@@ -185,7 +185,7 @@ watch(() => props.text, () => {
 
 ### 6. 结构化步骤渲染
 
-`StepRender.vue` 将 AI 返回的 JSON 步骤渲染为可视化卡片。
+`ProjectTree.vue` 按真实行为路径展示步骤，并由 `ProjectTreePathNode.vue` 原位展开绑定文件、契约和代码。
 
 **数据结构**：
 ```typescript

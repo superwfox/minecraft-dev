@@ -10,6 +10,7 @@ import {
     deleteBranch,
 } from "../../_lib/github";
 import { protectedBuildPath } from "../../_lib/learning/compileApiEvidence";
+import { sourceFingerprint } from "../../_lib/projectPathReview";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import {
@@ -222,26 +223,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         userBuildUsed = buildLimit.used;
 
         if (!resumingUpload) {
-            // 只有 fix 端点刚生成候选后的无文件重建才延续同一轮修复状态。
-            const continuingRepair = state.status === "fixed"
-                && !!state.pendingFixSnapshot;
-            delete state.fixLearningAuthorization;
-            delete state.fixRepairAuthorization;
-            delete state.fixKnowledgeNeeds;
-            delete state.fixDiagnosticsFingerprint;
-            delete state.runId;
-            delete state.buildBranch;
-            delete state.buildRunStartedAfter;
-            delete state.artifactId;
-            if (!continuingRepair) {
-                state.repairAttempts = 0;
-                state.fixStagnation = 0;
-                state.buildFixHistory = [];
-                delete state.pendingFixSnapshot;
-                delete state.lastBuildDiagnostics;
-                delete state.lastBuildProgress;
-            }
-
             const pomFile = state.generatedFiles.find((file: any) => file.path.endsWith("pom.xml"));
             if (pomFile) {
                 const normalized = normalizePomRepositories(pomFile.content);
@@ -261,6 +242,33 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     await persistState(true);
                     return json({ error: checked.reason, code: "POM_BLOCKED" }, 400);
                 }
+            }
+
+            // Refuse stale evidence before recording an upload or clearing repair state.
+            state.sourceFingerprint = await sourceFingerprint(state);
+            if (state.tree?.paths?.some(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint)) {
+                await persistState(true);
+                return json({ error: "当前代码尚未完成路径静态审查", code: "PATH_REVIEW_REQUIRED" }, 409);
+            }
+
+            // 只有 fix 端点刚生成候选后的无文件重建才延续同一轮修复状态。
+            const continuingRepair = state.status === "fixed"
+                && !!state.pendingFixSnapshot;
+            delete state.fixLearningAuthorization;
+            delete state.fixRepairAuthorization;
+            delete state.fixKnowledgeNeeds;
+            delete state.fixDiagnosticsFingerprint;
+            delete state.runId;
+            delete state.buildBranch;
+            delete state.buildRunStartedAfter;
+            delete state.artifactId;
+            if (!continuingRepair) {
+                state.repairAttempts = 0;
+                state.fixStagnation = 0;
+                state.buildFixHistory = [];
+                delete state.pendingFixSnapshot;
+                delete state.lastBuildDiagnostics;
+                delete state.lastBuildProgress;
             }
 
             delete state.repairStartedAt;
@@ -327,6 +335,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const treeSha = await createTree(token, sha, treeFiles);
         state.buildHeadSha = await createCommitAndUpdateRef(token, treeSha, sha, branch, `build ${taskId}: ${treeFiles.length} files`);
         state.buildBaseSha = sha;
+        state.compileCheck = { fingerprint: state.sourceFingerprint, status: "pending", headSha: state.buildHeadSha };
         delete state.compileApiEvidence;
         state.logs.push(`已一次性提交 ${treeFiles.length} 个文件`);
 

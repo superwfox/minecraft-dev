@@ -1,6 +1,6 @@
 import fs from 'node:fs'; import path from 'node:path';
 const file = 'src/logic/generateHandler.ts'; let s = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-const archive = 'deprecated/flowchart-planner/src/logic/generateHandler.removed.ts'; fs.mkdirSync(path.dirname(archive), { recursive: true });
+const archive = '.deprecated/flowchart-planner/src/logic/generateHandler.removed.ts'; fs.mkdirSync(path.dirname(archive), { recursive: true });
 function cut(a, b, replacement = '') { const start = s.indexOf(a), end = s.indexOf(b, start); if (start < 0 || end < 0) throw new Error(a); fs.appendFileSync(archive, '\n' + s.slice(start, end)); s = s.slice(0, start) + replacement + s.slice(end); }
 s = s.replace('    waitForPathChoice,', '    waitForTreeDecision,').replace('    normalizeGradeRequestId,', '    normalizeTreeRequestId,');
 s = 'import JSZip from "jszip";\nimport { renderTreeMarkdown, type ProjectTreeView, type TreeIssue } from "./projectTree";\nimport type { GenFile } from "./generateState";\n' + s;

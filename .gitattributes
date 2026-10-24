@@ -1,0 +1,3 @@
+# The compile evidence pins the exact Git blob bytes of these reviewed artifacts.
+public/maven.yml text eol=lf
+public/compile_api_evidence.py text eol=lf

@@ -1,6 +1,6 @@
 import fs from 'node:fs'; import path from 'node:path';
 const file = 'src/logic/generateState.ts'; let s = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-const archiveFile = 'deprecated/flowchart-planner/src/logic/generateState.removed.ts'; fs.mkdirSync(path.dirname(archiveFile), { recursive: true });
+const archiveFile = '.deprecated/flowchart-planner/src/logic/generateState.removed.ts'; fs.mkdirSync(path.dirname(archiveFile), { recursive: true });
 function cut(a, b, replacement = '') { const start = s.indexOf(a), end = s.indexOf(b, start); if (start < 0 || end < 0) throw new Error(a); fs.appendFileSync(archiveFile, '\n' + s.slice(start, end)); s = s.slice(0, start) + replacement + s.slice(end); }
 s = 'import type { ProjectTreeView, TreeIssue, NodeContractCheck } from "./projectTree";\n' + s;
 s = s.replace(/export type GenPhase = [^\n]+/, 'export type GenPhase = "idle" | "creating" | "clarifying" | "awaiting_input" | "tree_planning" | "tree_confirming" | "generating" | "verifying" | "uploading" | "building" | "fixing" | "interrupted" | "done" | "error";');

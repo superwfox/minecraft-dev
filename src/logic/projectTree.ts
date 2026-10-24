@@ -1,6 +1,9 @@
 import type { publicTreeView, NodeContractCheck, TreeIssue, TreeOpResult, TreeNode } from "../../functions/_lib/projectTree";
 import type { GenFile, GeneratorType } from "./generateState";
+import type { PathCheck } from "../../functions/_lib/projectPathReview";
 export type { NodeContractCheck, TreeIssue, TreeOpResult };
+export type { TreeStep, TreePath } from "../../functions/_lib/projectTree";
+export type { PathCheck } from "../../functions/_lib/projectPathReview";
 export type ProjectTreeView = Omit<ReturnType<typeof publicTreeView>, "project"> & { project: ReturnType<typeof publicTreeView>["project"] & { coreType?: string; version?: string } };
 export type TreeNodeView = ProjectTreeView["nodes"][number];
 export const generatorLabels: Record<GeneratorType, string> = { MainGen: "插件主类", CommandGen: "命令", ListenerGen: "事件监听", TaskGen: "调度任务", ManagerGen: "服务管理", ConfigGen: "YAML 资源", ConfigClassGen: "配置加载", ModelGen: "数据模型", EnumGen: "枚举", UtilGen: "工具", FileRelatedGen: "构建配置" };
@@ -23,8 +26,15 @@ export function moduleProgress(tree: ProjectTreeView, files: GenFile[]) {
 export function treeTotals(tree: ProjectTreeView, files: GenFile[], checks: Record<string, NodeContractCheck>) {
     return { done: tree.nodes.filter(node => files.some(file => file.path === node.path && file.status === "done")).length, total: tree.nodes.length, passed: tree.nodes.reduce((sum, node) => sum + (checks[node.id]?.passed ?? 0), 0), contracts: tree.nodes.reduce((sum, node) => sum + (checks[node.id]?.total ?? 0), 0) };
 }
-export function renderTreeMarkdown(tree: ProjectTreeView, checks: Record<string, NodeContractCheck>): string {
+export function renderTreeMarkdown(tree: ProjectTreeView, checks: Record<string, NodeContractCheck>, pathChecks: Record<string, PathCheck> = {}): string {
     const lines = [`# ${tree.project.projectName}`, "", tree.project.summary, "", `- 包名：${tree.project.packageName}`, `- 核心与版本：${tree.project.coreType ?? ""} ${tree.project.version ?? ""}`, `- Java：${tree.project.javaVersion}`, `- 外部依赖：${tree.project.externalDeps.join(", ") || "无"}`, `- 修订：${tree.revision}`, ""];
+    lines.push("路径验证仅包括模型静态审查与对应代码编译；游戏内行为需要用户实测。", "");
+    for (const path of tree.paths ?? []) {
+        const check = pathChecks[path.id];
+        lines.push(`## 行为路径：${path.title}`, "", `静态审查：${check?.staticStatus ?? "pending"}；编译：${check?.compileStatus ?? "pending"}`, check?.summary ?? "尚未检查", "");
+        path.nodes.forEach((step, index) => lines.push(`${index + 1}. ${step.title}：${step.summary}`, `   实现文件：${step.fileIds.map(id => tree.nodes.find(node => node.id === id)?.path ?? id).join(", ")}`));
+        lines.push("", ...(check?.steps.map(step => `- ${step.passed ? "✓" : "!"} ${step.id}：${step.detail}`) ?? []), "");
+    }
     for (const module of tree.modules) {
         lines.push(`## ${module.title} (${module.id})`, "", module.responsibility, "");
         for (const node of tree.nodes.filter(node => node.moduleId === module.id)) {

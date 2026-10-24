@@ -58,11 +58,12 @@ export function nodeGenerationContext(tree: ProjectTree, node: TreeNode): string
         if (dependency) lines.push(`依赖 ${nodeFqcn(tree, dependency) || dependency.id}`, ...contractSignatureLines(dependency).map(line => `  ${line}`));
     }
     lines.push("只能通过依赖契约调用；跨包引用必须 import 全限定名。");
+    for (const path of tree.paths ?? []) if (path.nodes.some(step => step.fileIds.includes(node.id))) lines.push(`需求路径 ${path.title}：`, ...path.nodes.map((step, index) => `${index + 1}. ${step.title}：${step.summary}；实现文件 ${step.fileIds.join(", ")}`));
     if (node.id === "plugin.yml") lines.push("全部命令（含权限、usage、别名和 description）：", ...tree.nodes.flatMap(n => contractSignatureLines(n).filter(s => s.startsWith("命令"))), `外部依赖 ${tree.project.externalDeps.join(", ")}，根据硬依赖/可降级语义声明 depend/softdepend。`);
     if (node.id === "config.yml") for (const key of new Set(tree.nodes.flatMap(n => n.contract.configKeys))) lines.push(`配置 ${key}，使用者：${tree.nodes.filter(n => n.contract.configKeys.includes(key)).map(n => n.id).join(", ")}`);
     if (node.kind === "MainGen") lines.push("Main 必须导入全部依赖：", ...tree.nodes.filter(n => node.depends.includes(n.id) && nodeFqcn(tree, n)).map(n => `import ${nodeFqcn(tree, n)};`));
     return lines.join("\n");
 }
 export function nodeReviewContext(tree: ProjectTree, node: TreeNode): string {
-    return [`结构树文件 ${nodeFqcn(tree, node) || node.id}`, ...contractSignatureLines(node), `全树类名列表：${tree.nodes.filter(n => nodeFqcn(tree, n)).map(n => n.id).join(", ")}`].join("\n");
+    return [`结构树文件 ${nodeFqcn(tree, node) || node.id}`, ...contractSignatureLines(node), `全树类名列表：${tree.nodes.filter(n => nodeFqcn(tree, n)).map(n => n.id).join(", ")}`, `关联需求路径：${JSON.stringify((tree.paths ?? []).filter(path => path.nodes.some(step => step.fileIds.includes(node.id))))}`].join("\n");
 }

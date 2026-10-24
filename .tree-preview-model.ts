@@ -1,6 +1,6 @@
 import { createInitialTree, emptyNodeContract, publicTreeView, type NodeContract, type TreeNode } from "./functions/_lib/projectTree";
 
-// Approval prototype only: behavior steps reference files without changing the generation schema.
+// Local fixtures share the production behavior-path and file-binding protocol.
 export interface PathPreviewNode { id: string; title: string; kind: string; summary: string; fileIds: string[] }
 export interface PathPreview { id: string; title: string; nodes: PathPreviewNode[]; testStatus?: "pending" | "passed" | "failed" }
 const tree = createInitialTree("Paper", "1.21.4");

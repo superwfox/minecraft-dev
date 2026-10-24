@@ -49,7 +49,6 @@
       <ClarifyCards v-if="clarifyWaiting && genTask.clarifyTodos.length"/>
 
       <!-- 活动卡：手牌式实现路径确认门（全屏覆盖） -->
-      <PathCards v-if="pathGateWaiting && genTask.grade && genTask.grade.paths.length"/>
 
       <!-- 已选 skill 上下文条 -->
       <div v-if="chosenSkills.length" class="composer-skills">
@@ -282,7 +281,7 @@
     </template>
 
     <button v-lattice:icon
-      v-if="inFocusPhase && (clarifyWaiting || pathGateWaiting)"
+      v-if="inFocusPhase && (clarifyWaiting || treeGateWaiting)"
       class="reset-fab icon-btn refresh-btn"
       :disabled="!canRefresh"
       @click="onRefresh"
@@ -331,10 +330,9 @@ import type {PrecheckGuidance} from "../logic/promptFormatting";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
 import MarkdownComposer from "../components/MarkdownComposer.vue";
-import PathCards from "../components/PathCards.vue";
 import SkillTray from "../components/SkillTray.vue";
 import {selectedBriefs, removeSkill, selected, setSelectedSkills, trayOpen, toggleTray} from "../logic/skills";
-import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, pathGateWaiting, restoreGenTask} from "../logic/generateState";
+import {genTask, submitExtraPrompt, resetGenTask, clarifyWaiting, treeGateWaiting, restoreGenTask} from "../logic/generateState";
 import {startGenerate, interruptGenerate, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
 import {authState, login, showSponsorModal} from "../logic/auth";
@@ -460,13 +458,13 @@ const selectCore = ref("");
 const selectVer = ref("");
 
 // ── 视图态：尚未产出文件时都用居中聚焦视图；一旦开始生成文件切到进度视图 ──
-const inFocusPhase = computed(() => genTask.files.length === 0);
+const inFocusPhase = computed(() => !genTask.tree && genTask.files.length === 0 && !["tree_planning", "tree_confirming"].includes(genTask.phase));
 
 // 前置阶段连接尚未返回首个片段时，保留明确的工作态。
 const aiWorking = computed(() =>
     (sending.value && !selectingBlock.value)
-    || (["clarifying", "grading", "planning"].includes(genTask.phase)
-        && !clarifyWaiting.value && !pathGateWaiting.value)
+    || (["creating", "clarifying", "tree_planning"].includes(genTask.phase)
+        && !clarifyWaiting.value && !treeGateWaiting.value)
 );
 
 // 已选 skill：输入框上方的紧凑上下文条
@@ -501,20 +499,19 @@ const statusText = computed(() => {
     if (sending.value) return "正在分析需求…";
     if (selectingBlock.value) return "请选择核心类型与版本";
     const p = genTask.phase;
-    if (p === "planning") return "正在创建任务…";
+    if (p === "creating") return "正在创建任务…";
     if (p === "clarifying") return clarifyWaiting.value ? "" : "正在生成确认问题…";
-    if (p === "grading") return "正在分析需求复杂度…";
-    if (p === "confirming") return pathGateWaiting.value ? "" : "正在准备实现路径…";
+    if (p === "tree_planning") return "正在规划项目结构树…";
+    if (p === "tree_confirming") return "等待确认结构树";
     if (p === "awaiting_input") return "请补充需求描述";
     if (p === "interrupted") return "";
     if (p === "error") return "请调整需求后重试";
     if (fallbackText.value) return "对话中";
     return "";
 });
-const currentPreflightStage = computed<"" | "clarify" | "grade" | "plan">(() => {
+const currentPreflightStage = computed<"" | "clarify" | "tree">(() => {
     if (genTask.phase === "clarifying") return "clarify";
-    if (genTask.phase === "grading") return "grade";
-    if (genTask.phase === "planning") return "plan";
+    if (["tree_planning", "tree_confirming"].includes(genTask.phase)) return "tree";
     return "";
 });
 const hasCurrentPreflightStream = computed(() =>
@@ -540,7 +537,7 @@ const liveProcessActive = computed(() =>
 const liveProcessVisible = computed(() =>
     !selectingBlock.value
     && !clarifyWaiting.value
-    && !pathGateWaiting.value
+    && !treeGateWaiting.value
     && activeDraft.value?.phase !== "error"
     && (genTask.phase !== "error" || sending.value || draftWorkActive.value)
     && genTask.phase !== "awaiting_input"
@@ -548,8 +545,7 @@ const liveProcessVisible = computed(() =>
 );
 const liveStageLabel = computed(() => {
     if (currentPreflightStage.value === "clarify") return "正在确认需求细节";
-    if (currentPreflightStage.value === "grade") return "正在分析实现复杂度";
-    if (currentPreflightStage.value === "plan") return "正在规划项目结构";
+    if (currentPreflightStage.value === "tree") return "正在规划项目结构";
     if (activeDraft.value?.streamStage === "precheck") return "正在检查需求完整性";
     if (activeDraft.value?.streamStage === "analysis") return "正在识别插件目标";
     if (activeDraft.value?.streamStage === "chat") return "正在回复";
@@ -769,7 +765,7 @@ const promptHistoryTriggerTitle = computed(() =>
 );
 const composerPlaceholder = computed(() =>
     composerDisabled.value
-        ? (clarifyWaiting.value || pathGateWaiting.value || genTask.phase === "awaiting_input"
+        ? (clarifyWaiting.value || treeGateWaiting.value || genTask.phase === "awaiting_input"
             ? "请先完成上方确认"
             : "正在处理当前需求")
         : "描述你想制作的 Minecraft 插件"
@@ -1233,16 +1229,15 @@ onBeforeUnmount(() => {
 
 // 顶栏中部状态文案
 const phaseLabels: Record<string, string> = {
-    planning: "正在规划项目...",
+    creating: "正在创建任务...",
+    tree_planning: "正在规划项目结构...",
+    tree_confirming: "等待确认结构...",
     clarifying: "请确认澄清问题...",
-    grading: "正在分析复杂度...",
-    confirming: "请确认实现路径...",
     awaiting_input: "请补充需求描述...",
     generating: "正在生成代码...",
     verifying: "正在校验文件...",
     uploading: "正在上传构建...",
     building: "正在编译打包...",
-    polling: "正在编译打包...",
     fixing: "正在修复编译错误...",
     interrupted: "任务已中断",
     done: "JAR 已就绪",

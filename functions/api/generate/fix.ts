@@ -1027,6 +1027,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     if (!rolledBackFiles.includes(snapshot.path)) continue;
                     const fileEntry = state.generatedFiles.find((file: any) => file.path === snapshot.path);
                     if (fileEntry) {
+                        state.sourceFingerprint = "";
                         fileEntry.content = snapshot.content;
                         fileEntry.apiSummary = snapshot.apiSummary ?? null;
                     }
@@ -1398,6 +1399,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     if (normalized.changes.length > 0) {
                         beforeContents.set(filePath, fileEntry.content);
                         beforeSummaries.set(filePath, fileEntry.apiSummary ?? null);
+                        state.sourceFingerprint = "";
                         fileEntry.content = normalized.content;
                         fileEntry.apiSummary = null;
                         changedCount++;
@@ -1568,6 +1570,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
                 beforeContents.set(filePath, fileEntry.content);
                 beforeSummaries.set(filePath, fileEntry.apiSummary ?? null);
+                state.sourceFingerprint = "";
                 fileEntry.content = fixedContent;
                 fileEntry.apiSummary = null;
                 changedCount++;
@@ -1592,6 +1595,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     for (const path of changedFiles) {
                         const file = state.generatedFiles.find((item: { path: string }) => item.path === path);
                         if (file) {
+                            state.sourceFingerprint = "";
                             file.content = beforeContents.get(path) ?? file.content;
                             file.apiSummary = beforeSummaries.get(path) ?? null;
                         }
@@ -1662,6 +1666,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             // Clear error state so rebuild can proceed
             state.status = "fixed";
+            state.sourceFingerprint = "";
             state.error = null;
             delete state.runId;
             delete state.buildBranch;
@@ -1680,6 +1685,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, {
                 type: "result",
                 nodeChecks: state.nodeChecks,
+                pathChecks: {},
                 fixed: changedCount,
                 changed: changedCount,
                 verified: false,

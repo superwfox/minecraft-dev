@@ -63,11 +63,11 @@ afterEach(() => {
 });
 
 describe("expired generation task recovery", () => {
-    it("clears the snapshot before Planner when server renewal rejects the task", async () => {
+    it("clears the snapshot before clarification when server renewal rejects the task", async () => {
         const now = Date.now();
         genTask.taskId = "task-expired";
         genTask.taskExpiresAt = now - 1;
-        genTask.phase = "planning";
+        genTask.phase = "creating";
         genTask.userPrompt = "创建一个唯一 Boss 插件";
         genTask.coreType = "PAPER";
         genTask.version = "1.21.4";
@@ -104,11 +104,11 @@ describe("expired generation task recovery", () => {
         expect(localStorage.getItem(GEN_KEY)).toBeNull();
     });
 
-    it("accepts server renewal after the local expiry hint and does not retry Planner 404", async () => {
+    it("accepts server renewal after the local expiry hint and does not retry Clarify 404", async () => {
         const now = Date.now();
         genTask.taskId = "task-expired";
         genTask.taskExpiresAt = now - 1;
-        genTask.phase = "planning";
+        genTask.phase = "creating";
         genTask.userPrompt = "创建一个唯一 Boss 插件";
         genTask.coreType = "PAPER";
         genTask.version = "1.21.4";
@@ -121,7 +121,7 @@ describe("expired generation task recovery", () => {
                     headers: { "Content-Type": "application/json" },
                 });
             }
-            if (url === "/api/generate/plan") {
+            if (url === "/api/generate/clarify") {
                 return new Response(JSON.stringify({
                     error: "任务已超过有效期或不存在，请重新开始生成",
                     code: "TASK_NOT_FOUND",
@@ -140,9 +140,9 @@ describe("expired generation task recovery", () => {
             { resumePrepared: true },
         );
 
-        const plannerCalls = fetchWithByokFallbackMock.mock.calls
-            .filter(([url]) => url === "/api/generate/plan");
-        expect(plannerCalls).toHaveLength(1);
+        const clarifyCalls = fetchWithByokFallbackMock.mock.calls
+            .filter(([url]) => url === "/api/generate/clarify");
+        expect(clarifyCalls).toHaveLength(1);
         expect(genTask).toMatchObject({
             taskId: "",
             taskExpiresAt: 0,

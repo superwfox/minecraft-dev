@@ -1,0 +1,2 @@
+
+      <PathCards v-if="pathGateWaiting && genTask.grade && genTask.grade.paths.length"/>

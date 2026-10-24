@@ -5,10 +5,12 @@
 ```
 functions/api/chat.ts              → POST /api/chat
 functions/api/stream.ts            → POST /api/stream
-functions/api/generate/plan.ts     → POST /api/generate/plan    (双模式：建任务 / 出蓝图+文件树+深度桶)
+functions/api/generate/task.ts     → POST /api/generate/task    (创建任务)
+functions/api/generate/tree.ts     → POST / GET /api/generate/tree (规划、修正、锁定与恢复)
+functions/api/generate/source.ts   → GET /api/generate/source   (单文件或完整源码)
 functions/api/generate/clarify.ts  → POST /api/generate/clarify (SSE，多轮澄清)
 functions/api/generate/bucket.ts   → POST /api/generate/bucket  (SSE，单桶并发生成，主路径)
-functions/api/generate/file.ts     → POST /api/generate/file    (SSE，legacy 单文件，仅补缺用)
+functions/api/generate/plan|grade|file.ts → 410 FEATURE_DEPRECATED
 functions/api/generate/verify.ts   → POST /api/generate/verify
 functions/api/generate/build.ts    → POST /api/generate/build
 functions/api/generate/status.ts   → GET  /api/generate/status
@@ -25,7 +27,7 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 | 模型 / 档位 | 用途 | 自动注入 |
 |------|------|----------|
 | `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / 对话兜底 / Responses 联网发现 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }`（Responses 使用 `reasoning: { effort: "low" }`） |
-| `deepseek-flash` / 原 pro 档 | clarify / grade / planner / reChecker / rework / fix / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 pro 档 | clarify / 结构规划 / 路径审查 / reChecker / rework / fix / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 两档统一调用 DeepSeek-V4.1-Flash，API 模型名为 `deepseek-flash`。`/api/chat` 和 `/api/stream` 优先读取 `reasoning_effort`（`low`、`high`、`max`），默认 `low`；未提供有效 effort 时，旧客户端模型名中的 `pro` / `reason` 仍映射到 `high`。`max` 会原样用于 DeepSeek 请求。需求整理器固定使用 `low`。DeepSeek BYOK 与平台请求采用相同路由；GLM BYOK 保持现有模型和参数策略。
 
@@ -66,50 +68,27 @@ data: [DONE]
 
 ## 项目生成 API
 
-### POST /api/generate/plan
+### POST /api/generate/task
 
-双模式端点。
+请求：{userPrompt, coreType, version, skillIds}。返回 {taskId, expiresAt, skillsLoaded}，创建 clarifying 任务；额度在中间件按 POST 创建请求扣除。PATCH 保活和 DELETE 取消不重复扣创建额度。
 
-**模式 1：创建任务**（不传 `taskId`）—— 仅创建 D1 任务、写入 `userPrompt`/`coreType`/`version`，进入 `clarifying` 状态，**不调用 Planner**。
+### POST /api/generate/tree
 
-请求：`{ "userPrompt": "...", "coreType": "PAPER", "version": "1.21" }`
-响应：`{ "taskId": "1710556800000-abc123" }`
+build/refine/continue 返回 SSE，每次请求只进行一轮模型调用。请求包含 taskId、treeRequestId、action，以及可选 correction、focusIds、skillIds、learningToolJobs。refine 的 correction 长度为 1–1000，范围由模型按自然语言定位。
 
-**模式 2：出蓝图 + 文件树**（传 `taskId`）—— 要求 `state.clarifyDone === true`。调 `deepseek-flash`（`reasoning_effort=high`），把 `clarifyRounds` 拼成「已确认决策」喂给 `plannerPrompt`，产出主类蓝图与带类型的文件树，服务端做拓扑排序 + 深度桶划分后写回 D1。
+事件：phase、reasoning、delta、heartbeat、skill_context、tool_call、tree_ops、result。结果包含 status（continue/learning/ready/failed）、round、tree、issues、results 与可选 learningToolRequests。
 
-Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRequests`。前端推进对应 Learning job 后，以同一 `plannerRequestId` 和 `learningToolJobs` 重入；服务端把验证结果作为 `role: "tool"` 消息接回原始 thinking/tool-call 对话，再继续产出计划。Generator、Reviewer、Reworker 与 Fixer 使用同一协议。
+confirm 返回 JSON，请求 {taskId, action: "confirm", revision}，成功返回 {ok, tree, plan, bucketPaths}。确认不调用模型，相同锁定修订重复确认直接重放；过期修订返回 TREE_REVISION_MISMATCH，锁定后的修改返回 TREE_LOCKED。
 
-请求：`{ "taskId": "1710556800000-abc123" }`
+其他主要错误：CLARIFY_REQUIRED、TREE_NOT_READY、TREE_INVALID、TREE_IN_PROGRESS、TREE_REQUEST_CONFLICT、TREE_RECOVERY_REQUIRED、TREE_CANCELLED、QUOTA_EXHAUSTED。
 
-**响应**：
-```json
-{
-  "taskId": "1710556800000-abc123",
-  "projectName": "MaintenanceKicker",
-  "packageName": "com.example.maintenancekicker",
-  "javaVersion": "21",
-  "mainBlueprint": {
-    "events":   [ { "event": "PlayerJoinEvent", "listenerClass": "JoinListener", "priority": "NORMAL" } ],
-    "commands": [ { "name": "setnotice", "executorClass": "SetNoticeCommand", "permission": "..." } ],
-    "tasks":    [],
-    "services": [ { "managerClass": "DataManager", "lifecycle": "onEnable" } ],
-    "config":   { "defaultsCopied": true, "files": ["config.yml"] }
-  },
-  "plan": [
-    { "path": "pom.xml", "role": "...", "order": 1, "depends": [], "generatorType": "FileRelatedGen", "tag": null, "bucket": 0 },
-    { "path": "src/main/java/.../SetNoticeCommand.java", "role": "...", "order": 3, "depends": ["DataManager.java"], "generatorType": "CommandGen", "bucket": 1 },
-    { "path": "src/main/java/.../Main.java", "role": "...", "order": 5, "depends": ["..."], "generatorType": "MainGen", "bucket": 2 }
-  ],
-  "buckets": [ ["pom.xml", "..."], ["SetNoticeCommand.java", "..."], ["Main.java"] ]
-}
-```
+### GET /api/generate/tree?taskId=
 
-**校验与说明**：
-- 模式 2 若 `clarifyDone === false` 返回 400
-- `mainBlueprint` 缺失或非法（`isValidBlueprint`）返回 422
-- 每个文件必须带合法 `generatorType`（`GENERATOR_TYPES` 之一），否则 422
-- `plan` 经拓扑排序（`order` 单调），并计算 `bucket` 深度；**`MainGen` 强制放最后一桶**
-- 任务状态写入 D1，逻辑有效期 1 小时
+返回 {tree, session, pendingOperation, nodeChecks, pathChecks, generation}；pendingOperation 提供待恢复请求的 id 和原始规范化输入，generation 包含 plan、currentBucket 和 fileStatuses，供手动恢复任务。tree 的 paths 是行为路径，nodes 是实现文件，两者通过步骤 fileIds 关联。
+
+### 旧接口
+
+/api/generate/plan、/api/generate/grade、/api/generate/file 返回 410 FEATURE_DEPRECATED，历史实现保存在仓库 .deprecated/flowchart-planner/。
 
 ### POST /api/generate/clarify
 
@@ -137,60 +116,41 @@ Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRe
 | `result` | 解析完成：`{ done, todos }`，或 `{ needMoreInput: true, hint }` |
 | `log` | 日志（解析失败、超过最大轮次等） |
 
-**特殊情况**：达到 5 轮 / AI 返回非 JSON → 强制 `done: true` 进入 Planner。
+**特殊情况**：达到 5 轮 / AI 返回非 JSON → 强制 `done: true` 进入结构树规划。
 
 ### POST /api/generate/bucket
 
-**生成主路径**。生成指定深度桶的所有文件，桶内并发，返回 SSE 流。前端按 `bucket` 升序逐桶调用。
+请求 {taskId, bucketIndex, superConcurrency?, learningToolJobs?}，要求树已锁定，否则返回 TREE_NOT_LOCKED。每次请求每个目标最多一次模型调用，结果落库后客户端继续同一桶。
 
-**请求**：`{ "taskId": "1710556800000-abc123", "bucketIndex": 0 }`
+SSE 包含 bucket_start、phase、delta、log、tree_patch、new_file、file_done、file_error、path_review 与 result。
 
-**响应**：`text/event-stream`，事件均带 `path` 标签便于前端按文件路由：
-
-| 事件 `type` | 说明 |
-|------|------|
-| `bucket_start` | `{ bucketIndex, paths[], concurrency }` 桶启动 |
-| `phase` | `{ path, phase }`：`generating` / `reviewing` / `reworking` / `summarizing` |
-| `delta` | `{ path, content }` 流式代码片段 |
-| `log` | 日志（审查结果、rework、动态补缺等） |
-| `new_file` | `{ path, role, content }` 动态生成的缺失类 |
-| `file_done` | `{ path, content }` 单文件完成 |
-| `file_error` | `{ path, reason }` 单文件异常 |
-| `result` | 桶结束（见下） |
-
-**`result` 事件**：
-- 正常：`{ bucketIndex, done, completed:[{path,content,reworkCount}], newFiles[], bucketsRemaining }`
-- 需重新规划：`{ bucketIndex, replan: true, path?, reason }`
-
-**说明**：
-- 并发上限 `GEN_CONCURRENCY`（环境变量，默认 2）
-- 每文件经 reChecker 审查；`missing_classes` 非空时动态补生（`MAX_DYNAMIC_GEN = 3`）；其他错误 rework（`MAX_REWORK = 5`）
-- 单文件 5 次未过、桶内任意文件抛异常、或整桶执行失败 → 始终发出 `result`（`replan=true`），避免前端拿到 null
-- 桶完成后所有文件的 `FileSummary` 回填 D1 任务状态，供下一桶注入
-
-### POST /api/generate/file（legacy）
-
-单文件流式生成，**已被 bucket 取代**，仅在 `verify` 发现缺失文件、需补齐时由前端调用。
-
-**请求**：`{ "taskId": "..." }`
-**响应**：若无待生成文件返回 `{ "done": true, "fileIndex": N }`；否则返回 SSE（含 `phase` / `delta` / `log` / `new_file` / `result`，reChecker 不通过自动 rework）。
+- tree_patch：审查追加的实现文件及可选模块。
+- file_done：path、content、contractCheck；new_file 同时携带 nodeId。
+- path_review：pathId、title、status=started，供状态卡展示真实审查活动。
+- result：bucketIndex、bucketDone、done、progressed、active、completed、newFiles、errors、learningToolRequests、bucketsRemaining、pathChecks。
+- 契约失败先进入返工；最多 3 次返工、每个目标最多 3 个动态补缺类。
 
 ### POST /api/generate/verify
 
-校验文件完整性。
+请求 {taskId, fixMissing?, reviewPaths?}。返回 {verified, total, generated, missing, changedFiles, pathChecks, repairBucketIndex?, reviewBucketIndex?}。
 
-**请求**：`{ "taskId": "...", "fixMissing": false }`
+verified 仅表示树的实现文件齐全；fixMissing 将缺失文件放入修补桶。文件齐全且 reviewPaths=true 时，按当前代码指纹安排路径审查桶，返回 reviewBucketIndex；客户端通过 bucket 逐请求推进，之后再次 verify，直到无需新审查桶。
 
-**响应**：`{ "verified": true, "total": 6, "generated": 6, "missing": [] }`
+路径审查前先规范化已知迁移的 Maven 仓库地址，changedFiles 返回被调整的文件路径，客户端据此失效源码缓存。构建入口再次核对同一指纹；若代码变化则返回 PATH_REVIEW_REQUIRED，完成新审查后可沿用该次尚未启动的 buildRequestId。
 
-- 对比 `plan` 与 `generatedFiles`
-- `fixMissing: true` 时把缺失文件重新加入 `plan` 队列，供 `/file` 补齐
+pathChecks 按路径返回 status、staticStatus、compileStatus、summary、steps。status=passed 需要路径静态审查与相同代码版本编译均通过，不能把文件齐全、契约项通过或构建启动当成路径验证成功。
+
+### GET /api/generate/source?taskId=&path=
+
+带 path 时返回已生成文件 {path, content}，不存在时返回 404 SOURCE_NOT_FOUND；不带 path 时要求树已锁定且文件齐全，否则返回 409 SOURCE_NOT_READY。
+
+整包返回 {projectName, files, tree, nodeChecks, pathChecks}。浏览器用 JSZip 生成 Maven 源码包和 PROJECT_TREE.md；plugin.yml 与构建使用相同水印处理。接口只允许访问自己的任务。
 
 ### POST /api/generate/build
 
 仅构建服务端已保存的生成文件。旧 IDE 或追加需求提交的 `files`、`meta` 字段不再接受，返回 `410 FEATURE_DEPRECATED`。
 
-上传文件到 GitHub 并触发构建。
+上传文件到 GitHub 并触发构建。当前代码未完成路径静态审查时返回 409 PATH_REVIEW_REQUIRED；编译成功不会覆盖静态审查中的失败项。
 
 **请求**：`{ "taskId": "...", "buildRequestId": "build_<32位十六进制ID>" }`
 
@@ -208,7 +168,7 @@ Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRe
 
 **请求**：`GET /api/generate/status?taskId=...`
 
-**响应**：`{ "status": "done", "conclusion": "success", "artifactReady": true }`
+**响应**：`{ "status": "done", "conclusion": "success", "artifactReady": true, "pathChecks": {} }`，pathChecks 按每条路径返回真实检查结论。
 
 可能的 `status`：
 - `waiting`：等待 run 创建（`runId` 未知，会尝试用 `buildBranch` 查找）
@@ -232,7 +192,7 @@ data: [DONE]
 ```
 
 - 拉失败 Job 日志 → 解析 Maven `[ERROR]` 行定位出错文件 → 对每个文件用 `buildFixPrompt` 流式改写 → 更新 `generatedFiles`
-- 前端收到结果后重新调 `/build`；`result.fixed === 0` 表示未修复任何文件
+- 修复变更使旧代码指纹的路径检查失效，前端重新进行路径审查后再调 `/build`；`result.fixed === 0` 表示未修复任何文件
 - 前端 `buildWithRetry` 最多修复重试 2 次（`MAX_FIX_ATTEMPTS`）
 
 ### GET /api/generate/download
@@ -243,7 +203,7 @@ data: [DONE]
 **响应**：`application/zip`，`Content-Disposition: attachment; filename="{projectName}.zip"`
 
 - 从 D1 读 `artifactId`，调 GitHub API 下载
-- 下载后清理 D1 记录与临时分支
+- 下载后保留任务至过期；临时构建分支按现有逻辑清理
 - GitHub artifact API 返回 302，需手动处理避免 auth 头泄露
 
 ## 错误处理
@@ -266,7 +226,7 @@ data: [DONE]
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
-本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 Planner、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有 Grader 确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，并继续执行来源验证、配额、任务授权、任务时限和 D1 缓存；模型可在取得验证结果后按需继续调用工具，不再受固定轮次上限约束。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
+本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 结构规划器、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有技术缺口评估确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，并继续执行来源验证、配额、任务授权、任务时限和 D1 缓存；模型可在取得验证结果后按需继续调用工具，不再受固定轮次上限约束。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
 
 ## KV 绑定
 

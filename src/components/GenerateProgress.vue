@@ -1,5 +1,6 @@
 <template>
   <div class="gen-wrap" ref="wrapRef">
+    <ProjectTree :mode="treeMode"/>
     <!-- 超级并发开关：默认逐阶段串行；开启后并行推进多个文件阶段 -->
     <div class="gen-super-bar" v-if="genTask.phase !== 'idle'">
       <button v-lattice class="gen-super-toggle" :class="{ on: superConcurrency }"
@@ -17,24 +18,7 @@
       </button>
     </div>
 
-    <!-- 规划卡片 -->
-    <div v-lattice:one class="glass2 gen-card" v-if="genTask.phase !== 'idle'" :aria-busy="genTask.preflightActive || genTask.phase === 'planning'">
-      <div class="gen-card-head">
-        <div class="gen-card-title">▪ 项目规划</div>
-        <ThinkingMarquee v-if="marqueeOn" variant="compact"/>
-        <ProjectTreeStatusCard :label="activityStatusLabel" :detail="genTask.projectName || '等待项目信息'" :busy="activityBusy"/>
-      </div>
-      <div class="gen-phases">
-        <span v-for="p in phases" :key="p.key" class="gen-phase"
-              :class="{active: p.key === genTask.phase, done: phaseOrder(p.key) < phaseOrder(genTask.phase)}">
-          {{ p.label }}
-        </span>
-      </div>
-      <div v-if="genTask.projectName" data-font="dynamic" class="gen-info">
-        <span class="tag">{{ genTask.projectName }}</span>
-        <span class="tag">Java {{ genTask.javaVersion }}</span>
-        <span class="tag">{{ genTask.packageName }}</span>
-      </div>
+    <details v-if="genTask.learningProgress.status !== 'idle' || genTask.negativeFactsUsed.length" class="gen-card"><summary>查证与知识记录</summary>
       <section v-if="genTask.learningProgress.status !== 'idle'" v-lattice:two class="learning-progress"
                :aria-busy="!learningTerminal"
                :class="{
@@ -116,55 +100,7 @@
                         :learning-stage="genTask.learningProgress.stage"
                         :learning-status="genTask.learningProgress.status"
                         :learning-revision="genTask.learningProgress.revision" />
-    </div>
-
-    <!-- 文件生成卡片：按生成器分组 -->
-    <div v-lattice:one class="glass2 gen-card" v-if="genTask.files.length" :aria-busy="genTask.phase === 'generating' || genTask.phase === 'verifying'">
-      <div class="gen-card-title">▪ 代码生成</div>
-      <div class="gen-groups">
-        <div v-for="g in fileGroups" :key="g.type" v-lattice:two class="gen-group" :aria-busy="g.files.some(f => f.status === 'generating')">
-          <div class="gen-group-header">
-            <span class="gen-group-label">{{ generatorLabels[g.type] || g.type }}</span>
-            <span class="gen-group-count">{{ g.files.length }}</span>
-          </div>
-          <div class="gen-group-files">
-            <template v-for="f in g.files" :key="f.path">
-              <div class="gen-file" :class="f.status" @click="toggleExpand(f.path)">
-                <span class="gen-file-icon">
-                  {{ f.status === "done" ? "●" : f.status === "generating" ? "◌" : f.status === "error" ? "×" : "○" }}
-                </span>
-                <span data-font="dynamic" class="gen-file-path">{{ f.path }}</span>
-                <span v-if="f.tag === 'gui'" class="gen-file-badge">GUI</span>
-                <span v-if="f.streamingPhase" class="gen-file-phase">{{ streamPhaseLabels[f.streamingPhase] || f.streamingPhase }}</span>
-                <span data-font="dynamic" class="gen-file-role">{{ f.role }}</span>
-              </div>
-              <div v-if="f.status === 'generating' && f.streamingContent" class="gen-file-stream">
-                <pre>{{ f.streamingContent }}</pre>
-              </div>
-            </template>
-          </div>
-        </div>
-      </div>
-      <div v-if="expandedFile?.content" v-lattice:three class="gen-preview">
-        <div class="gen-preview-toolbar">
-          <span v-if="copyState !== 'idle'" class="gen-preview-copy-status"
-                :class="{ error: copyState === 'error' }" role="status" aria-live="polite">
-            {{ copyState === "success" ? "已复制" : "复制失败，请手动选择代码" }}
-          </span>
-          <button v-lattice:icon type="button" class="gen-preview-copy"
-                  :class="{ success: copyState === 'success', error: copyState === 'error' }"
-                  :title="copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败，请手动选择代码' : '复制当前文件代码'"
-                  :aria-label="copyState === 'success' ? '已复制当前文件代码' : '复制当前文件代码'"
-                  @click="copyExpandedCode">
-            <Check v-if="copyState === 'success'" :size="16" aria-hidden="true"/>
-            <Copy v-else :size="16" aria-hidden="true"/>
-          </button>
-        </div>
-        <div class="gen-preview-scroll">
-          <pre>{{ expandedFile.content }}</pre>
-        </div>
-      </div>
-    </div>
+    </details>
 
     <!-- AI 流式输出卡片 -->
     <div v-lattice:one class="glass2 gen-card" v-if="genTask.streamingPhase" :aria-busy="['generating', 'verifying', 'fixing'].includes(genTask.phase)">
@@ -175,7 +111,7 @@
     </div>
 
     <!-- 构建卡片 -->
-    <div v-lattice:one class="glass2 gen-card" v-if="showBuild" :aria-busy="['uploading', 'building', 'polling', 'fixing'].includes(genTask.phase)">
+    <div v-lattice:one class="glass2 gen-card" v-if="showBuild" :aria-busy="['uploading', 'building', 'fixing'].includes(genTask.phase)">
       <div class="gen-card-title">▪ 构建</div>
       <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
         <div class="gen-spinner"></div>
@@ -183,6 +119,7 @@
       </div>
       <div v-if="genTask.phase === 'done'" class="gen-done">
         <a v-lattice :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
+        <button v-lattice class="gen-download-btn" :disabled="sourceBusy || !sourceReady" :aria-busy="sourceBusy" @click="downloadSource">↓ 下载源码 ZIP</button>
       </div>
     </div>
 
@@ -204,6 +141,9 @@
       </div>
     </div>
 
+    <button v-lattice v-if="sourceReady && ['error', 'interrupted'].includes(genTask.phase)" class="gen-download-btn" :disabled="sourceBusy" :aria-busy="sourceBusy" @click="downloadSource">↓ 下载源码 ZIP</button>
+    <p v-if="sourceError" role="alert" data-font="dynamic">{{ sourceError }}</p>
+
     <!-- 日志卡片 -->
     <div v-lattice:one class="glass2 gen-card" v-if="genTask.logs.length">
       <div class="gen-card-title">▪ 日志</div>
@@ -217,21 +157,17 @@
 <script setup lang="ts">
 import {ref, computed, watch, nextTick, onMounted, onBeforeUnmount} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
-import type {GeneratorType, GenFile, LearningStatus} from "../logic/generateState";
-import {getDownloadUrl, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
+import type {LearningStatus} from "../logic/generateState";
+import {getDownloadUrl, retryGenerate, canRetryGenerate, resumeGenerate, downloadSourceZip} from "../logic/generateHandler";
 import {buildSafeDebugExport} from "../logic/safeDebug";
-import {Check, Copy, Play} from "lucide-vue-next";
-import ThinkingMarquee from "./ThinkingMarquee.vue";
+import {Play} from "lucide-vue-next";
 import LearningEvidence from "./LearningEvidence.vue";
-import ProjectTreeStatusCard from "./ProjectTreeStatusCard.vue";
+import ProjectTree from "./ProjectTree.vue";
 
-const activityBusy = computed(() => !["idle", "done", "error", "interrupted", "tree_confirming", "awaiting_input"].includes(genTask.phase));
-const activityStatusLabel = computed(() => ({ idle: "等待开始", creating: "创建任务", clarifying: "确认需求", awaiting_input: "等待补充需求", tree_planning: "规划结构", tree_confirming: "等待确认结构", generating: "生成实现文件", verifying: "校验文件完整性", uploading: "提交构建", building: "等待编译结果", fixing: "修复编译问题", interrupted: "任务已中断", done: "构建完成", error: "任务未完成" }[genTask.phase]));
-
-// 后台活跃阶段（无逐字流）显示跑马灯
-const marqueeOn = computed(() =>
-    ["planning", "generating", "verifying", "fixing"].includes(genTask.phase)
-);
+const treeMode = computed(() => genTask.phase === 'tree_planning' ? 'draft' : genTask.phase === 'tree_confirming' ? 'confirm' : 'progress');
+const sourceBusy = ref(false), sourceError = ref('');
+const sourceReady = computed(() => genTask.tree?.status === 'locked' && genTask.tree.nodes.every(node => genTask.files.some(file => file.path === node.path && (file.status === 'done' || !!genTask.nodeChecks[node.id]))));
+async function downloadSource() { if (sourceBusy.value) return; sourceBusy.value = true; sourceError.value = ''; try { await downloadSourceZip(); } catch (error) { sourceError.value = error instanceof Error ? error.message : String(error); } finally { sourceBusy.value = false; } }
 const canRetry = computed(() => canRetryGenerate() && genTask.phase === "error");
 const resumeBusy = ref(false);
 
@@ -356,84 +292,7 @@ function learningTrackState(index: number): "done" | "active" | "stopped" | "pen
     return index === activeAt ? "active" : "pending";
 }
 
-const expandedPath = ref<string>("");
-type CopyState = "idle" | "success" | "error";
-const copyState = ref<CopyState>("idle");
-let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
-let copyRequestSequence = 0;
-let componentUnmounted = false;
 const downloadUrl = computed(() => getDownloadUrl());
-
-function resetCopyFeedback() {
-    copyRequestSequence++;
-    copyState.value = "idle";
-    if (copyFeedbackTimer !== undefined) {
-        clearTimeout(copyFeedbackTimer);
-        copyFeedbackTimer = undefined;
-    }
-}
-
-async function writeClipboardText(text: string): Promise<boolean> {
-    if (navigator.clipboard?.writeText) {
-        try {
-            await navigator.clipboard.writeText(text);
-            return true;
-        } catch {
-            // Safari and non-secure contexts may reject Clipboard API; use the DOM fallback below.
-        }
-    }
-
-    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.setAttribute("readonly", "");
-    textarea.style.position = "fixed";
-    textarea.style.top = "0";
-    textarea.style.left = "0";
-    textarea.style.width = "1px";
-    textarea.style.height = "1px";
-    textarea.style.padding = "0";
-    textarea.style.border = "0";
-    textarea.style.opacity = "0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    textarea.setSelectionRange(0, text.length);
-
-    try {
-        return document.execCommand("copy");
-    } catch {
-        return false;
-    } finally {
-        textarea.remove();
-        activeElement?.focus({preventScroll: true});
-    }
-}
-
-async function copyExpandedCode() {
-    const file = expandedFile.value;
-    if (!file?.content) return;
-
-    const path = file.path;
-    resetCopyFeedback();
-    const requestSequence = copyRequestSequence;
-    const copied = await writeClipboardText(file.content);
-    if (componentUnmounted || requestSequence !== copyRequestSequence || expandedPath.value !== path) return;
-
-    copyState.value = copied ? "success" : "error";
-    copyFeedbackTimer = setTimeout(() => {
-        if (requestSequence === copyRequestSequence && expandedPath.value === path) {
-            copyState.value = "idle";
-            copyFeedbackTimer = undefined;
-        }
-    }, copied ? 1_600 : 3_000);
-}
-
-watch(expandedPath, resetCopyFeedback);
-onBeforeUnmount(() => {
-    componentUnmounted = true;
-    resetCopyFeedback();
-});
 
 // 只下载正向白名单构造的诊断，避免源码、路径、Prompt 或上游响应进入文件。
 async function downloadDebug() {
@@ -486,49 +345,6 @@ async function downloadDebug() {
     URL.revokeObjectURL(url);
 }
 
-const generatorLabels: Record<GeneratorType, string> = {
-    MainGen:        "主类",
-    CommandGen:     "命令",
-    ListenerGen:    "事件监听",
-    TaskGen:        "调度任务",
-    ManagerGen:     "数据/服务",
-    ConfigClassGen: "配置类",
-    ConfigGen:      "资源配置",
-    ModelGen:       "数据模型",
-    EnumGen:        "枚举",
-    UtilGen:        "工具类",
-    FileRelatedGen: "项目文件",
-};
-
-const groupOrder: GeneratorType[] = [
-    "FileRelatedGen", "ConfigGen", "ConfigClassGen",
-    "EnumGen", "ModelGen", "UtilGen",
-    "ManagerGen", "TaskGen", "ListenerGen", "CommandGen",
-    "MainGen",
-];
-
-const fileGroups = computed(() => {
-    const buckets = new Map<GeneratorType, GenFile[]>();
-    const fallback: GenFile[] = [];
-    for (const f of genTask.files) {
-        const t = f.generatorType;
-        if (t && groupOrder.includes(t)) {
-            if (!buckets.has(t)) buckets.set(t, []);
-            buckets.get(t)!.push(f);
-        } else {
-            fallback.push(f);
-        }
-    }
-    const ordered: { type: GeneratorType | "Other"; files: GenFile[] }[] = [];
-    for (const t of groupOrder) {
-        const fs = buckets.get(t);
-        if (fs && fs.length) ordered.push({ type: t, files: fs });
-    }
-    if (fallback.length) ordered.push({ type: "Other" as any, files: fallback });
-    return ordered;
-});
-
-const expandedFile = computed(() => genTask.files.find(f => f.path === expandedPath.value));
 const wrapRef = ref<HTMLElement | null>(null);
 const logRef = ref<HTMLElement | null>(null);
 const streamRef = ref<HTMLElement | null>(null);
@@ -544,25 +360,13 @@ const streamPhaseLabel = computed(() => streamPhaseLabels[genTask.streamingPhase
 const streamKey = computed(() => genTask.streamingPhase + ":" + genTask.streamingFile);
 
 const showBuild = computed(() =>
-    ["uploading", "building", "polling", "fixing", "done"].includes(genTask.phase)
+    ["uploading", "building", "fixing", "done"].includes(genTask.phase)
 );
-
-const phases = [
-    {key: "planning", label: "规划"},
-    {key: "generating", label: "生成"},
-    {key: "verifying", label: "校验"},
-    {key: "building", label: "构建"},
-    {key: "done", label: "完成"},
-];
-
-const ORDER: Record<string, number> = {idle: 0, planning: 1, generating: 2, verifying: 3, uploading: 4, building: 4, polling: 4, fixing: 4, done: 5, error: -1};
-function phaseOrder(key: string) { return ORDER[key] ?? 0; }
-function toggleExpand(path: string) { expandedPath.value = expandedPath.value === path ? "" : path; }
 
 watch(() => genTask.logs.length, async () => {
     await nextTick();
     logRef.value?.scrollTo({top: logRef.value.scrollHeight, behavior: "smooth"});
-    wrapRef.value?.lastElementChild?.scrollIntoView({behavior: "smooth", block: "end"});
+    // Keep the behavior paths in view while logs update.
 });
 
 watch(() => genTask.phase, async () => {

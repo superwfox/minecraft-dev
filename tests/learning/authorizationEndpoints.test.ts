@@ -156,7 +156,7 @@ function fixState(overrides: Record<string, unknown> = {}): string {
                 symbol: "dev.fancy.hooks.FancyHooksAPI#resolve",
             },
         })],
-        grade: { vector: { external_deps: ["FancyHooks"] } },
+        tree: { project: { externalDeps: ["FancyHooks"] } },
         ...overrides,
     });
 }
@@ -217,36 +217,6 @@ function activeFixJob(status: LearningJobStatus): LearningJobRecord {
         createdAt: now,
         updatedAt: now,
     };
-}
-
-function plannerState(taskStateFence: string): string {
-    return JSON.stringify({
-        uid: "user-1",
-        __taskOperationFence: taskStateFence,
-        __taskOperationLeaseUntil: 0,
-        coreType: "paper",
-        version: "1.21.4",
-        userPrompt: "Integrate FancyHooks into the plugin.",
-        grade: {
-            gateRequired: false,
-            paths: [],
-            vector: { external_deps: ["FancyHooks"] },
-            knowledgeNeeds: [makeNeed({
-                integrationKind: "external_plugin",
-                triggerReason: "external_plugin_contract",
-                claim: {
-                    subject: "FancyHooksAPI#resolve",
-                    question: "What is the exact FancyHooksAPI#resolve contract for Paper 1.21.4?",
-                },
-                scope: {
-                    dependency: "FancyHooks",
-                    packageName: "dev.fancy.hooks",
-                    symbol: "dev.fancy.hooks.FancyHooksAPI#resolve",
-                },
-                searchQueries: ["FancyHooksAPI resolve Paper 1.21.4 official documentation"],
-            })],
-        },
-    });
 }
 
 afterEach(() => {
@@ -322,7 +292,7 @@ describe("learning endpoint authorization", () => {
             coreType: "paper",
             version: "1.21.4",
             userPrompt: "Integrate FancyHooks into the plugin.",
-            grade: { vector: { external_deps: ["FancyHooks"] } },
+            tree: { project: { externalDeps: ["FancyHooks"] } },
             modelLearningRequests: { [toolRequest!.requestId]: toolRequest },
             __taskOperationFence: "state:tool-current",
             __taskOperationLeaseUntil: 0,
@@ -377,14 +347,15 @@ describe("learning endpoint authorization", () => {
         } satisfies LearningJobRecord));
 
         for (const fence of ["state:old", "state:new", "state:new"]) {
+            const raw = fixState({ __taskOperationFence: fence });
             const response = await startLearning(context(new Request(
                 "https://example.test/api/learning/start",
                 {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ taskId: "task-1", stage: "planner" }),
+                    body: JSON.stringify({ taskId: "task-1", stage: "fix", fixAuthorization: JSON.parse(raw).fixLearningAuthorization }),
                 },
-            ), plannerState(fence)));
+            ), raw));
             expect(response.status).toBe(200);
         }
 

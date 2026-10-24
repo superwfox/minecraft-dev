@@ -12,18 +12,20 @@
 - 按项目蓝图和文件依赖顺序生成代码，同一依赖层的文件并发处理，并进行审查与补缺。
 - 实时查看思考、输出和阶段进度；中断后保留状态，由用户继续任务。
 - 构建失败时解析编译诊断，按需查证版本化公开 API，约束修复候选后重新构建。
-- 下载构建成功的 JAR，在进度面板查看和复制源码；通过 Skill 为生成过程提供专门约束。
+- 下载构建成功的 JAR 和 Maven 源码 ZIP，在路径节点中查看契约与源码；通过 Skill 为生成过程提供专门约束。
 
-IDE、可视化蓝图和“追加需求并重建”已停用，相关实现保留在 [`deprecated/ide/`](deprecated/ide/)。旧 `/ide` 地址跳转到对话页。
+IDE、可视化蓝图和“追加需求并重建”已停用，相关实现保留在 [`.deprecated/ide/`](.deprecated/ide/)。旧 `/ide` 地址跳转到对话页。
 
 ## 一次生成如何完成
 
 ```text
-输入需求 → 流式预检与信息提取 → 创建任务 → 多轮澄清 → 复杂度分级
-        → 蓝图与文件规划 → 按依赖分桶生成、审查和摘要 → 完整性校验
-        → GitHub Actions 构建 → 成功后下载 JAR
-                             └→ 失败诊断 → 按需学习 API → 修复后重新构建
+输入需求 → 流式预检与信息提取 → 创建任务 → 多轮澄清
+        → 行为路径规划 → 修正或确认锁定 → 按依赖生成、契约核对与补缺
+        → 沿需求路径静态审查 → GitHub Actions 编译 → 下载 JAR 与源码 ZIP
+                                            └→ 失败诊断 → 按需学习 API → 修复并重新审查、编译
 ```
+
+路径连接线仅在模型静态审查和对应代码编译均通过后变实线；游戏内行为由用户实测。
 
 前端负责按阶段调用 API；服务端管理任务、授权、费用与模型请求。`MainBlueprint` 约束主类装配，`FileSummary` 向后续文件传递已生成的 API 契约。公开 API 学习通过 `learn_public_api` 工具和 Learning 端点接回模型对话。
 
@@ -71,7 +73,7 @@ npm run dev
 
 访问 Wrangler 输出的地址，通常为 `http://localhost:8788`。这个入口同时提供前端和 `/api/*`，直接访问 Vite 端口不能代替完整 API 环境。
 
-**完整生成流程还需要 D1。** 默认 `dev` 脚本只绑定本地 KV `TASKS`；需另外在 Wrangler 本地配置中绑定 D1 为 `DB` 并应用迁移。任务读取或存储的部分路径有 KV 兼容逻辑，但澄清、分级、规划等操作的执行锁依赖 D1，不能将 KV 回退视为完整流程保障。
+**完整生成流程还需要 D1。** 默认 `dev` 脚本只绑定本地 KV `TASKS`；需另外在 Wrangler 本地配置中绑定 D1 为 `DB` 并应用迁移。任务读取或存储的部分路径有 KV 兼容逻辑，但澄清、结构规划等操作的执行锁依赖 D1，不能将 KV 回退视为完整流程保障。
 
 新数据库按顺序执行 [`migrations/`](migrations/) 下 `0001` 至 `0005` 的 SQL；已有数据库只执行尚未应用的迁移。Git 登录、平台额度、模型凭证和构建仓配置也会影响相关功能能否使用。
 
@@ -96,12 +98,13 @@ npm run dev
 | 位置 | 职责与入口 |
 | --- | --- |
 | [`src/pages/`](src/pages/) / [`src/components/`](src/components/) | 页面与共享组件；对话页 `ChatPage.vue`、生成进度 `GenerateProgress.vue` |
-| [`src/styles/lattice.css`](src/styles/lattice.css) / [`src/ui/lattice.ts`](src/ui/lattice.ts) | 共享窗棂外观、角花与运行态动画；设计基准见 [`参考/refer.html`](参考/refer.html)，技能卡面暂时保留原样 |
+| [`src/styles/lattice.css`](src/styles/lattice.css) / [`src/ui/lattice.ts`](src/ui/lattice.ts) | 共享窗棂外观、角花与运行态动画；设计基准见 [`ref/refer.html`](ref/refer.html)，技能卡面暂时保留原样 |
 | [`src/styles/typography.css`](src/styles/typography.css) | 顶栏品牌与 chat / skill 导航用 Minecrafter，其他固定文案用全量江西拙楷，输入与生成内容用钉钉进步体；动态内容标记 `data-font="dynamic"`，字体文件存放在 `public/` |
 | [`src/logic/`](src/logic/) | 对话、生成状态、恢复与 Learning 续跑；优先看 `chatHandler.ts`、`generateHandler.ts`、`generateState.ts` |
 | [`src/api/deepseek.ts`](src/api/deepseek.ts) | 预检、信息提取与前端流式调用 |
-| [`deprecated/ide/`](deprecated/ide/) | 已停用的 IDE、可视化蓝图与追加需求功能归档 |
-| [`functions/api/generate/`](functions/api/generate/) | 澄清、分级、规划、分桶生成、构建、修复、下载 |
+| [`.deprecated/`](.deprecated/) | 已停用功能与重构片段归档；IDE 与追加需求功能见 `.deprecated/ide/` |
+| [`ref/`](ref/) | 界面样稿与用户提供的动画参考包，不参与应用构建 |
+| [`functions/api/generate/`](functions/api/generate/) | 任务创建、需求确认、结构树、分桶生成、路径审查、构建、修复、下载 |
 | [`functions/api/learning/`](functions/api/learning/) | 公开 API 学习任务的创建、推进和查询 |
 | [`functions/_lib/`](functions/_lib/) | `prompts.ts` 提示词契约、`llm.ts` 模型适配、`taskStore.ts` 存储与执行锁、`quota.ts` 计费 |
 | [`functions/_lib/learning/`](functions/_lib/learning/) | 学习授权、证据验证、公共知识及不可用 API 事实 |

@@ -83,9 +83,9 @@ export async function findRunByBranch(token: string, branch: string, afterTime: 
     return data.workflow_runs?.[0]?.id ?? null;
 }
 
-export async function getRunStatus(token: string, runId: number): Promise<{ status: string; conclusion: string | null }> {
+export async function getRunStatus(token: string, runId: number): Promise<{ status: string; conclusion: string | null; headSha?: string }> {
     const data = await (await ghFetch(token, `/actions/runs/${runId}`)).json() as any;
-    return { status: data.status, conclusion: data.conclusion };
+    return { status: data.status, conclusion: data.conclusion, headSha: data.head_sha };
 }
 
 export async function getArtifactInfo(token: string, runId: number): Promise<{ id: number; name: string } | null> {

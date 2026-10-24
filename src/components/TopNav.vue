@@ -12,7 +12,7 @@
 import { computed, inject } from "vue";
 import type { Ref } from "vue";
 import { useRoute } from "vue-router";
-import { genTask, clarifyWaiting, pathGateWaiting } from "../logic/generateState";
+import { genTask, clarifyWaiting, treeGateWaiting } from "../logic/generateState";
 
 const route = useRoute();
 const centerText = inject<Ref<string>>("centerText");
@@ -25,10 +25,10 @@ function act(which: "chat" | "skills"): boolean {
 
 // CHAT 运行态：generateState 的 busy 阶段（排除 idle/done/error/awaiting_input）
 const BUSY_PHASES = new Set([
-    "planning", "clarifying", "grading", "confirming", "generating",
-    "verifying", "uploading", "building", "polling", "fixing",
+    "creating", "clarifying", "tree_planning", "generating",
+    "verifying", "uploading", "building", "fixing",
 ]);
-const chatBusy = computed(() => BUSY_PHASES.has(genTask.phase) && !clarifyWaiting.value && !pathGateWaiting.value);
+const chatBusy = computed(() => BUSY_PHASES.has(genTask.phase) && !clarifyWaiting.value && !treeGateWaiting.value);
 
 // busy 时把 centerText（如「正在分析需求…」）降级为切换栏下方小字
 const statusText = computed(() => chatBusy.value ? (centerText?.value || "") : "");

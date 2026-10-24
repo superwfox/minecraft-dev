@@ -15,5 +15,5 @@
     }
   },
   "include": ["src/**/*", "functions/**/*", "tests/**/*", "*.ts"],
-  "exclude": ["node_modules", "dist", "deprecated"]
+  "exclude": ["node_modules", "dist", ".deprecated", "ref"]
 }

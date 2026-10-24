@@ -33,8 +33,9 @@ export function sqliteD1() {
     const directory = mkdtempSync(join(tmpdir(), "negative-api-sqlite-"));
     const file = join(directory, "test.db");
     function execute(request: unknown): any[] {
-        const result = spawnSync("python3", ["-c", RUNNER, file], { input: JSON.stringify(request), encoding: "utf8" });
-        if (result.status !== 0) throw new Error(result.stdout || result.stderr || "SQLite unavailable");
+        const python = process.env.PYTHON || (process.platform === "win32" ? "py" : "python3");
+        const result = spawnSync(python, ["-X", "utf8", "-c", RUNNER, file], { input: JSON.stringify(request), encoding: "utf8" });
+        if (result.status !== 0) throw new Error(result.stdout || result.stderr || result.error?.message || "SQLite unavailable");
         return JSON.parse(result.stdout);
     }
     execute({ script: ["CREATE TABLE generation_tasks (task_id TEXT PRIMARY KEY, owner_uid TEXT, planner_lease_token TEXT);",

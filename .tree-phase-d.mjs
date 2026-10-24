@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 const read = p => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const write = (p, s) => fs.writeFileSync(p, s);
-function archive(file, text) { const target = 'deprecated/flowchart-planner/' + file.replace(/\.ts$/, '.removed.ts'); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.appendFileSync(target, '\n' + text + '\n'); }
+function archive(file, text) { const target = '.deprecated/flowchart-planner/' + file.replace(/\.ts$/, '.removed.ts'); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.appendFileSync(target, '\n' + text + '\n'); }
 function cut(s, file, a, b, replacement = '') { const start = s.indexOf(a), end = s.indexOf(b, start); if (start < 0 || end < 0) throw new Error(a); archive(file, s.slice(start, end)); return s.slice(0, start) + replacement + s.slice(end); }
 let file = 'functions/api/generate/bucket.ts', s = read(file);
 s = cut(s, file, 'import {\n    assessPlannerLearningAuthorization,', 'import { getOwnedTask', 'import { appendReviewNode, findNodeByPath, nodePath, planItemForNode, projectExternalDeps, publicTreeView, type TreeNode } from "../../_lib/projectTree";\nimport { checkNodeContract, nodeGenerationContext, nodeReviewContext } from "../../_lib/projectTreeContract";\n');

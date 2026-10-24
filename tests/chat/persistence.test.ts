@@ -95,19 +95,19 @@ describe("chat session persistence", () => {
 });
 
 describe("generation state persistence", () => {
-    function persistModeOneSnapshot(phase: "planning" | "interrupted") {
+    function persistModeOneSnapshot(phase: "creating" | "interrupted") {
         genTask.userPrompt = "创建一个唯一 Boss 插件";
         genTask.coreType = "PAPER";
         genTask.version = "1.21.4";
         genTask.taskId = "";
         genTask.phase = phase;
-        genTask.interruptedFrom = phase === "interrupted" ? "planning" : "";
+        genTask.interruptedFrom = phase === "interrupted" ? "creating" : "";
         persistGenTaskNow();
         return localStorage.getItem(GEN_KEY);
     }
 
     it("restores an active mode-one planning snapshot as manually resumable interrupted state", () => {
-        const snapshot = persistModeOneSnapshot("planning");
+        const snapshot = persistModeOneSnapshot("creating");
         expect(snapshot).not.toBeNull();
 
         resetGenTask();
@@ -117,7 +117,7 @@ describe("generation state persistence", () => {
         expect(genTask).toMatchObject({
             taskId: "",
             phase: "interrupted",
-            interruptedFrom: "planning",
+            interruptedFrom: "creating",
             userPrompt: "创建一个唯一 Boss 插件",
             coreType: "PAPER",
             version: "1.21.4",
@@ -137,7 +137,7 @@ describe("generation state persistence", () => {
         expect(genTask).toMatchObject({
             taskId: "",
             phase: "interrupted",
-            interruptedFrom: "planning",
+            interruptedFrom: "creating",
             userPrompt: "创建一个唯一 Boss 插件",
             coreType: "PAPER",
             version: "1.21.4",
@@ -152,7 +152,7 @@ describe("generation state persistence", () => {
 
         genTask.taskId = "task-expiring";
         genTask.taskExpiresAt = taskExpiresAt;
-        genTask.phase = "planning";
+        genTask.phase = "creating";
         genTask.userPrompt = "创建一个唯一 Boss 插件";
         genTask.coreType = "PAPER";
         genTask.version = "1.21.4";
@@ -178,7 +178,7 @@ describe("generation state persistence", () => {
             taskId: "task-expiring",
             taskExpiresAt,
             phase: "interrupted",
-            interruptedFrom: "planning",
+            interruptedFrom: "creating",
         });
         expect(JSON.parse(localStorage.getItem(GEN_KEY) || "{}").taskExpiresAt).toBe(taskExpiresAt);
     });

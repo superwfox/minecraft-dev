@@ -13,8 +13,8 @@ export const SAFE_DEBUG_BYTE_LIMIT = 128 * 1024;
 export const SAFE_DEBUG_REDACTION_POLICY = "tahai.safe-debug.redaction.v1" as const;
 
 const GENERATION_PHASES = new Set<GenPhase>([
-    "idle", "planning", "clarifying", "grading", "confirming", "awaiting_input",
-    "generating", "verifying", "uploading", "building", "polling", "fixing", "done", "error",
+    "idle", "creating", "clarifying", "tree_planning", "tree_confirming", "awaiting_input",
+    "generating", "verifying", "uploading", "building", "fixing", "interrupted", "done", "error",
 ]);
 const LEARNING_STATUSES = new Set<LearningStatus>([
     "idle", "queued", "discovering", "fetching", "verifying", "ready",
@@ -64,14 +64,14 @@ export type SafeDebugSource = Pick<GenTask,
     | "phase"
     | "files"
     | "currentIndex"
-    | "plannerAttempt"
-    | "plannerReplan"
+    | "treeRound"
+    | "treeToolCallCount"
     | "debugLog"
     | "buildDiagnostics"
     | "learningProgress"
     | "learningDebugEvents"
     | "learningDebugDroppedEvents"
->;
+> & Partial<Pick<GenTask, "tree" | "treeSessionStatus" | "treeIssues" | "nodeChecks" | "pathChecks">>;
 
 export type SafeDebugLearningEvidenceInput = {
     searchedSources?: unknown;
@@ -144,8 +144,9 @@ export type SafeDebugExport = {
         taskId: string;
         phase: GenPhase;
         currentIndex: number;
-        plannerAttempt: number;
-        plannerReplan: boolean;
+        treeRound: number;
+        treeToolCallCount: number;
+        tree: { revision: number; status: string; modules: number; nodes: number; paths: number; session: string; issueCodes: string[]; contractPassed: number; contractTotal: number; verifiedPaths: number };
         files: {
             total: number;
             pending: number;
@@ -564,8 +565,17 @@ export function buildSafeDebugExport(
             taskId: safeOpaqueId(source.taskId),
             phase,
             currentIndex: safeCount(source.currentIndex),
-            plannerAttempt: safeCount(source.plannerAttempt),
-            plannerReplan: !!source.plannerReplan,
+            treeRound: safeCount(source.treeRound),
+            treeToolCallCount: safeCount(source.treeToolCallCount),
+            tree: {
+                revision: safeCount(source.tree?.revision), status: ["drafting", "ready", "locked"].includes(source.tree?.status) ? source.tree.status : "",
+                modules: safeCount(source.tree?.modules?.length), nodes: safeCount(source.tree?.nodes?.length), paths: safeCount(source.tree?.paths?.length),
+                session: ["continue", "learning", "ready", "failed"].includes(source.treeSessionStatus) ? source.treeSessionStatus : "",
+                issueCodes: (source.treeIssues ?? []).map(issue => issue.code).filter(code => /^[A-Z_]{1,64}$/.test(code)).slice(0, 64),
+                contractPassed: Object.values(source.nodeChecks ?? {}).reduce((sum, check) => sum + safeCount(check.passed), 0),
+                contractTotal: Object.values(source.nodeChecks ?? {}).reduce((sum, check) => sum + safeCount(check.total), 0),
+                verifiedPaths: Object.values(source.pathChecks ?? {}).filter(check => check.status === "passed").length,
+            },
             files: summarizeFiles(files),
             debug: generationDebug,
         },

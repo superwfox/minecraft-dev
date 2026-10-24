@@ -134,6 +134,24 @@ afterEach(() => {
 });
 
 describe("build request idempotency", () => {
+    it("rejects stale path review before uploading or clearing repair history", async () => {
+        prepareSuccessfulBuild();
+        currentRaw = JSON.stringify({
+            ...initialState(),
+            tree: { lockedRevision: 1, paths: [{ id: "save-home", title: "保存家园", nodes: [] }] },
+            pathReviews: { "save-home": { fingerprint: "old-source", passed: true } },
+        });
+        const response = await startBuild(context());
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "PATH_REVIEW_REQUIRED" });
+        expect(storedState().status).toBe("fixed");
+        expect(storedState().pendingFixSnapshot).toBeDefined();
+        expect(storedState().fixRepairAuthorization).toBeDefined();
+        expect(storedState().buildRequestId).toBeUndefined();
+        expect(triggerWorkflowMock).not.toHaveBeenCalled();
+        expect(getDefaultBranchShaMock).not.toHaveBeenCalled();
+    });
+
     it("replays a completed start request without triggering another workflow or resetting repair history", async () => {
         prepareSuccessfulBuild();
 

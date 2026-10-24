@@ -1,242 +1,68 @@
 # 系统架构
 
-踏海采用云原生架构，前后端分离，无需自建服务器，所有服务托管在 Cloudflare 和 GitHub 平台。
+应用由 Vue 3 前端、Cloudflare Pages Functions、D1/KV、模型服务和独立 GitHub Actions 构建仓组成。Pages 编排请求与状态，Java 编译在构建仓执行，游戏内实测交给用户。
 
-## 整体架构
+## 前端
 
-```mermaid
-graph TB
-    subgraph "用户端"
-        Browser[浏览器]
-    end
+- `ChatPage.vue`：需求输入、核心与版本选择、需求澄清、任务重置。
+- `GenerateProgress.vue`：正式生成页面，承载结构树、查证记录、流式输出、构建、下载、中断与错误信息。
+- `ProjectTree.vue`：Main 与并列的纵向行为路径；步骤使用 `ProjectTreePathNode.vue`，绑定实现文件并原位展开 `ProjectTreeNodeDetails.vue`。
+- `TreeGate.vue`：底部自然语言修正与确认锁定，不需要手动勾选范围。
+- `ProjectTreeStatusCard.vue`、`ToolActivityIsland.vue`、`ToolActivityStamp.vue`：真实工具活动驱动的状态卡与邮票动画。
+- `generateState.ts`：模块级 reactive/ref 状态与快照；`generateHandler.ts`：分阶段请求、Learning 续接、桶推进、恢复、审查与构建修复。
 
-    subgraph "Cloudflare Pages"
-        Frontend[Vue 3 前端]
-        Functions[Pages Functions]
-        D1[D1 生成任务库 DB]
-        KV[KV 用户额度与缓存 TASKS]
-    end
+前端快照不包含源码正文。刷新后进入中断态，由用户手动继续；源码通过 source 单文件接口懒加载。独立结构预览使用独立快照键，不覆盖正式任务。
 
-    subgraph "外部服务"
-        DeepSeek[DeepSeek API]
-        Maven[Maven 仓库<br/>PaperMC / SpigotMC]
-        GitHub[GitHub API]
-        Actions[GitHub Actions]
-    end
+## 服务端接口
 
-    Browser --> Frontend
-    Browser --> Functions
-    Functions --> D1
-    Functions --> KV
-    Functions --> DeepSeek
-    Functions --> Maven
-    Functions --> GitHub
-    GitHub --> Actions
-    Actions --> GitHub
-```
+| 接口 | 职责 |
+| --- | --- |
+| POST generate/task | 创建任务，加载所选 Skill 上下文 |
+| POST generate/clarify | 多轮需求确认，SSE 回传思考与问题 |
+| POST generate/tree | build/refine/continue 单轮规划，confirm 核对修订并锁定 |
+| GET generate/tree | 恢复结构、会话、检查结论、文件计划和桶位置 |
+| POST generate/bucket | 按持久化阶段生成、审查、返工、补缺及路径静态审查 |
+| POST generate/verify | 按树校验文件完整性，安排修补桶或路径审查桶 |
+| POST generate/build | 上传已保存文件，调度 GitHub Actions 编译 |
+| GET generate/status | 读取真实构建结果，返回路径检查状态 |
+| POST generate/fix | 读取编译诊断，按现有授权与 Learning 流程修复 |
+| GET generate/source | 当前任务的单文件或完整源码数据 |
+| GET generate/download | 构建产物下载，保留任务至过期 |
 
-## 三层架构
+旧 plan、grade、file 接口返回 410 FEATURE_DEPRECATED，原始实现归档在 `.deprecated/flowchart-planner/`。IDE 与追加需求历史代码保存在 `.deprecated/ide/`。
 
-### 1. 前端层（Vue 3 + Vite）
+## 同一份结构数据
 
-**职责**：用户交互、对话流程控制、生成流程编排、实时进度展示。
+`ProjectTree` 同时保存两种关联：
 
-**技术栈**：Vue 3 Composition API（`<script setup>`）、TypeScript、Vue Router、原生 Canvas（粒子背景）。
+- `modules`、`nodes`：Java 子包与实现文件，节点含稳定 id、职责、依赖、成员契约、GUI 配对及来源。
+- `paths`：需求行为路径。每条路径包含有序步骤，步骤通过 fileIds 绑定一个或多个文件。跨路径复用不产生重复文件。
 
-**核心文件**：
-```
-src/
-├── pages/
-│   ├── HomePage.vue          # 首页（粒子背景 + 打字机）
-│   └── ChatPage.vue          # 对话页（需求输入 + 澄清 + 生成进度）
-├── components/
-│   ├── ClarifyPanel.vue      # 多轮 TodoList 卡片
-│   ├── CurveChart.vue        # 纯 SVG 5 种增长曲线对比图
-│   ├── GenerateProgress.vue  # 按生成器类型分组的文件 + 行内 streaming
-│   └── StepRender / cubeBackground / glassCard / ...
-├── logic/
-│   ├── chatState.ts          # ChatBlock + draft 上下文模型
-│   ├── chatHandler.ts        # precheck → getInfo → getTodoList 编排
-│   ├── generateState.ts      # GenTask 响应式状态 + Clarify/ExtraPrompt resolver
-│   ├── generateHandler.ts    # 桶遍历 + SSE 路由 + replan/fix 回路
-│   └── sessionPersist.ts     # localStorage 持久化 + 中断态恢复
-├── api/deepseek.ts           # 前端调 /api/chat /api/stream 的薄封装 + 业务 preset
-└── router.ts                 # 路由（/ /chat /skills）
-```
+稳定映射为：步骤 fileIds → 文件 nodeId → nodePath → 文件计划与 generatedFiles.path → nodeChecks → 前端 GenFile。文件合并与删除同步维护步骤引用。
 
-### 2. 后端层（Cloudflare Pages Functions）
+Main、plugin.yml 和 pom.xml 属于系统节点。结构锁定时确定性派生项目元信息、Main 装配蓝图和依赖分桶，Main 单独放在最后一个生成桶。锁定后只允许受限的审查追加。
 
-**职责**：API 端点、AI 调用封装、任务状态管理、密钥安全保护、Maven 仓库代理。
+## 文件契约与路径验证
 
-**技术栈**：TypeScript、Cloudflare Workers Runtime、D1、KV。
+`projectTreeContract.ts` 为生成、审查和编译修复提供模块、职责、路径步骤、成员及依赖契约；确定性检查发现契约不满足时进入有限返工。动态补缺追加树节点、依赖和文件计划，并通过 tree_patch 更新页面。
 
-```
-functions/
-├── api/
-│   ├── chat.ts                # 非流式 LLM 代理（model 含 pro 时注入 thinking）
-│   ├── stream.ts              # SSE LLM 代理
-│   └── generate/
-│       ├── plan.ts            # Planner（双模式：建 task + 出蓝图/文件树/深度桶）
-│       ├── clarify.ts         # Clarifier（Reasoner SSE，多轮）
-│       ├── bucket.ts          # 单桶并发生成 + reChecker + 动态补缺（主路径）
-│       ├── file.ts            # 单文件生成（legacy，仅供补缺/重新规划）
-│       ├── verify.ts          # 文件完整性校验
-│       ├── build.ts           # 上传 GitHub + 触发 Actions
-│       ├── status.ts          # 轮询构建状态
-│       ├── fix.ts             # 编译失败的 Reasoner 修复回路（SSE）
-│       └── download.ts        # JAR 代理下载
-└── _lib/
-    ├── prompts.ts             # 所有 Agent 的角色 prompt + schema 契约
-    └── github.ts              # GitHub REST 工具集
-```
+`projectPathReview.ts` 在文件齐全后沿每条需求路径读取关联完整源码，模型检查注册、触发、调用、分支、状态和结果，返回逐步骤证据或问题。契约核对不会替代这项审查。
 
-### 3. 构建层（GitHub Actions）
+路径报告与源文件内容、路径绑定和锁定修订的 SHA-256 指纹关联。`build.ts` 把编译绑定到相同指纹及 Git 提交；`status.ts` 仅在真实工作流成功并取得产物后确认编译结果。
 
-**职责**：Maven 编译、JAR 打包、Artifact 上传。Worker 中无法运行 Maven，编译外包给独立仓库 `minecraft-dev-workflow` 的预置 `workflow_dispatch` workflow，接收 `branch` 与 `java_version` 参数。
+只有同一版本的路径静态审查与编译均通过，前端才播放方块粒子并把连线改成实线。编译修复使旧结论失效，重新构建前再次审查；静态失败会保留，编译成功不覆盖它。该验证不包含 Minecraft 服务端或模拟玩家操作。
 
-## 数据流
+## 状态、Learning 与费用
 
-### 对话与澄清
+生成任务与成本使用 D1，KV TASKS 继续用于用户、额度及缓存等。状态整体保存，不按节点逐条写库。树请求使用请求 ID、输入哈希、执行租约、取消处理、结果重放与原子计费；确认锁定不调用模型。
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant F as 前端
-    participant API as Pages Functions
-    participant D1 as D1
-    participant AI as DeepSeek
+Skill 在任务与结构规划中装载。适用的结构规划、Generator、Reviewer、Reworker、路径审查与 Fixer 可以调用 learn_public_api；前端推进 start/step/status，验证结果接回模型原始工具对话。学习结果继续受任务栅栏、授权、时限、取消和配额约束。
 
-    U->>F: 输入需求
-    F->>API: POST /api/chat（precheck, pro）
-    API->>AI: 完整性判定
-    AI-->>F: { complete } / { hint }
-    F->>API: POST /api/generate/plan（建 taskId）
-    API->>D1: 写入 clarifying 状态
-    loop 多轮澄清（≤5）
-        F->>API: POST /api/generate/clarify（SSE）
-        API->>AI: Reasoner 流式
-        AI-->>F: reasoning + delta + result{todos}
-        F->>F: ClarifyPanel 收集答案
-    end
-```
+## Pages 与下载约束
 
-### 规划 + 桶并发生成 + 构建
-
-```mermaid
-sequenceDiagram
-    participant F as 前端
-    participant API as Pages Functions
-    participant D1 as D1
-    participant AI as DeepSeek
-    participant GH as GitHub
-
-    F->>API: POST /api/generate/plan（带 taskId）
-    API->>AI: Planner（Reasoner）→ mainBlueprint + files[generatorType, depends]
-    API->>API: topoSort + computeDepths → 深度桶（MainGen 最后桶）
-    API->>D1: 保存 plan / buckets
-    API-->>F: plan + buckets
-
-    loop 每个深度桶（桶间串行）
-        F->>API: POST /api/generate/bucket（SSE）
-        Note over API: 桶内并发 GEN_CONCURRENCY 个文件
-        API->>AI: Generator（按类型 dispatchGen）
-        API->>AI: reChecker（含缺失类检测）
-        alt 缺失类
-            API->>AI: Dynamic Gen 补缺（≤3）
-        end
-        alt rework
-            API->>AI: 重写（≤5 次）
-        end
-        API->>AI: Summarizer 抽 FileSummary
-        API->>D1: 回填 generatedFiles
-        API-->>F: result{ completed, done, replan? }
-    end
-
-    F->>API: POST /api/generate/verify（缺失则补齐）
-    loop 构建 + 修复（≤2）
-        F->>API: POST /api/generate/build
-        API->>GH: 建分支 + 单 commit 上传 + 触发 workflow
-        loop 轮询
-            F->>API: GET /api/generate/status
-        end
-        alt 编译失败
-            F->>API: POST /api/generate/fix（SSE）
-            API->>GH: 拉日志 → 解析 [ERROR] → AI 整文件改写
-        end
-    end
-    F->>API: GET /api/generate/download → JAR
-```
-
-> IDE、可视化蓝图与追加需求功能已停用并归档到 `deprecated/ide/`。生成完成后可下载 JAR，或在进度面板查看、复制源码。
-
-### 模型主动 Learning
-
-在适用的 Planner、Generator、Reviewer、Reworker 与 Fixer 调用点，DeepSeek 请求会附带原生 `learn_public_api` function tool。DS 负责判断何时缺少精确的版本化公开 API 事实；Pages Functions 将工具参数转换为原子 `KnowledgeNeed`，校验公开命名空间或任务已声明的外部依赖，再由 `/api/learning/start|step|status` 完成资料发现、抓取和证据验证。完成后，原始 assistant `reasoning_content`、`tool_calls` 与验证结果会按 DeepSeek function-calling 协议回放，模型从中断点继续。
-
-Learning job 与模型请求 ID、需求指纹和任务状态栅栏绑定，结果写入 D1 公共知识缓存；模型取得验证结果后仍可按需继续调用工具，不设固定轮次上限，但首次调用后的连续对话仍受同一任务时限、取消、配额和授权边界约束。前端只负责跨 Worker 请求推进 job 和恢复连接，不判断是否需要学习。
-
-## 核心设计决策
-
-### 为什么用 Cloudflare Pages？
-
-| 对比项 | Cloudflare Pages | 传统服务器 |
-|--------|------------------|-----------|
-| 部署 | Git push 自动部署 | 手动配置 Nginx/PM2 |
-| 扩展 | 自动扩展 | 手动负载均衡 |
-| 成本 | 免费额度充足 | 购买 VPS |
-| CDN | 全球加速 | 单独配置 |
-| Functions | 内置 Serverless | 自建 API |
-
-### 为什么使用 D1 + KV 混合存储？
-
-生成任务快照和任务成本是整条流水线中最频繁的读写，存入 D1 并以主键索引访问；大 JSON 按块拆分，避免 D1 单行大小限制，逻辑 TTL 到期后由新任务创建时分批清理。用户资料、月额度、订单、赞助和 Skill 缓存仍保留在 KV，因为它们低频且天然适合键值读取。旧 KV 任务在首次访问时惰性迁移，D1 未绑定或暂时不可用时则安全回退 KV。
-
-### 为什么用 GitHub Actions 而非自建编译服务器？
-
-Workers 不支持运行 Maven；自建编译服务器需维护 Java 环境且有安全风险。GitHub Actions 零维护、隔离、免费，2-5 分钟延迟对「生成一个插件」的场景可接受。
-
-### 为什么前端驱动而非服务端编排？
-
-Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要数分钟。前端按阶段分别调用各端点：
-
-- 每个请求都在限制内完成（尤其桶请求一次性流式输出，避免长连接超时）；
-- 前端在每步之间更新 UI，实时看到进度；
-- 某步失败可重试（replan / fix），不必从头开始；
-- D1 任务状态机 + 前端 localStorage 保证刷新可恢复。
-
-## 安全设计
-
-所有敏感密钥存 Cloudflare 环境变量，前端无法访问：
-
-| 密钥 | 用途 |
-|------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API 认证 |
-| `GITHUB_PAT` | GitHub API（对 `minecraft-dev-workflow` 有 repo + workflow 权限）|
-
-- **GitHub 临时分支**：每次构建建 `build-<taskId>` 分支，成功后立即删除。
-
-## 性能优化
-
-### 前端
-
-1. **Canvas 粒子背景**：`requestAnimationFrame` 跟随刷新率，页面不可见时自动暂停，`scale=0` 跳过计算。
-2. **响应式状态**：无 Vuex/Pinia，直接 import 响应式对象。
-3. **代码分割**：Vue Router 懒加载（首页 / 对话页 / 技能页等分别打包）。
-
-### 后端
-
-1. **结构化 API 摘要**：Generator 传入已生成文件的 `FileSummary`（类名、方法签名、事件）而非完整代码，节省约 70% token。
-2. **桶内并发**：同深度文件经 `makeSemaphore(GEN_CONCURRENCY)` 并发生成（默认 2），桶间串行保证依赖顺序。
-3. **D1 状态机**：任务状态逻辑有效期 1 小时；每个 bucket 最多一次分块状态写，LLM usage 每请求最多一次原子成本累计。
-
-## 可扩展性
-
-- **新增 MC 核心**：在前端核心选项与 `prompts.ts` 的 Planner/Generator prompt 中扩展（路线图含 Forge / Fabric 的 Generator 子模板分支）。
-- **替换 AI 模型**：各端点的模型名集中在 `functions/api/**`，`chat.ts`/`stream.ts` 按模型名注入 thinking。
-- **新增 Generator 类型**：在 `prompts.ts` 的 `GENERATOR_TYPES` + `specializationBlock` + `checkerSpecializationBlock` 三处对应扩展。
-
-## 下一步
-
-- [AI 工作流](/features/ai-workflow)：深入理解各 Agent
-- [API 参考](/technical/api-reference)：完整端点文档
-- [开发部署](/technical/development)：本地开发与部署流程
+- 树规划每请求一轮模型调用，后续轮次由前端推进。
+- 生成与审查每请求每个目标最多一次模型调用，保留非流式模型响应解析；阶段进度落库后再继续。
+- Java 编译与 JAR 打包使用现有独立 GitHub Actions 仓，不在 Pages 启动 JVM。
+- 源码 ZIP 使用浏览器已有 JSZip 生成，包含 Maven 目录、代码、资源和记录路径、绑定、契约及结论的 PROJECT_TREE.md。
+- source 接口检查任务归属，仅文件齐全时提供整包；源码的 plugin.yml 与构建使用相同水印处理。
+- 不引入 R2、Durable Objects 或新的生产依赖。参考资料存放在 `ref/`。

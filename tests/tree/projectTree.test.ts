@@ -9,22 +9,23 @@ function fixture(): ProjectTree {
         call("set_project", { projectName: "HomePlus", summary: "家园", externalDeps: [] }),
         call("upsert_module", { id: "home", title: "家园", responsibility: "管理家园" }),
         call("upsert_node", node("HomeData")),
+        call("upsert_path", { id: "home-data", title: "家园数据", nodes: [{ id: "home-data-save", title: "保存家园", kind: "动作", summary: "保存玩家家园数据", fileIds: ["HomeData"] }] }),
     ]).tree;
 }
 describe("project tree tools and identity", () => {
     it("creates protected system nodes and requires a project and business file", () => {
         const tree = createInitialTree("Paper", "1.21.4");
         expect(tree.nodes.map(n => n.id)).toEqual(["pom.xml", "plugin.yml", "Main"]);
-        expect(validateProjectTree(tree).map(i => i.code)).toEqual(["PROJECT_NOT_SET", "NO_BUSINESS_NODE"]);
+        expect(validateProjectTree(tree).map(i => i.code)).toEqual(["PROJECT_NOT_SET", "NO_BUSINESS_NODE", "NO_BEHAVIOR_PATH"]);
         expect(javaVersionFor("1.21.4")).toBe("21"); expect(javaVersionFor("26.1")).toBe("25"); expect(javaVersionFor("1.12.2")).toBe("8");
         expect(javaVersionFor("1.19.4")).toBe("17"); expect(javaVersionFor("1.16.5")).toBe("11");
     });
-    it("maps stable IDs to subpackages and exposes precisely six tools", () => {
+    it("maps stable IDs to subpackages and exposes the behavior path tools", () => {
         const tree = fixture();
         expect(tree.project.packageName).toBe("com.tahai.homeplus");
         expect(nodePath(tree, tree.nodes.find(n => n.id === "HomeData")!)).toBe("src/main/java/com/tahai/homeplus/home/HomeData.java");
         expect(nodePath(tree, tree.nodes.find(n => n.id === "Main")!)).toBe("src/main/java/com/tahai/homeplus/Main.java");
-        expect(treeToolDefinitions().map(t => t.function.name)).toEqual(["set_project", "upsert_module", "upsert_node", "remove_items", "merge_nodes", "finish_tree"]);
+        expect(treeToolDefinitions().map(t => t.function.name)).toEqual(["set_project", "upsert_module", "upsert_node", "upsert_path", "remove_path", "remove_items", "merge_nodes", "finish_tree"]);
     });
     it("rejects invalid identities independently without mutating input", () => {
         const tree = fixture(), before = structuredClone(tree);

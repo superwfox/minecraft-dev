@@ -250,10 +250,6 @@ export interface LearningJobWork {
     compileEvidenceContext?: { contextHash: string; pomHash: string; runId: number; runAttempt: number; headSha: string };
     verificationAttemptsByNeed?: Record<string, number>;
     taskStateFence?: string;
-    plannerAuthorization?: {
-        chosenPathId: string;
-        needsFingerprint: string;
-    };
     fixAuthorization?: {
         runId: number;
         previousRunId: number;

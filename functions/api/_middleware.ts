@@ -48,7 +48,7 @@ function needsKvFallbackLimit(path: string): boolean {
         || path === "/api/auth/callback"
         || path === "/api/learning/start"
         || path === "/api/learning/step"
-        || ["plan", "clarify", "grade", "tree", "bucket", "file", "fix", "build", "task"]
+        || ["clarify", "tree", "bucket", "fix", "build", "task"]
             .some(name => path === `/api/generate/${name}`);
 }
 

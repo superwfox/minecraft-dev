@@ -1,3 +1,4 @@
+import type { PathCheck } from "./projectTree";
 import type { ProjectTreeView, TreeIssue, NodeContractCheck } from "./projectTree";
 import { reactive, ref, watch } from "vue";
 import {legacyActionMessageMeta, normalizeActionMessageMeta} from "./actionMessages";
@@ -426,6 +427,7 @@ export type GenTask = {
     treeCorrection: string;
     treeFocusIds: string[];
     nodeChecks: Record<string, NodeContractCheck>;
+    pathChecks: Record<string, PathCheck>;
     treeRound: number;
     treeToolCallCount: number;
     currentBucket: number;
@@ -483,6 +485,7 @@ export const genTask = reactive<GenTask>({
     treeCorrection: "",
     treeFocusIds: [],
     nodeChecks: {},
+    pathChecks: {},
     treeRound: 0,
     treeToolCallCount: 0,
     currentBucket: 0,
@@ -633,6 +636,7 @@ export function resetGenTask() {
     genTask.treeCorrection = "";
     genTask.treeFocusIds = [];
     genTask.nodeChecks = {};
+    genTask.pathChecks = {};
     genTask.treeRound = 0;
     genTask.treeToolCallCount = 0;
     genTask.currentBucket = 0;
@@ -710,7 +714,7 @@ export function setSuperConcurrency(on: boolean) {
 
 // ── 生成态持久化：刷新不丢会话（taskID 的职责是重建会话，而非刷新即失败）──
 // 快照存 localStorage（不含文件正文，保持体积小；正文在后端 KV，续跑时按需重取）。
-const GEN_KEY = "tahai-gentask";
+const GEN_KEY = typeof window !== "undefined" && window.location?.pathname === "/.tree-preview.html" ? "tahai-gentask-preview" : "tahai-gentask";
 export const GEN_TASK_TTL_MS = 3_600_000;
 let persistTimer: any = null;
 
@@ -737,6 +741,7 @@ function writeGenTaskSnapshot() {
             treeCorrection: genTask.treeCorrection,
             treeFocusIds: genTask.treeFocusIds,
             nodeChecks: genTask.nodeChecks,
+            pathChecks: genTask.pathChecks,
             treeRound: genTask.treeRound,
             treeToolCallCount: genTask.treeToolCallCount,
             currentBucket: genTask.currentBucket,
@@ -802,6 +807,8 @@ export function restoreGenTask(): boolean {
         if (!raw) return false;
         const s = JSON.parse(raw);
         if (s.schemaVersion !== 2) { resetGenTask(); return false; }
+        const phases: GenPhase[] = ["idle", "creating", "clarifying", "awaiting_input", "tree_planning", "tree_confirming", "generating", "verifying", "uploading", "building", "fixing", "interrupted", "done", "error"];
+        if (!phases.includes(s.phase) || s.phase === "interrupted" && s.interruptedFrom && !phases.includes(s.interruptedFrom)) { resetGenTask(); return false; }
         if (s.phase === "idle") return false;
         const canRestartModeOne = !s.taskId
             && typeof s.userPrompt === "string" && !!s.userPrompt
@@ -829,6 +836,7 @@ export function restoreGenTask(): boolean {
         genTask.treeCorrection = s.treeCorrection ?? "";
         genTask.treeFocusIds = s.treeFocusIds ?? [];
         genTask.nodeChecks = s.nodeChecks ?? {};
+        genTask.pathChecks = s.pathChecks ?? {};
         genTask.treeRound = s.treeRound ?? 0;
         genTask.treeToolCallCount = s.treeToolCallCount ?? 0;
         genTask.currentBucket = s.currentBucket ?? 0;
@@ -966,7 +974,7 @@ export function submitExtraPrompt(extra: string) {
     }
 }
 
-// ── 实现结构树确认门（confirming 阶段）：选路径 或 打回修正 ──
+// ── 结构确认与自然语言修正 ──
 export type TreeDecision = { action: "confirm" } | { action: "refine"; correction: string; focusIds: string[] };
 export const treeGateWaiting = ref(false);
 let treeResolver: ((decision: TreeDecision) => void) | null = null;
@@ -983,7 +991,7 @@ function resolveTree(decision: TreeDecision) {
 export function submitTreeConfirm() { resolveTree({ action: "confirm" }); }
 export function submitTreeRefine(correction: string, focusIds: string[]) { resolveTree({ action: "refine", correction, focusIds }); }
 
-/** ESC 中断：拒绝任何正在等待用户输入的 Promise（澄清答题 / 补充描述 / 路径确认） */
+/** ESC 中断：拒绝任何正在等待用户输入的 Promise（澄清答题 / 补充描述 / 结构确认） */
 export function cancelPendingInput() {
     clarifyWaiting.value = false;
     treeGateWaiting.value = false;

@@ -6,6 +6,7 @@ import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
 import { appendReviewNode, findNodeByPath, nodePath, planItemForNode, projectExternalDeps, publicTreeView, type TreeNode } from "../../_lib/projectTree";
 import { checkNodeContract, nodeGenerationContext, nodeReviewContext } from "../../_lib/projectTreeContract";
+import { parsePathReview, pathReviewPrompt, publicPathChecks } from "../../_lib/projectPathReview";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 import {
@@ -290,7 +291,7 @@ async function callAIStream(
     }
 }
 
-type FileGenerationStage = "generate" | "review" | "rework" | "dynamic_generate";
+type FileGenerationStage = "generate" | "review" | "rework" | "dynamic_generate" | "path_review";
 
 interface DynamicFileCheckpoint {
     nodeId?: string;
@@ -330,7 +331,7 @@ interface FileStageOutcome {
 }
 
 const FILE_GENERATION_STAGES = new Set<FileGenerationStage>([
-    "generate", "review", "rework", "dynamic_generate",
+    "generate", "review", "rework", "dynamic_generate", "path_review",
 ]);
 
 function initialCheckpoint(path: string): FileGenerationCheckpoint {
@@ -621,6 +622,25 @@ async function processFileStage(
     };
 
     dbg("stage:start", { path: filePath, stage: checkpoint.stage, round: checkpoint.reworkCount });
+    if (checkpoint.stage === "path_review") {
+        const path = state.tree.paths?.find(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint);
+        if (!path) return complete();
+        const prompt = pathReviewPrompt(state, path, state.userPrompt);
+        await writeSSE(writer, encoder, { type: "path_review", pathId: path.id, title: path.title, status: "started" }, operationAbort);
+        const call = await callWithLearningTool({
+            llm, state, checkpoint, system: prompt.system, user: prompt.user,
+            origin: "review", originKey: `path:${path.id}:${state.sourceFingerprint}`, targetPath: filePath,
+            coreType: ctx.coreType, mcVersion: ctx.version, resolveTool: resolveLearningTool, charge,
+            signal: operationAbort.signal,
+            invoke: (messages, tools) => callAI(llm, prompt.system, prompt.user, true, true, dbg, messages, tools, operationAbort.signal),
+        });
+        if (call.kind === "learning") return waitForLearning(call.request, "path_review");
+        const review = parsePathReview(call.result.content, state, path);
+        state.pathReviews ??= {};
+        state.pathReviews[path.id] = review;
+        await logGeneration(state, writer, encoder, operationAbort, `${review.passed ? "●" : "!"} 路径 ${path.title} 静态审查${review.passed ? "通过" : "未通过"}：${review.summary}`, filePath);
+        return state.tree.paths.some(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint) ? outcome("path_review") : complete();
+    }
     if (checkpoint.stage === "generate") {
         await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "generating" }, operationAbort);
         await logGeneration(state, writer, encoder, operationAbort, `▸ 正在生成 ${filePath}`, filePath);
@@ -1112,6 +1132,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const results = settled.filter((result): result is FileStageOutcome => !!result);
             const learningToolRequests = results.flatMap((result) => result.learningToolRequests);
             const upsertGeneratedFile = (file: GeneratedFileOutput & { reworkCount?: number }) => {
+                if (!state.generatedFiles.some((existing: { path: string; content: string }) => existing.path === file.path && existing.content === file.content)) state.sourceFingerprint = "";
                 const node = findNodeByPath(state.tree, file.path);
                 state.nodeChecks ??= {};
                 if (node) state.nodeChecks[node.id] = checkNodeContract(state.tree, node, file.content);
@@ -1210,6 +1231,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     status: primaryError.status,
                 } : {}),
                 active: results.map(result => ({ path: result.path, stage: result.nextStage })),
+                pathChecks: publicPathChecks(state),
                 completed,
                 newFiles,
                 learningToolRequests: learningToolRequests.map((request) => ({
