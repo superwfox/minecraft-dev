@@ -46,11 +46,11 @@
                   fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
           </svg>
 
-          <div class="sk-card-top">{{ c.kind === 'readme' ? '技能库' : (c.brief!.author || 'skill') }}</div>
+          <div data-font="dynamic" class="sk-card-top">{{ c.kind === 'readme' ? '技能库' : (c.brief!.author || 'skill') }}</div>
           <div class="sk-card-body">
-            <div class="sk-card-label">{{ c.label }}</div>
-            <div class="sk-card-desc">{{ c.sub }}</div>
-            <div v-if="c.tags.length" class="sk-card-tags">
+            <div data-font="dynamic" class="sk-card-label">{{ c.label }}</div>
+            <div data-font="dynamic" class="sk-card-desc">{{ c.sub }}</div>
+            <div v-if="c.tags.length" data-font="dynamic" class="sk-card-tags">
               <span v-for="t in c.tags" :key="t" class="sk-tag">{{ t }}</span>
             </div>
             <button v-if="c.kind === 'skill'" type="button" class="sk-card-action"
@@ -63,7 +63,7 @@
     <!-- 已选手牌（底部收集区，点击移出） -->
     <div class="sk-tray" v-show="chosen.length">
       <span class="sk-tray-label">我的手牌 · 点击移出</span>
-      <button v-for="b in chosen" :key="b.id" class="sk-chip" :style="chipStyle(b)" @click="unselect(b)">
+      <button v-for="b in chosen" :key="b.id" data-font="dynamic" class="sk-chip" :style="chipStyle(b)" @click="unselect(b)">
         {{ b.name || b.id }}
       </button>
     </div>
@@ -73,12 +73,12 @@
     <!-- README 弹层 -->
     <Teleport to="body">
       <div v-if="readmeOpen" class="sk-overlay" @click.self="readmeOpen = false">
-        <div class="sk-modal sk-readme glass2">
+        <div v-lattice:card class="sk-modal sk-readme glass2">
           <div class="sk-modal-head">
             <span class="sk-modal-title">技能库说明</span>
-            <button class="sk-x" @click="readmeOpen = false">✕</button>
+            <button v-lattice:icon class="sk-x" @click="readmeOpen = false">✕</button>
           </div>
-          <div class="sk-md" v-html="readmeHtml"></div>
+          <div data-font="dynamic" class="sk-md" v-html="readmeHtml"></div>
         </div>
       </div>
     </Teleport>
@@ -86,25 +86,25 @@
     <!-- skill 详情弹层 -->
     <Teleport to="body">
       <div v-if="detail" class="sk-overlay" @click.self="detail = null">
-        <div class="sk-modal sk-detail glass2">
+        <div v-lattice:card class="sk-modal sk-detail glass2">
           <div class="sk-modal-head">
-            <span class="sk-modal-title">{{ detail.name }}</span>
-            <button class="sk-x" @click="detail = null">✕</button>
+            <span data-font="dynamic" class="sk-modal-title">{{ detail.name }}</span>
+            <button v-lattice:icon class="sk-x" @click="detail = null">✕</button>
           </div>
-          <div class="sk-detail-meta">
+          <div data-font="dynamic" class="sk-detail-meta">
             <span v-if="detail.author">作者 {{ detail.author }}</span>
             <span v-if="detail.version">v{{ detail.version }}</span>
             <span v-if="detail.coreTypes && detail.coreTypes.length">{{ detail.coreTypes.join(' / ') }}</span>
           </div>
-          <p v-if="detail.capability" class="sk-detail-cap">{{ detail.capability }}</p>
-          <p v-if="detail.description" class="sk-detail-desc">{{ detail.description }}</p>
-          <div v-if="detail.tags && detail.tags.length" class="sk-card-tags">
+          <p v-if="detail.capability" data-font="dynamic" class="sk-detail-cap">{{ detail.capability }}</p>
+          <p v-if="detail.description" data-font="dynamic" class="sk-detail-desc">{{ detail.description }}</p>
+          <div v-if="detail.tags && detail.tags.length" data-font="dynamic" class="sk-card-tags">
             <span v-for="t in detail.tags" :key="t" class="sk-tag">{{ t }}</span>
           </div>
 
           <div v-if="detail.structure && detail.structure.length" class="sk-struct">
             <div class="sk-struct-title">文件结构</div>
-            <div v-for="(s, i) in detail.structure" :key="i" class="sk-struct-row">
+            <div v-for="(s, i) in detail.structure" :key="i" data-font="dynamic" class="sk-struct-row">
               <span class="sk-struct-kind" :class="s.kind">{{ s.kind }}</span>
               <span class="sk-struct-file">{{ s.file }}</span>
               <span v-if="s.fileGen" class="sk-struct-gen">{{ s.fileGen }}</span>
@@ -113,7 +113,7 @@
           </div>
 
           <div class="sk-detail-actions">
-            <button class="sk-btn" :class="isSelected(detail.id) ? 'ghost' : 'primary'" @click="toggleSkill(detail.id)">
+            <button v-lattice class="sk-btn" :class="isSelected(detail.id) ? 'ghost' : 'primary'" @click="toggleSkill(detail.id)">
               {{ isSelected(detail.id) ? '移出手牌' : '加入手牌' }}
             </button>
           </div>
@@ -417,6 +417,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+@layer legacy {
 .skills-page {
     position: fixed;
     inset: 0;
@@ -438,7 +439,7 @@ onUnmounted(() => {
     text-align: center;
     padding: 0 24px;
 }
-.sk-title { font-family: "MinecrafterAlt", "ZhuoKai", sans-serif; font-size: 22px; color: #d1c8b6; }
+.sk-title { font-family: var(--font-ui); font-size: 22px; color: #d1c8b6; }
 .sk-sub { font-size: 12px; color: rgba(209, 200, 182, 0.48); letter-spacing: 0.03em; }
 .sk-contrib { margin-top: 8px; pointer-events: auto; }
 .sk-search-wrap {
@@ -471,7 +472,7 @@ onUnmounted(() => {
     outline: 0;
     background: transparent;
     color: #f4f1ec;
-    font: 10px/1 "Monaco", monospace;
+    font: 10px/1 var(--font-ui);
     letter-spacing: 0.06em;
 }
 .sk-search::placeholder { color: rgba(209, 200, 182, 0.4); opacity: 1; }
@@ -480,7 +481,7 @@ onUnmounted(() => {
     padding-left: 8px;
     border-left: 1px solid rgba(209, 200, 182, 0.12);
     color: rgba(209, 200, 182, 0.46);
-    font: 10px/1 "Monaco", monospace;
+    font: 10px/1 var(--font-ui);
     text-align: right;
 }
 
@@ -548,7 +549,7 @@ onUnmounted(() => {
     border-radius: 4px;
     background: rgba(0, 0, 0, 0.08);
     color: inherit;
-    font-family: "MinecrafterAlt", sans-serif;
+    font-family: var(--font-ui);
     font-size: 9px;
     cursor: pointer;
     opacity: 0.72;
@@ -611,7 +612,7 @@ onUnmounted(() => {
     animation: skFade 0.2s ease-out;
 }
 @keyframes skFade { from { opacity: 0; } to { opacity: 1; } }
-.sk-modal { flex-direction: column; width: min(760px, 94vw); max-height: 100%; border-radius: 8px !important; padding: 0 !important; overflow: hidden; color: #d1c8b6; }
+.sk-modal { flex-direction: column; width: min(760px, 94vw); max-height: 100%; border-radius: 0; padding: 0 !important; overflow: hidden; color: #d1c8b6; }
 .sk-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid rgba(209, 200, 182, 0.12); flex-shrink: 0; }
 .sk-modal-title { font-size: 17px; font-weight: 700; color: #d5c9ac; }
 .sk-x { border: 1px solid rgba(209, 200, 182, 0.14); background: transparent; color: rgba(209, 200, 182, 0.6); font-size: 14px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
@@ -626,7 +627,7 @@ onUnmounted(() => {
 .sk-md :deep(ul), .sk-md :deep(ol) { margin: 8px 0 8px 22px; }
 .sk-md :deep(li) { margin: 3px 0; }
 .sk-md :deep(.md-oli) { margin: 4px 0; padding-left: 2px; }
-.sk-md :deep(code) { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 5px; font-family: "Monaco", monospace; font-size: 12px; }
+.sk-md :deep(code) { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 5px; font-family: var(--font-content); font-size: 12px; }
 .sk-md :deep(pre) { background: rgba(0, 0, 0, 0.35); padding: 12px 14px; border-radius: 10px; overflow: auto; margin: 10px 0; }
 .sk-md :deep(pre code) { background: none; padding: 0; font-size: 12px; line-height: 1.5; }
 .sk-md :deep(blockquote) { border-left: 3px solid rgba(245, 222, 179, 0.4); padding-left: 12px; margin: 8px 0; color: rgba(255, 245, 235, 0.7); }
@@ -647,7 +648,7 @@ onUnmounted(() => {
 .sk-struct-kind { font-size: 10px; padding: 1px 6px; border-radius: 6px; flex-shrink: 0; }
 .sk-struct-kind.gen { background: rgba(224, 149, 74, 0.25); color: #f0c79a; }
 .sk-struct-kind.ref { background: rgba(180, 166, 149, 0.22); color: #d8cdbd; }
-.sk-struct-file { font-family: "Monaco", monospace; color: #f3e7d4; }
+.sk-struct-file { font-family: var(--font-content); color: #f3e7d4; }
 .sk-struct-gen { color: #ffd98a; font-size: 11px; }
 .sk-struct-role { color: rgba(255, 245, 235, 0.55); }
 .sk-detail-actions { padding: 18px 20px 0; display: flex; justify-content: flex-end; }
@@ -670,5 +671,7 @@ onUnmounted(() => {
     }
     .sk-contrib { margin-top: 4px; }
     .sk-stage { top: 56%; }
+}
+
 }
 </style>

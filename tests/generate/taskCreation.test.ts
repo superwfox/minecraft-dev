@@ -19,13 +19,13 @@ vi.mock("../../functions/_lib/llm", async (importOriginal) => ({
     resolveLLM: resolveLLMMock,
 }));
 
-import { onRequestPost as plan } from "../../functions/api/generate/plan";
+import { onRequestPost as createTask } from "../../functions/api/generate/task";
 
 afterEach(() => {
     vi.clearAllMocks();
 });
 
-describe("Planner task creation cancellation", () => {
+describe("Task creation cancellation", () => {
     it("returns the absolute server task expiry with a new task", async () => {
         const now = 1_788_263_407_150;
         const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
@@ -45,8 +45,8 @@ describe("Planner task creation cancellation", () => {
             cleanupExpiredTasksMock.mockResolvedValue(undefined);
             const waits: Promise<unknown>[] = [];
 
-            const response = await plan({
-                request: new Request("https://example.test/api/generate/plan", {
+            const response = await createTask({
+                request: new Request("https://example.test/api/generate/task", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -108,7 +108,7 @@ describe("Planner task creation cancellation", () => {
         cleanupExpiredTasksMock.mockResolvedValue(undefined);
 
         const waits: Promise<unknown>[] = [];
-        const request = new Request("https://example.test/api/generate/plan", {
+        const request = new Request("https://example.test/api/generate/task", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -118,7 +118,7 @@ describe("Planner task creation cancellation", () => {
             }),
             signal: clientAbort.signal,
         });
-        const responsePromise = plan({
+        const responsePromise = createTask({
             request,
             data: { uid: "user-1" },
             env: {

@@ -17,36 +17,25 @@
     </div>
 
     <div class="right">
-      <span v-if="authState.loaded && !authState.user" class="link" @click="login">登录</span>
-      <a class="link" href="https://minecraft-dev.pages.dev/" rel="noreferrer">DOC</a>
-      <a
-        class="link qq-link"
-        href="https://qm.qq.com/q/l2PcLa4nqU"
-        target="_blank"
-        rel="noopener noreferrer"
-        title="qq"
-        aria-label="qq"
-      >
-        qq
-      </a>
+      <HeaderMenu/>
     </div>
   </GlassCard>
   <Teleport to="body">
     <div
       v-if="authState.loaded"
-      class="quota-pop"
+      v-lattice:card class="quota-pop"
       :class="{ open: quotaOpen }"
       :style="quotaPopStyle"
       @pointerenter="cancelQuotaClose"
       @pointerleave="scheduleQuotaClose"
     >
       <template v-if="authState.user">
-        <div class="quota-line">充值额度：<b>{{ authState.quota?.paidBalance ?? 0 }}</b></div>
-        <button class="recharge-btn" type="button" @click="openSponsor">充值额度</button>
+        <div class="quota-line">充值额度：<b data-font="dynamic">{{ authState.quota?.paidBalance ?? 0 }}</b></div>
+        <button v-lattice class="recharge-btn" type="button" @click="openSponsor">充值额度</button>
       </template>
       <template v-else>
         <div class="quota-line">账户</div>
-        <button class="recharge-btn quota-login" type="button" @click="login">登录后充值</button>
+        <button v-lattice class="recharge-btn quota-login" type="button" @click="login">登录后充值</button>
       </template>
 
       <div class="key-summary">
@@ -56,13 +45,13 @@
             {{ deepSeekKeyConfigured ? "已配置" : "未配置" }}
           </span>
         </div>
-        <div v-if="deepSeekKeyConfigured" class="key-summary-value">•••• {{ deepSeekKeyLastFour }}</div>
-        <button class="key-manage-btn" type="button" @click="openDeepSeekSettings">
+        <div v-if="deepSeekKeyConfigured" data-font="dynamic" class="key-summary-value">•••• {{ deepSeekKeyLastFour }}</div>
+        <button v-lattice class="key-manage-btn" type="button" @click="openDeepSeekSettings">
           {{ deepSeekKeyConfigured ? "管理 Key" : "填写 Key" }}
         </button>
       </div>
 
-      <div v-if="authState.user" class="quota-logout" @click="doLogout">退出登录</div>
+      <button v-lattice v-if="authState.user" type="button" class="quota-logout" @click="doLogout">退出登录</button>
     </div>
   </Teleport>
   <router-view/>
@@ -76,6 +65,7 @@ import GlassCard from "./components/glassCard.vue";
 import DeepSeekKeyModal from "./components/DeepSeekKeyModal.vue";
 import SponsorModal from "./components/sponsorModal.vue";
 import TopNav from "./components/TopNav.vue";
+import HeaderMenu from "./components/HeaderMenu.vue";
 import {useRouter} from "vue-router";
 import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
 import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
@@ -172,48 +162,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style>
-@font-face {
-  font-family: "Jiangxizhuokai";
-  src: url("/jiangxizhuokai_full.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-  /* 全量字体，不再限制码位范围（原 unicode-range 是 subset 时代的残留白名单） */
-}
-
-/* 兼容仍使用旧 family 名称的现有组件，二者复用同一字体资源。 */
-@font-face {
-  font-family: "ZhuoKai";
-  src: url("/jiangxizhuokai_full.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Monaco";
-  src: url("font/Monaco.ttf") format("truetype");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "MinecrafterAlt";
-  src: url("/minecrafter-alt.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "MinecrafterReg";
-  src: url("/minecrafter-reg.woff2") format("woff2");
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
+@layer legacy {
 * {
   margin: 0;
   padding: 0;
@@ -253,26 +202,15 @@ body,
 
 body {
   background: #000;
-  font-family: "Monaco", "Jiangxizhuokai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
 }
 
 .header-title {
-  font-family: "MinecrafterAlt", sans-serif;
+  font-family: var(--font-brand);
   font-size: 26px;
   letter-spacing: 0;
   color: #d1c8b6;
   cursor: pointer;
-}
-
-.right .link {
-  font-family: "MinecrafterAlt", sans-serif;
-  font-size: 14px;
-  letter-spacing: 0;
-}
-
-.qq-link {
-  display: inline-flex;
-  align-items: center;
 }
 
 /* logo 与 hover 浮层 */
@@ -486,5 +424,7 @@ body {
 }
 *::-webkit-scrollbar-corner {
   background: transparent;
+}
+
 }
 </style>

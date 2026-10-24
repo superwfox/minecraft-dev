@@ -26,17 +26,13 @@
         :style="outerStyle(c)"
       >
         <div
-          class="pc-card-inner"
+          v-lattice:card class="pc-card-inner"
           :class="{ active: activeId === c.id, grabbing: drag && drag.id === c.id }"
           :style="innerStyle(c)"
           @pointerdown="startDrag($event, c)"
         >
-          <svg class="pc-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet">
-            <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
-                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
-          </svg>
-          <div class="pc-card-title">{{ c.title }}</div>
-          <div class="pc-card-summary">{{ c.summary }}</div>
+          <div data-font="dynamic" class="pc-card-title">{{ c.title }}</div>
+          <div data-font="dynamic" class="pc-card-summary">{{ c.summary }}</div>
           <div class="pc-card-hint">Space 预览流程图</div>
         </div>
       </div>
@@ -44,20 +40,20 @@
 
     <!-- mermaid 全屏预览：可拖动 + 缩放 -->
     <div v-if="previewOpen" class="pc-preview" @click.self="closePreview">
-      <div class="pc-preview-box">
+      <div v-lattice:card class="pc-preview-box">
         <div class="pc-preview-head">
-          <span class="pc-preview-name">{{ previewTitle }}</span>
+          <span data-font="dynamic" class="pc-preview-name">{{ previewTitle }}</span>
           <div class="pc-preview-tools">
-            <button class="pc-tool" @click="zoomBtn(-1)" title="缩小">－</button>
-            <button class="pc-tool" @click="fitView" title="适应窗口">适应</button>
-            <button class="pc-tool" @click="zoomBtn(1)" title="放大">＋</button>
-            <button class="pc-tool close" @click="closePreview" title="关闭">×</button>
+            <button v-lattice:icon class="pc-tool" @click="zoomBtn(-1)" title="缩小">－</button>
+            <button v-lattice class="pc-tool" @click="fitView" title="适应窗口">适应</button>
+            <button v-lattice:icon class="pc-tool" @click="zoomBtn(1)" title="放大">＋</button>
+            <button v-lattice:icon class="pc-tool close" @click="closePreview" title="关闭">×</button>
           </div>
         </div>
         <div class="pc-preview-canvas" ref="pvCanvas"
              :class="{ grabbing: pvDragging }"
              @pointerdown="pvDown" @wheel.prevent="pvWheel">
-          <div class="pc-preview-content" :style="pvStyle" v-html="previewSvg"></div>
+          <div data-font="dynamic" class="pc-preview-content" :style="pvStyle" v-html="previewSvg"></div>
         </div>
         <div class="pc-preview-hint">双指/滚轮平移 · 捏合或 Ctrl/⌘ + 滚轮缩放 · 按住拖动平移 · Esc 关闭</div>
       </div>
@@ -71,16 +67,16 @@
              @compositionend="onImeCompositionEnd"
              @keydown.enter="onRejectEnter"
              @keydown.esc.stop.prevent="rejectOpen = false"/>
-      <button class="pc-btn primary" :disabled="!rejectText.trim()" @click="confirmReject">重画</button>
-      <button class="pc-btn ghost" @click="rejectOpen = false">取消</button>
+      <button v-lattice class="pc-btn primary" :disabled="!rejectText.trim()" @click="confirmReject">重画</button>
+      <button v-lattice class="pc-btn ghost" @click="rejectOpen = false">取消</button>
     </div>
 
     <div class="pc-foot">
-      <button class="pc-nav" @click="focusPrev" :disabled="!cards.length" title="上一张 (←)">‹</button>
-      <button class="pc-btn ghost" @click="activeCard && openPreview(activeCard)" :disabled="!activeCard">预览流程图</button>
+      <button v-lattice:icon class="pc-nav" @click="focusPrev" :disabled="!cards.length" title="上一张 (←)">‹</button>
+      <button v-lattice class="pc-btn ghost" @click="activeCard && openPreview(activeCard)" :disabled="!activeCard">预览流程图</button>
       <span class="pc-foot-spacer"></span>
-      <button class="pc-btn ghost" @click="openReject">都不符合 · 修正重画</button>
-      <button class="pc-nav" @click="focusNext" :disabled="!cards.length" title="下一张 (→)">›</button>
+      <button v-lattice class="pc-btn ghost" @click="openReject">都不符合 · 修正重画</button>
+      <button v-lattice:icon class="pc-nav" @click="focusNext" :disabled="!cards.length" title="下一张 (→)">›</button>
     </div>
   </div>
 </template>
@@ -174,10 +170,8 @@ function outerStyle(card: CardKind) {
 }
 function innerStyle(card: CardKind) {
     const g = geom(card); if (!g) return {};
-    return { background: palette[card.color].bg, color: palette[card.color].text,
-        transform: `rotate(${g.rot}deg) scale(${g.scale})` };
+    return { transform: `rotate(${g.rot}deg) scale(${g.scale})` };
 }
-const dotColor = (card: CardKind) => palette[card.color].dot;
 
 // ── 悬停 / 方向键聚焦 ──
 function onMove(e: MouseEvent) {
@@ -252,6 +246,7 @@ async function ensureMermaid() {
     const m = (await import("mermaid")).default;
     m.initialize({
         startOnLoad: false, theme: "dark", securityLevel: "strict",
+        fontFamily: '"DingTalk JinBuTi", "Microsoft YaHei", sans-serif',
         // Mermaid 11 的通用节点渲染器读取顶层配置；否则会生成随后被安全清理移除的 foreignObject 标签。
         htmlLabels: false,
         flowchart: { useMaxWidth: false, htmlLabels: false, curve: "basis" },
@@ -294,6 +289,7 @@ async function openPreview(card: CardKind | null) {
     previewOpen.value = true;
     try {
         const m = await ensureMermaid();
+        await document.fonts.load('16px "DingTalk JinBuTi"').catch(() => []);
         const { svg } = await m.render("pcmmd-" + Math.random().toString(36).slice(2), card.mermaid);
         if (previewOpen.value) {
             previewSvg.value = sanitizeMermaidSvg(svg);
@@ -484,6 +480,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+@layer legacy {
 .path-cards {
     --pc-safe-top: 118px;
     --pc-stage-shift: 28px;
@@ -496,7 +493,7 @@ onUnmounted(() => {
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
     animation: pcFadeIn 0.3s ease-out;
-    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-family: var(--font-ui);
 }
 @keyframes pcFadeIn { from { opacity: 0; } to { opacity: 1; } }
 
@@ -557,7 +554,6 @@ onUnmounted(() => {
 }
 .pc-card-inner.active { box-shadow: 0 0 0 1px rgba(198, 176, 125, .5), 0 18px 46px rgba(0, 0, 0, .48); }
 .pc-card-inner.grabbing { cursor: grabbing; box-shadow: 0 0 0 1px rgba(198, 176, 125, .7), 0 24px 60px rgba(0, 0, 0, .58); }
-.pc-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pc-card-title { position: relative; z-index: 2; font-size: 17px; font-weight: 800; line-height: 1.3; }
 .pc-card-summary {
     position: relative; z-index: 2; font-size: 12.5px; line-height: 1.5; font-weight: 400;
@@ -614,7 +610,7 @@ onUnmounted(() => {
 }
 .pc-preview-content :deep(svg) { max-width: none !important; height: auto; display: block; }
 .pc-preview-content :deep(svg text) {
-    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+    font-family: var(--font-content) !important;
 }
 /* 强制节点文字白色 + 黑描边，保证 AI 给节点上的任何高亮色背景上都可读 */
 .pc-preview-content :deep(.nodeLabel),
@@ -626,7 +622,7 @@ onUnmounted(() => {
 }
 .pc-preview-content :deep(.pc-preview-loading) { color: rgba(255, 245, 235, 0.5); padding: 20px; }
 .pc-preview-content :deep(.pc-preview-err) {
-    color: #ff9a8a; font-size: 12px; white-space: pre-wrap; font-family: monospace; padding: 20px;
+    color: #ff9a8a; font-size: 12px; white-space: pre-wrap; font-family: var(--font-content); padding: 20px;
 }
 .pc-preview-hint {
     padding: 7px 0; text-align: center;
@@ -693,5 +689,7 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
     .pc-card, .pc-card-inner, .pc-hint { transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear; }
+}
+
 }
 </style>

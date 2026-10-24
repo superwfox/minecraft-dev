@@ -72,16 +72,16 @@ minecraft-dev/
 │   ├── pages/                # 页面组件（HomePage / ChatPage）
 │   ├── components/           # 通用组件
 │   ├── logic/                # 业务逻辑（chat / generate / session）
-│   ├── ide/                  # 浏览器内 IDE 模块
 │   ├── api/deepseek.ts       # 前端 LLM 调用封装
-│   └── router.ts             # 路由配置（/ /chat /ide/:taskId?）
+│   └── router.ts             # 路由配置（/ /chat /skills）
 ├── functions/                # Cloudflare Functions
-│   ├── api/                  # API 端点（generate / chat / stream / maven）
+│   ├── api/                  # API 端点（generate / learning / chat / stream）
 │   └── _lib/                 # 共享库（prompts / github）
+├── deprecated/               # 已停用功能归档，不参与应用构建
 ├── public/                   # 静态资源
 ├── docs/                     # 文档（VitePress）
 ├── package.json              # 依赖与脚本
-├── vite.config.js            # Vite 配置（含 Monaco 插件）
+├── vite.config.js            # Vite 配置
 └── .dev.vars                 # 本地环境变量（不提交）
 ```
 

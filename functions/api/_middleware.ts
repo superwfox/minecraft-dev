@@ -48,7 +48,7 @@ function needsKvFallbackLimit(path: string): boolean {
         || path === "/api/auth/callback"
         || path === "/api/learning/start"
         || path === "/api/learning/step"
-        || ["plan", "clarify", "grade", "bucket", "file", "fix", "build", "task"]
+        || ["plan", "clarify", "grade", "tree", "bucket", "file", "fix", "build", "task"]
             .some(name => path === `/api/generate/${name}`);
 }
 
@@ -122,11 +122,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
 
     // 4) 共享 DeepSeek 新建任务额度：仅在 task 创建成功后扣 1 件；DeepSeek BYOK 不检查或预扣。
-    if (session && path === "/api/generate/plan") {
-        // 仅在「新建任务」(plan mode-1，body 无 taskId) 时校验并扣额度
-        let body: any = {};
-        try { body = await request.clone().json(); } catch { /* ignore */ }
-        if (!body.taskId && !isDeepSeekByokRequest(request)) {
+    if (session && path === "/api/generate/task" && request.method === "POST") {
+        // 仅新建任务成功后扣费。
+        if (!isDeepSeekByokRequest(request)) {
             const q = await getQuota(env.TASKS, session.uid);
             if (q.remaining <= 0) {
                 return json({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }, 402);

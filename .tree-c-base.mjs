@@ -1,0 +1,20 @@
+import fs from 'node:fs';
+const read = p => fs.readFileSync(p, 'utf8');
+const write = (p, s) => fs.writeFileSync(p, s);
+function between(s, a, b, replacement) { const start = s.indexOf(a), end = s.indexOf(b, start); if (start < 0 || end < 0) throw new Error(a); return s.slice(0, start) + replacement + s.slice(end); }
+const plan = read('functions/api/generate/plan.ts');
+let stream = plan.slice(plan.indexOf('interface PlannerStreamCallbacks'), plan.indexOf('function plannerResultPayload'));
+stream = stream.replaceAll('PlannerStream', 'ChatStream').replaceAll('plannerStreamText', 'streamText').replaceAll('consumePlannerChatStream', 'consumeChatStream').replace('async function consumeChatStream', 'export async function consumeChatStream').replace('    onActivity?: () => void;', '    onActivity?: () => void;\n    onToolCall?: (index: number, name: string) => void | Promise<void>;');
+stream = stream.replace('    const toolCalls = new Map<number, ToolCall>();', '    const toolCalls = new Map<number, ToolCall>();\n    const announced = new Set<number>();');
+stream = stream.replace('            toolCalls.set(index, current);', '            toolCalls.set(index, current);\n            if (current.function.name && !announced.has(index)) { announced.add(index); await callbacks.onToolCall?.(index, current.function.name); }');
+write('functions/_lib/modelStream.ts', 'import { assertOpenAIResponse, OpenAIStreamProtocolError, type OpenAIStreamResult } from "./openAIStream";\nimport type { UsageBreakdown } from "./quota";\nimport type { ModelChatMessage } from "./learning/tool";\n\n' + stream);
+let operations = read('functions/_lib/preflightOperations.ts').replace('"clarify" | "grade"', '"clarify" | "grade" | "tree"').replace('const prefix = stage === "clarify" ? "clarify" : "grade";', 'const prefix = stage;'); write('functions/_lib/preflightOperations.ts', operations);
+let tool = read('functions/_lib/learning/tool.ts').replace('"planner" | "generate"', '"tree" | "planner" | "generate"').replace('["planner", "generate",', '["tree", "planner", "generate",'); write('functions/_lib/learning/tool.ts', tool);
+let prompts = read('functions/_lib/prompts.ts');
+const principles = prompts.slice(prompts.indexOf('极简原则（严格遵守）：'), prompts.indexOf('${gradeBlock}')).replaceAll('files[].role', '节点职责').replaceAll('files[].path', '节点路径').replaceAll('pairPath', 'pairId');
+const axes = ['persistent', 'task', 'state_shared', 'external', 'gui_session'].map(axis => prompts.match(new RegExp('        ' + axis + ': "(.*)",'))?.[1]).filter(Boolean).join('\n');
+prompts = prompts.replaceAll('复杂度分级', '结构规划');
+const script = read('.tree-phase-c.mjs');
+let promptBody = script.slice(script.indexOf('export interface TreeBuilderInput'), script.lastIndexOf('`.replaceAll'));
+promptBody = promptBody.replace('__PRINCIPLES__', principles).replace('__AXES__', axes);
+write('functions/_lib/prompts.ts', prompts + '\n' + promptBody);

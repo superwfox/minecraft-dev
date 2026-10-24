@@ -8,7 +8,6 @@
 graph TB
     subgraph "用户端"
         Browser[浏览器]
-        IDE[浏览器内 IDE<br/>Monaco + 字节码补全]
     end
 
     subgraph "Cloudflare Pages"
@@ -27,7 +26,6 @@ graph TB
 
     Browser --> Frontend
     Browser --> Functions
-    IDE --> Functions
     Functions --> D1
     Functions --> KV
     Functions --> DeepSeek
@@ -41,9 +39,9 @@ graph TB
 
 ### 1. 前端层（Vue 3 + Vite）
 
-**职责**：用户交互、对话流程控制、生成流程编排、实时进度展示、浏览器内 IDE。
+**职责**：用户交互、对话流程控制、生成流程编排、实时进度展示。
 
-**技术栈**：Vue 3 Composition API（`<script setup>`）、TypeScript、Vue Router、原生 Canvas（粒子背景）、Monaco Editor（IDE）、IndexedDB（IDE 持久化）。
+**技术栈**：Vue 3 Composition API（`<script setup>`）、TypeScript、Vue Router、原生 Canvas（粒子背景）。
 
 **核心文件**：
 ```
@@ -62,12 +60,8 @@ src/
 │   ├── generateState.ts      # GenTask 响应式状态 + Clarify/ExtraPrompt resolver
 │   ├── generateHandler.ts    # 桶遍历 + SSE 路由 + replan/fix 回路
 │   └── sessionPersist.ts     # localStorage 持久化 + 中断态恢复
-├── ide/                      # 浏览器内 IDE 模块（见「浏览器 IDE」）
-│   ├── pages/IDEPage.vue
-│   ├── components/            # EditorPanel / FileTree / TabBar / BottomChatDock / SelectionPopup
-│   └── composables/           # useIDEStore / useJarSymbols / useBukkitDict / usePomParser / useIDEChat / useMonacoTheme
 ├── api/deepseek.ts           # 前端调 /api/chat /api/stream 的薄封装 + 业务 preset
-└── router.ts                 # 路由（/ /chat /ide/:taskId?）
+└── router.ts                 # 路由（/ /chat /skills）
 ```
 
 ### 2. 后端层（Cloudflare Pages Functions）
@@ -81,7 +75,6 @@ functions/
 ├── api/
 │   ├── chat.ts                # 非流式 LLM 代理（model 含 pro 时注入 thinking）
 │   ├── stream.ts              # SSE LLM 代理
-│   ├── maven/jar.ts           # Maven 仓库 JAR / metadata 代理（IDE 补全用）
 │   └── generate/
 │       ├── plan.ts            # Planner（双模式：建 task + 出蓝图/文件树/深度桶）
 │       ├── clarify.ts         # Clarifier（Reasoner SSE，多轮）
@@ -174,7 +167,7 @@ sequenceDiagram
     F->>API: GET /api/generate/download → JAR
 ```
 
-> 生成完成后，用户也可进入 `/ide/:taskId` 在浏览器内编辑文件，再点「编译」跳回 `/chat` 重新构建。
+> IDE、可视化蓝图与追加需求功能已停用并归档到 `deprecated/ide/`。生成完成后可下载 JAR，或在进度面板查看、复制源码。
 
 ### 模型主动 Learning
 
@@ -220,7 +213,6 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 | `DEEPSEEK_API_KEY` | DeepSeek API 认证 |
 | `GITHUB_PAT` | GitHub API（对 `minecraft-dev-workflow` 有 repo + workflow 权限）|
 
-- **Maven 代理白名单**：`maven/jar.ts` 仅允许 PaperMC / SpigotMC / Maven Central，防止 Worker 被当作任意 GET 代理。
 - **GitHub 临时分支**：每次构建建 `build-<taskId>` 分支，成功后立即删除。
 
 ## 性能优化
@@ -229,8 +221,7 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 
 1. **Canvas 粒子背景**：`requestAnimationFrame` 跟随刷新率，页面不可见时自动暂停，`scale=0` 跳过计算。
 2. **响应式状态**：无 Vuex/Pinia，直接 import 响应式对象。
-3. **代码分割**：Vue Router 懒加载（首页 / 对话页 / IDE 分别打包）。
-4. **IDE 字节码缓存**：解析过的 JAR 符号表缓存进 IndexedDB，同坐标秒开。
+3. **代码分割**：Vue Router 懒加载（首页 / 对话页 / 技能页等分别打包）。
 
 ### 后端
 
@@ -247,6 +238,5 @@ Cloudflare Pages Functions 单请求有 CPU/时长上限，而整个流程需要
 ## 下一步
 
 - [AI 工作流](/features/ai-workflow)：深入理解各 Agent
-- [浏览器 IDE](/features/ide)：IDE 模块实现
 - [API 参考](/technical/api-reference)：完整端点文档
 - [开发部署](/technical/development)：本地开发与部署流程

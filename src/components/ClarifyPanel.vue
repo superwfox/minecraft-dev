@@ -1,39 +1,37 @@
 <template>
-  <div class="clarify-wrap glass2">
+  <div v-lattice:card class="clarify-wrap glass2">
     <div class="clarify-header">
       <span class="clarify-progress">
         {{ safeIndex + 1 }} / {{ genTask.clarifyTodos.length }}
       </span>
       <span class="clarify-round">澄清第 {{ genTask.clarifyRound }} 轮</span>
       <div class="clarify-nav">
-        <span class="nav-arrow" :class="{ disabled: safeIndex === 0 }" @click="prev">‹</span>
-        <span class="nav-arrow"
-              :class="{ disabled: safeIndex >= genTask.clarifyTodos.length - 1 }"
-              @click="next">›</span>
+        <button v-lattice:icon type="button" class="nav-arrow" :disabled="safeIndex === 0" @click="prev">‹</button>
+        <button v-lattice:icon type="button" class="nav-arrow" :disabled="safeIndex >= genTask.clarifyTodos.length - 1" @click="next">›</button>
       </div>
     </div>
 
-    <div v-if="current" class="clarify-card">
-      <div class="clarify-q">{{ current.question }}</div>
+    <div v-if="current" v-lattice:two class="clarify-card">
+      <div data-font="dynamic" class="clarify-q">{{ current.question }}</div>
 
       <div class="clarify-options">
         <div v-for="opt in current.options" :key="opt" class="clarify-opt-wrap">
-          <span class="option-pill"
+          <button v-lattice type="button" data-font="dynamic" class="option-pill"
                 :class="{ active: isSelected(current, opt) }"
                 @click="toggle(current, opt)">
             {{ opt }}
-          </span>
+          </button>
           <CurveChart v-if="current.chart === 'multi'"
                       :type="(opt as any)"
                       class="clarify-chart"/>
         </div>
 
-        <span v-if="current.allowCustom"
+        <button v-lattice type="button" v-if="current.allowCustom"
               class="option-pill"
               :class="{ active: isCustomActive(current) }"
               @click="activateCustom(current)">
           其他…
-        </span>
+        </button>
       </div>
 
       <input v-if="customActive[current.id] !== undefined"
@@ -50,7 +48,7 @@
       <span class="answered-count">
         已完成 {{ answeredCount }} / {{ genTask.clarifyTodos.length }}
       </span>
-      <button class="floor-btn" :disabled="!allAnswered" @click="confirm">
+      <button v-lattice class="floor-btn" :disabled="!allAnswered" @click="confirm">
         确认并进入下一步
       </button>
     </div>
@@ -164,12 +162,13 @@ function confirm() {
 </script>
 
 <style scoped>
+@layer legacy {
 .clarify-wrap {
     display: flex;
     flex-direction: column;
     gap: 14px;
     padding: 18px;
-    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-family: var(--font-ui);
 }
 .clarify-header {
     display: flex;
@@ -305,5 +304,7 @@ function confirm() {
 .floor-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+}
+
 }
 </style>

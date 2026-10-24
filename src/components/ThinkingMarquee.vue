@@ -89,7 +89,7 @@ onUnmounted(() => {
 
 .tm-word {
   position: relative;
-  font-family: "MinecrafterReg", "Monaco", "Menlo", monospace;
+  font-family: var(--font-ui);
   font-weight: 500;
   font-size: 15px;
   letter-spacing: 0;

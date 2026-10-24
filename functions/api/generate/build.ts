@@ -1,3 +1,4 @@
+import { injectTahaiAuthor } from "../../_lib/pluginWatermark";
 import {
     getDefaultBranchSha,
     createBranch,
@@ -14,7 +15,6 @@ import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import {
     acquireTaskOperationLease,
     getOwnedTask,
-    putTaskState,
     putTaskWithOperationLease,
     releaseTaskOperationLease,
     renewTaskOperationLease,
@@ -29,40 +29,9 @@ interface Env {
     TASKS: KVNamespace;
 }
 
-const TAHAI_TAG = "§eTAHAI§r";
 const BUILD_OPERATION_LEASE_MS = 600_000;
 const BUILD_RUN_LOOKBACK_MS = 5_000;
 const BUILD_REQUEST_ID = /^build_[a-f0-9]{32}$/;
-
-/**
- * 在 plugin.yml 的 author 字段后追加 TAHAI 水印。幂等：已含 TAHAI 直接返回。
- * 注意：只改上传到 GitHub 的内容，不改任务 state.generatedFiles[*].content，
- * 这样用户在 IDE 文件树里看到的还是干净版本。
- */
-function injectTahaiAuthor(content: string): string {
-    if (content.includes("TAHAI")) return content;
-
-    // 单值 author: <name>
-    if (/^author\s*:/m.test(content)) {
-        return content.replace(/^author\s*:\s*(.*)$/m, (_, val) => {
-            const inner = String(val).trim().replace(/^["']|["']$/g, "");
-            return inner ? `author: "${inner} ${TAHAI_TAG}"` : `author: "${TAHAI_TAG}"`;
-        });
-    }
-    // 数组 authors: [a, b]
-    if (/^authors\s*:\s*\[/m.test(content)) {
-        return content.replace(/^authors\s*:\s*\[(.*?)\]/m, (_, list) => {
-            const trimmed = String(list).trim();
-            return `authors: [${trimmed}${trimmed ? ", " : ""}"${TAHAI_TAG}"]`;
-        });
-    }
-    // block 风格 authors: 然后下方列表
-    if (/^authors\s*:\s*$/m.test(content)) {
-        return content.replace(/^authors\s*:\s*$/m, `authors:\n  - "${TAHAI_TAG}"`);
-    }
-    // 完全没有
-    return content.trimEnd() + `\nauthor: "${TAHAI_TAG}"\n`;
-}
 
 function json(obj: any, status: number): Response {
     return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
@@ -120,8 +89,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let body: any = {};
     try { body = await context.request.json(); } catch { /* validated below */ }
     const taskId = typeof body.taskId === "string" ? body.taskId : "";
-    const incomingFiles = body.files;
-    const meta = body.meta;
+    if (body.files !== undefined || body.meta !== undefined) {
+        return json({ error: "本地文件重建功能已停用", code: "FEATURE_DEPRECATED" }, 410);
+    }
     const buildRequestId = typeof body.buildRequestId === "string"
         ? body.buildRequestId.trim().toLowerCase()
         : "";
@@ -135,55 +105,16 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const uid: string = (context.data as any)?.uid || "";
     if (!uid) return json({ error: "Unauthorized" }, 401);
 
-    const hasIncoming = Array.isArray(incomingFiles) && incomingFiles.length > 0;
-    let raw = await getOwnedTask(context.env, taskId, uid);
-    let rebuiltExpiredTask = false;
-    let state: any;
-    if (raw) {
-        state = JSON.parse(raw);
-    } else if (hasIncoming) {
-        rebuiltExpiredTask = true;
-        state = {
-            taskId,
-            uid,
-            status: "uploading",
-            javaVersion: meta?.javaVersion || "21",
-            projectName: meta?.projectName || "",
-            packageName: meta?.packageName || "",
-            coreType: meta?.coreType || "Paper",
-            version: meta?.version || "1.21",
-            generatedFiles: [],
-            logs: ["▸ 服务端任务已过期，使用 IDE 本地内容重建构建"],
-        };
-        try {
-            await putTaskState(context.env, taskId, state, 3600, uid);
-            raw = await getOwnedTask(context.env, taskId, uid);
-            if (!raw) return json({ error: "Task state unavailable", code: "TASK_STATE_UNAVAILABLE" }, 503);
-            state = JSON.parse(raw);
-        } catch (error) {
-            if (error instanceof TaskOwnershipError) {
-                const latestRaw = await getOwnedTask(context.env, taskId, uid);
-                if (latestRaw) {
-                    const replay = replayBuildResponse(JSON.parse(latestRaw), buildRequestId);
-                    if (replay) return replay;
-                }
-                return buildInProgress();
-            }
-            throw error;
-        }
-    } else {
-        return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
-    }
+    const raw = await getOwnedTask(context.env, taskId, uid);
+    if (!raw) return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
+    let state = JSON.parse(raw);
 
     state.uid = uid;
     if (!Array.isArray(state.logs)) state.logs = [];
     const immediateReplay = replayBuildResponse(state, buildRequestId);
     if (immediateReplay && state.status !== "uploading") return immediateReplay;
     if (immediateReplay && hasActiveTaskOperation(state)) return buildReconciliationPending();
-    const unclaimedExpiredUpload = state.status === "uploading"
-        && !state.buildRequestId
-        && hasIncoming;
-    if (!immediateReplay && !unclaimedExpiredUpload && (
+    if (!immediateReplay && (
         hasActiveTaskOperation(state)
         || state.status === "uploading"
         || state.status === "building"
@@ -273,10 +204,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             && typeof state.buildRunStartedAfter === "string"
             && !!state.buildRunStartedAfter;
         if (latestReplay && !resumingUpload) return latestReplay;
-        if (!latestReplay && !(
-            rebuiltExpiredTask
-            || (state.status === "uploading" && !state.buildRequestId && hasIncoming)
-        ) && (
+        if (!latestReplay && (
             state.status === "uploading"
             || state.status === "building"
             || state.status === "repairing"
@@ -294,31 +222,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         userBuildUsed = buildLimit.used;
 
         if (!resumingUpload) {
-            // 从 IDE 触发的构建：用浏览器侧最新内容完整覆盖任务里的 generatedFiles。
-            if (hasIncoming) {
-                const prevByPath = new Map<string, any>(
-                    (state.generatedFiles || []).map((file: any) => [file.path, file]),
-                );
-                state.generatedFiles = incomingFiles.map((file: any) => {
-                    const prev = prevByPath.get(file.path);
-                    const content = String(file.content ?? "");
-                    return {
-                        path: file.path,
-                        content,
-                        apiSummary: prev?.content === content ? (prev.apiSummary ?? null) : null,
-                    };
-                });
-                if (meta?.javaVersion) state.javaVersion = meta.javaVersion;
-                if (meta?.projectName) state.projectName = meta.projectName;
-                if (meta?.packageName) state.packageName = meta.packageName;
-                if (meta?.coreType) state.coreType = meta.coreType;
-                if (meta?.version) state.version = meta.version;
-                state.logs.push(`▸ 已从 IDE 同步 ${state.generatedFiles.length} 个文件到构建仓`);
-            }
-
             // 只有 fix 端点刚生成候选后的无文件重建才延续同一轮修复状态。
-            const continuingRepair = !hasIncoming
-                && state.status === "fixed"
+            const continuingRepair = state.status === "fixed"
                 && !!state.pendingFixSnapshot;
             delete state.fixLearningAuthorization;
             delete state.fixRepairAuthorization;

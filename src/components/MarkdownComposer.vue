@@ -765,7 +765,7 @@ onMounted(() => renderMarkdown(props.modelValue));
   outline: 0;
   color: #f4f1ec;
   caret-color: var(--warm-light, #d5c9ac);
-  font: 400 16px/1.52 system-ui, "Noto Sans SC", "PingFang SC", sans-serif;
+  font: 400 16px/1.52 var(--font-content);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -845,7 +845,7 @@ onMounted(() => renderMarkdown(props.modelValue));
   border-radius: 4px;
   background: rgba(10, 10, 9, 0.52);
   color: #e7d7b2;
-  font: 0.9em/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font: 0.9em/1.45 var(--font-content);
 }
 
 .markdown-composer :deep(pre) {
@@ -867,7 +867,7 @@ onMounted(() => renderMarkdown(props.modelValue));
   margin-bottom: 4px;
   color: rgba(213, 201, 172, 0.45);
   content: attr(data-language);
-  font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font: 10px/1.2 var(--font-content);
   text-transform: lowercase;
   pointer-events: none;
 }
@@ -878,7 +878,7 @@ onMounted(() => renderMarkdown(props.modelValue));
   border-radius: 0;
   background: transparent;
   color: inherit;
-  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font: 13px/1.55 var(--font-content);
 }
 
 @media (max-width: 520px) {

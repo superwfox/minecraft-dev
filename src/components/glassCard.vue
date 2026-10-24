@@ -1,15 +1,16 @@
 <template>
-  <div class="glass2 glass2-nav">
+  <div v-lattice:card class="glass2 glass2-nav">
     <slot/>
   </div>
 </template>
 
 <style>
+@layer legacy {
 .glass2 {
   display: flex;
   padding: 22px;
   color: var(--text-primary);
-  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
   background: rgba(4, 4, 2, 0.84);
   backdrop-filter: blur(22px) saturate(94%);
   -webkit-backdrop-filter: blur(22px) saturate(94%);
@@ -75,8 +76,8 @@
 }
 
 .header-icon {
-  width: 44px;
-  height: 44px;
+  width: 66px;
+  height: 66px;
   object-fit: contain;
 }
 
@@ -102,18 +103,6 @@
   color: rgba(209, 200, 182, 0.52);
 }
 
-.link {
-  color: rgba(209, 200, 182, 0.52);
-  cursor: pointer;
-  user-select: none;
-  text-decoration: none;
-  transition: color 0.16s ease;
-}
-
-.link:hover {
-  color: #f4f1ec;
-}
-
 @media (max-width: 820px) {
   .glass2-nav {
     top: 10px;
@@ -127,9 +116,11 @@
     border-radius: 16px;
   }
 
-  .header-title, .right .link:not(:first-child) { display: none; }
+  .header-title { display: none; }
   .right { gap: 8px; }
-  .header-icon { width: 36px; height: 36px; }
+  .header-icon { width: 54px; height: 54px; }
 }
 
+
+}
 </style>

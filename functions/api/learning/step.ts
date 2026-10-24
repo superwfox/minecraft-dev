@@ -1,3 +1,4 @@
+import { projectExternalDeps } from "../../_lib/projectTree";
 import { discoverLearningSources } from "../../_lib/deepseekResponses";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM } from "../../_lib/llm";
 import { knowledgeLookupKey, learningLookupKeys } from "../../_lib/learning/assessment";
@@ -339,9 +340,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 : [],
             userPrompt: state.userPrompt,
             clarifyRounds: Array.isArray(state.clarifyRounds) ? state.clarifyRounds : [],
-            externalDeps: Array.isArray(state.grade?.vector?.external_deps)
-                ? state.grade.vector.external_deps.filter((value: unknown) => typeof value === "string")
-                : [],
+            externalDeps: projectExternalDeps(state),
             knowledgeNeeds: current.needs,
         });
         if (current.revision !== expectedRevision) {

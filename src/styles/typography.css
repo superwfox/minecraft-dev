@@ -1,0 +1,44 @@
+@layer legacy, theme, lattice, typography;
+
+@font-face {
+  font-family: "Jiangxizhuokai";
+  src: url("/jiangxizhuokai_full.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "DingTalk JinBuTi";
+  src: url("/dingtalk-jinbuti-full.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MinecrafterAlt";
+  src: url("/minecrafter-alt.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer typography {
+  :root {
+    --font-brand: "MinecrafterAlt", sans-serif;
+    --font-ui: "Jiangxizhuokai", "Microsoft YaHei", sans-serif;
+    --font-content: "DingTalk JinBuTi", "Microsoft YaHei", sans-serif;
+  }
+
+  html, body, button, select, optgroup { font-family: var(--font-ui); }
+
+  input, textarea, [contenteditable], pre, code,
+  [data-font="dynamic"], [data-font="dynamic"] * {
+    font-family: var(--font-content);
+  }
+
+  /* 占位提示是界面文案；用户开始输入后使用内容字体。 */
+  input::placeholder, textarea::placeholder,
+  .markdown-composer.is-empty::before { font-family: var(--font-ui); }
+}

@@ -1,3 +1,5 @@
+import { findNodeByPath, projectExternalDeps } from "../../_lib/projectTree";
+import { checkNodeContract, nodeGenerationContext } from "../../_lib/projectTreeContract";
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, getCompileApiEvidence } from "../../_lib/github";
@@ -930,7 +932,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 coreType: state.coreType,
                 mcVersion: state.version,
                 projectPackage: state.packageName,
-                externalDeps: state.grade?.vector?.external_deps ?? [],
+                externalDeps: projectExternalDeps(state),
                 dependencies,
                 generatedFiles: state.generatedFiles ?? [],
             });
@@ -1162,7 +1164,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const apiContractInput = {
                 coreType: state.coreType,
                 version: state.version,
-                externalDeps: state.grade?.vector?.external_deps ?? [],
+                externalDeps: projectExternalDeps(state),
                 generatedFiles: state.generatedFiles,
             };
             const apiContractCtx = buildApiContractContext(apiContractInput);
@@ -1420,6 +1422,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     apiContractCtx,
                     fixKnowledgeContext,
                     progressSummary(progress, rolledBackFiles),
+                    state.tree && findNodeByPath(state.tree, filePath) ? nodeGenerationContext(state.tree, findNodeByPath(state.tree, filePath)!) : "",
                 );
                 const isLearningToolTurn = filePath === filesToFix[0];
                 const messages: ModelChatMessage[] = isLearningToolTurn && fixContinuationMessages
@@ -1453,9 +1456,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         round: (previousFixLearningRequest?.round ?? 0) + 1,
                         coreType: state.coreType,
                         mcVersion: state.version,
-                        allowedDependencies: Array.isArray(state.grade?.vector?.external_deps)
-                            ? state.grade.vector.external_deps
-                            : [],
+                        allowedDependencies: projectExternalDeps(state),
                     }) : null;
                     if (learningRequest && learningRequest.needs.every((need) => need.claim.answerType === "signature"
                         && need.scope.coreType === negativeEnvironment.coreType && need.scope.mcVersion === negativeEnvironment.mcVersion
@@ -1664,6 +1665,12 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             state.error = null;
             delete state.runId;
             delete state.buildBranch;
+            state.nodeChecks ??= {};
+            if (state.tree) for (const path of changedFiles) {
+                const node = findNodeByPath(state.tree, path);
+                const file = state.generatedFiles.find(file => file.path === path);
+                if (node && file) state.nodeChecks[node.id] = checkNodeContract(state.tree, node, file.content);
+            }
             const changedMsg = `● 已修改 ${changedCount} 个文件，等待重新构建验证`;
             state.logs.push(changedMsg);
             await flushCharge();
@@ -1672,6 +1679,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await writer.write(sseEvent(encoder, { type: "log", msg: changedMsg }));
             await writer.write(sseEvent(encoder, {
                 type: "result",
+                nodeChecks: state.nodeChecks,
                 fixed: changedCount,
                 changed: changedCount,
                 verified: false,

@@ -1,17 +1,9 @@
+import type { ProjectTreeView, TreeIssue, NodeContractCheck } from "./projectTree";
 import { reactive, ref, watch } from "vue";
 import {legacyActionMessageMeta, normalizeActionMessageMeta} from "./actionMessages";
 import type {ActionMessageMeta} from "./actionMessages";
 
-export type GenPhase = "idle" | "planning" | "clarifying" | "grading" | "confirming" | "awaiting_input" | "generating" | "verifying" | "uploading" | "building" | "polling" | "fixing" | "interrupted" | "done" | "error";
-
-export type GradePath = {
-    id: string;
-    title: string;
-    summary: string;
-    mermaid: string;
-    axes?: string[];
-};
-export type GradeInfo = { level: string; paths: GradePath[] };
+export type GenPhase = "idle" | "creating" | "clarifying" | "awaiting_input" | "tree_planning" | "tree_confirming" | "generating" | "verifying" | "uploading" | "building" | "fixing" | "interrupted" | "done" | "error";
 
 export type LearningStage = "planner" | "fix" | "tool";
 export type LearningStatus = "idle" | "queued" | "discovering" | "fetching" | "verifying" | "ready" | "deferred" | "needs_review" | "failed" | "cancelled";
@@ -147,11 +139,6 @@ export type KnowledgeUsed = {
     status: "active" | "skipped" | "needs_review";
 };
 
-export type PlannerResumeState = {
-    plannerRequestId: string;
-    plannerReplan: boolean;
-    plannerAttempt: number;
-};
 export type FixResumeStage = "" | "diagnosing" | "learning" | "repairing" | "inspecting" | "rebuilding";
 
 export function normalizeBuildRequestId(value: unknown): string {
@@ -160,7 +147,7 @@ export function normalizeBuildRequestId(value: unknown): string {
         : "";
 }
 
-function normalizeStageRequestId(value: unknown, stage: "clarify" | "grade"): string {
+function normalizeStageRequestId(value: unknown, stage: "clarify" | "tree"): string {
     return typeof value === "string" && new RegExp(`^${stage}_[a-z0-9]{16,64}$`, "i").test(value.trim())
         ? value.trim()
         : "";
@@ -170,8 +157,8 @@ export function normalizeClarifyRequestId(value: unknown): string {
     return normalizeStageRequestId(value, "clarify");
 }
 
-export function normalizeGradeRequestId(value: unknown): string {
-    return normalizeStageRequestId(value, "grade");
+export function normalizeTreeRequestId(value: unknown): string {
+    return typeof value === "string" && /^tree_[a-f0-9]{16,64}$/i.test(value) ? value : "";
 }
 
 function normalizeClarifyRequestAnswers(value: unknown): Record<string, string | string[]> | null {
@@ -203,20 +190,6 @@ export function normalizeFixResumeStage(value: unknown): FixResumeStage {
     return typeof value === "string" && FIX_RESUME_STAGES.has(value as FixResumeStage)
         ? value as FixResumeStage
         : "";
-}
-
-export function normalizePlannerResumeState(value: unknown): PlannerResumeState {
-    const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
-    const plannerRequestId = typeof raw.plannerRequestId === "string"
-        && /^plan_[a-z0-9]{16,64}$/i.test(raw.plannerRequestId)
-        ? raw.plannerRequestId
-        : "";
-    const plannerReplan = !!plannerRequestId && raw.plannerReplan === true;
-    const rawAttempt = Number(raw.plannerAttempt);
-    const plannerAttempt = plannerRequestId && plannerReplan && Number.isInteger(rawAttempt)
-        ? Math.max(1, Math.min(10, rawAttempt))
-        : 0;
-    return { plannerRequestId, plannerReplan, plannerAttempt };
 }
 
 function emptyLearningProgress(): LearningProgress {
@@ -414,6 +387,9 @@ export type GeneratorType =
     | "UtilGen" | "FileRelatedGen" | "MainGen";
 
 export type GenFile = {
+    nodeId?: string;
+    moduleId?: string;
+    origin?: "system" | "planner" | "review";
     path: string;
     role: string;
     content?: string;
@@ -441,6 +417,18 @@ export type ClarifyRound = {
 };
 
 export type GenTask = {
+    tree: ProjectTreeView | null;
+    treeRequestId: string;
+    treeMode: "build" | "refine" | "continue";
+    treeSessionStatus: "" | "continue" | "learning" | "ready" | "failed";
+    treeIssues: TreeIssue[];
+    treeOpsLog: string[];
+    treeCorrection: string;
+    treeFocusIds: string[];
+    nodeChecks: Record<string, NodeContractCheck>;
+    treeRound: number;
+    treeToolCallCount: number;
+    currentBucket: number;
     taskId: string;
     taskExpiresAt: number;
     phase: GenPhase;
@@ -459,7 +447,7 @@ export type GenTask = {
     streamingContent: string;
     streamingPhase: string;
     streamingFile: string;
-    preflightStage: "" | "clarify" | "grade" | "plan";
+    preflightStage: "" | "clarify" | "tree";
     preflightThinking: string;
     preflightOutput: string;
     preflightActive: boolean;
@@ -469,18 +457,9 @@ export type GenTask = {
     reasoningContent: string;
     reasoningVisible: boolean;
     moreInputHint: string;
-    grade: GradeInfo | null;
-    chosenPathId: string;
     clarifyRequestId: string;
     clarifyRequestAnswers: Record<string, string | string[]> | null;
     clarifyRequestExtraPrompt: string;
-    gradeRequestId: string;
-    gradeRequestCorrection: string;
-    plannerRequestId: string;
-    plannerReplan: boolean;
-    plannerAttempt: number;
-    plannerLearningRequired: boolean;
-    plannerLearningNeedCount: number;
     debugLog: any[]; // 后端 SSE debug 事件累积（可下载，用于定位桶零进度死因）
     buildDiagnostics: any[];
     buildHistory: any[];
@@ -495,6 +474,18 @@ export type GenTask = {
 };
 
 export const genTask = reactive<GenTask>({
+    tree: null,
+    treeRequestId: "",
+    treeMode: "build",
+    treeSessionStatus: "",
+    treeIssues: [],
+    treeOpsLog: [],
+    treeCorrection: "",
+    treeFocusIds: [],
+    nodeChecks: {},
+    treeRound: 0,
+    treeToolCallCount: 0,
+    currentBucket: 0,
     taskId: "",
     taskExpiresAt: 0,
     phase: "idle",
@@ -523,18 +514,9 @@ export const genTask = reactive<GenTask>({
     reasoningContent: "",
     reasoningVisible: true,
     moreInputHint: "",
-    grade: null,
-    chosenPathId: "",
     clarifyRequestId: "",
     clarifyRequestAnswers: null,
     clarifyRequestExtraPrompt: "",
-    gradeRequestId: "",
-    gradeRequestCorrection: "",
-    plannerRequestId: "",
-    plannerReplan: false,
-    plannerAttempt: 0,
-    plannerLearningRequired: false,
-    plannerLearningNeedCount: 0,
     debugLog: [],
     buildDiagnostics: [],
     buildHistory: [],
@@ -642,6 +624,18 @@ export function recordLearningDebugEvent(
 }
 
 export function resetGenTask() {
+    genTask.tree = null;
+    genTask.treeRequestId = "";
+    genTask.treeMode = "build";
+    genTask.treeSessionStatus = "";
+    genTask.treeIssues = [];
+    genTask.treeOpsLog = [];
+    genTask.treeCorrection = "";
+    genTask.treeFocusIds = [];
+    genTask.nodeChecks = {};
+    genTask.treeRound = 0;
+    genTask.treeToolCallCount = 0;
+    genTask.currentBucket = 0;
     genTask.taskId = "";
     genTask.taskExpiresAt = 0;
     genTask.phase = "idle";
@@ -670,18 +664,9 @@ export function resetGenTask() {
     genTask.reasoningContent = "";
     genTask.reasoningVisible = true;
     genTask.moreInputHint = "";
-    genTask.grade = null;
-    genTask.chosenPathId = "";
     genTask.clarifyRequestId = "";
     genTask.clarifyRequestAnswers = null;
     genTask.clarifyRequestExtraPrompt = "";
-    genTask.gradeRequestId = "";
-    genTask.gradeRequestCorrection = "";
-    genTask.plannerRequestId = "";
-    genTask.plannerReplan = false;
-    genTask.plannerAttempt = 0;
-    genTask.plannerLearningRequired = false;
-    genTask.plannerLearningNeedCount = 0;
     genTask.debugLog = [];
     genTask.buildDiagnostics = [];
     genTask.buildHistory = [];
@@ -694,7 +679,7 @@ export function resetGenTask() {
     genTask.learningDebugEvents = [];
     genTask.learningDebugDroppedEvents = 0;
     clarifyWaiting.value = false;
-    pathGateWaiting.value = false;
+    treeGateWaiting.value = false;
     clearPersistedGenTask();
 }
 
@@ -735,13 +720,26 @@ function writeGenTaskSnapshot() {
             && !!genTask.userPrompt
             && !!genTask.coreType
             && !!genTask.version
-            && (genTask.phase === "planning"
-                || (genTask.phase === "interrupted" && genTask.interruptedFrom === "planning"));
+            && (genTask.phase === "creating"
+                || (genTask.phase === "interrupted" && genTask.interruptedFrom === "creating"));
         if (genTask.phase === "idle" || (!genTask.taskId && !canRestartModeOne)) {
             localStorage.removeItem(GEN_KEY);
             return;
         }
         const snap = {
+            schemaVersion: 2,
+            tree: genTask.tree,
+            treeRequestId: genTask.treeRequestId,
+            treeMode: genTask.treeMode,
+            treeSessionStatus: genTask.treeSessionStatus,
+            treeIssues: genTask.treeIssues,
+            treeOpsLog: genTask.treeOpsLog,
+            treeCorrection: genTask.treeCorrection,
+            treeFocusIds: genTask.treeFocusIds,
+            nodeChecks: genTask.nodeChecks,
+            treeRound: genTask.treeRound,
+            treeToolCallCount: genTask.treeToolCallCount,
+            currentBucket: genTask.currentBucket,
             taskId: genTask.taskId,
             taskExpiresAt: genTask.taskExpiresAt,
             phase: genTask.phase,
@@ -754,7 +752,7 @@ function writeGenTaskSnapshot() {
             javaVersion: genTask.javaVersion,
             files: genTask.files.map(f => ({
                 path: f.path, role: f.role, status: f.status,
-                generatorType: f.generatorType, tag: f.tag, pairPath: f.pairPath, bucket: f.bucket,
+                nodeId: f.nodeId, moduleId: f.moduleId, origin: f.origin, generatorType: f.generatorType, tag: f.tag, pairPath: f.pairPath, bucket: f.bucket,
             })),
             currentIndex: genTask.currentIndex,
             logs: genTask.logs.slice(-200),
@@ -763,18 +761,9 @@ function writeGenTaskSnapshot() {
             clarifyRound: genTask.clarifyRound,
             clarifyHistory: genTask.clarifyHistory,
             moreInputHint: genTask.moreInputHint,
-            grade: genTask.grade,
-            chosenPathId: genTask.chosenPathId,
             clarifyRequestId: genTask.clarifyRequestId,
             clarifyRequestAnswers: genTask.clarifyRequestAnswers,
             clarifyRequestExtraPrompt: genTask.clarifyRequestExtraPrompt,
-            gradeRequestId: genTask.gradeRequestId,
-            gradeRequestCorrection: genTask.gradeRequestCorrection,
-            plannerRequestId: genTask.plannerRequestId,
-            plannerReplan: genTask.plannerReplan,
-            plannerAttempt: genTask.plannerAttempt,
-            plannerLearningRequired: genTask.plannerLearningRequired,
-            plannerLearningNeedCount: genTask.plannerLearningNeedCount,
             buildDiagnostics: genTask.buildDiagnostics,
             buildHistory: genTask.buildHistory.slice(-6),
             buildRequestId: genTask.buildRequestId,
@@ -812,13 +801,14 @@ export function restoreGenTask(): boolean {
         const raw = localStorage.getItem(GEN_KEY);
         if (!raw) return false;
         const s = JSON.parse(raw);
+        if (s.schemaVersion !== 2) { resetGenTask(); return false; }
         if (s.phase === "idle") return false;
         const canRestartModeOne = !s.taskId
             && typeof s.userPrompt === "string" && !!s.userPrompt
             && typeof s.coreType === "string" && !!s.coreType
             && typeof s.version === "string" && !!s.version
-            && (s.phase === "planning"
-                || (s.phase === "interrupted" && s.interruptedFrom === "planning"));
+            && (s.phase === "creating"
+                || (s.phase === "interrupted" && s.interruptedFrom === "creating"));
         if (!s.taskId && !canRestartModeOne) return false;
         const snapshotTime = optionalCount(s.t) ?? 0;
         const taskExpiresAt = optionalCount(s.taskExpiresAt)
@@ -830,6 +820,20 @@ export function restoreGenTask(): boolean {
         }
         const storedPhase = s.phase as GenPhase;
         const restoredFromActive = !["done", "error", "interrupted"].includes(storedPhase);
+        genTask.tree = s.tree ?? null;
+        genTask.treeRequestId = s.treeRequestId ?? "";
+        genTask.treeMode = s.treeMode ?? "build";
+        genTask.treeSessionStatus = s.treeSessionStatus ?? "";
+        genTask.treeIssues = s.treeIssues ?? [];
+        genTask.treeOpsLog = s.treeOpsLog ?? [];
+        genTask.treeCorrection = s.treeCorrection ?? "";
+        genTask.treeFocusIds = s.treeFocusIds ?? [];
+        genTask.nodeChecks = s.nodeChecks ?? {};
+        genTask.treeRound = s.treeRound ?? 0;
+        genTask.treeToolCallCount = s.treeToolCallCount ?? 0;
+        genTask.currentBucket = s.currentBucket ?? 0;
+        genTask.treeRequestId = normalizeTreeRequestId(s.treeRequestId);
+        genTask.treeOpsLog = genTask.treeOpsLog.slice(-100);
         genTask.taskId = s.taskId || "";
         genTask.taskExpiresAt = taskExpiresAt;
         genTask.phase = restoredFromActive ? "interrupted" : storedPhase;
@@ -849,30 +853,18 @@ export function restoreGenTask(): boolean {
                 .filter((log: unknown): log is string => typeof log === "string")
                 .map(restoreGenLog)
             : [];
-        genTask.preflightStage = s.preflightStage === "clarify" || s.preflightStage === "grade" || s.preflightStage === "plan"
+        genTask.preflightStage = s.preflightStage === "clarify" || s.preflightStage === "tree"
             ? s.preflightStage
             : "";
         genTask.clarifyTodos = Array.isArray(s.clarifyTodos) ? s.clarifyTodos : [];
         genTask.clarifyRound = optionalCount(s.clarifyRound) ?? 0;
         genTask.clarifyHistory = s.clarifyHistory || [];
         genTask.moreInputHint = typeof s.moreInputHint === "string" ? s.moreInputHint : "";
-        genTask.grade = s.grade || null;
-        genTask.chosenPathId = s.chosenPathId || "";
         genTask.clarifyRequestId = normalizeClarifyRequestId(s.clarifyRequestId);
         genTask.clarifyRequestAnswers = normalizeClarifyRequestAnswers(s.clarifyRequestAnswers);
         genTask.clarifyRequestExtraPrompt = typeof s.clarifyRequestExtraPrompt === "string"
             ? s.clarifyRequestExtraPrompt
             : "";
-        genTask.gradeRequestId = normalizeGradeRequestId(s.gradeRequestId);
-        genTask.gradeRequestCorrection = typeof s.gradeRequestCorrection === "string"
-            ? s.gradeRequestCorrection
-            : "";
-        const plannerResume = normalizePlannerResumeState(s);
-        genTask.plannerRequestId = plannerResume.plannerRequestId;
-        genTask.plannerReplan = plannerResume.plannerReplan;
-        genTask.plannerAttempt = plannerResume.plannerAttempt;
-        genTask.plannerLearningRequired = s.plannerLearningRequired === true;
-        genTask.plannerLearningNeedCount = safeCount(s.plannerLearningNeedCount);
         genTask.buildDiagnostics = s.buildDiagnostics || [];
         genTask.buildHistory = s.buildHistory || [];
         genTask.buildRequestId = normalizeBuildRequestId(s.buildRequestId);
@@ -917,10 +909,8 @@ watch(
         genTask.learningDebugEvents.length, genTask.learningDebugDroppedEvents,
         genTask.preflightStage, genTask.clarifyTodos.length, genTask.clarifyRound,
         genTask.clarifyHistory.length, genTask.moreInputHint,
-        genTask.clarifyRequestId, genTask.gradeRequestId,
-        genTask.plannerRequestId, genTask.plannerReplan, genTask.plannerAttempt,
-        genTask.plannerLearningRequired, genTask.plannerLearningNeedCount,
-        genTask.buildRequestId, genTask.fixResumeStage],
+        genTask.clarifyRequestId,
+        genTask.buildRequestId, genTask.fixResumeStage, genTask.tree?.revision, genTask.treeRequestId, genTask.treeRound, genTask.treeSessionStatus, genTask.treeFocusIds.join(","), genTask.treeCorrection, genTask.currentBucket, Object.keys(genTask.nodeChecks).length],
     persistGenTask,
 );
 
@@ -976,38 +966,31 @@ export function submitExtraPrompt(extra: string) {
     }
 }
 
-// ── 实现路径确认门（confirming 阶段）：选路径 或 打回修正 ──
-export const pathGateWaiting = ref(false);
-let pathResolver: ((r: { pathId?: string; correction?: string }) => void) | null = null;
-let pathRejecter: ((e: any) => void) | null = null;
-
-export function waitForPathChoice(): Promise<{ pathId?: string; correction?: string }> {
-    pathGateWaiting.value = true;
-    return new Promise((resolve, reject) => {
-        pathResolver = resolve;
-        pathRejecter = reject;
-    });
+// ── 实现结构树确认门（confirming 阶段）：选路径 或 打回修正 ──
+export type TreeDecision = { action: "confirm" } | { action: "refine"; correction: string; focusIds: string[] };
+export const treeGateWaiting = ref(false);
+let treeResolver: ((decision: TreeDecision) => void) | null = null;
+let treeRejecter: ((error: Error) => void) | null = null;
+export function waitForTreeDecision(): Promise<TreeDecision> {
+    treeGateWaiting.value = true;
+    return new Promise((resolve, reject) => { treeResolver = resolve; treeRejecter = reject; });
 }
-function resolvePath(r: { pathId?: string; correction?: string }) {
-    if (pathResolver) {
-        const fn = pathResolver;
-        pathResolver = null;
-        pathRejecter = null;
-        pathGateWaiting.value = false;
-        fn(r);
-    }
+function resolveTree(decision: TreeDecision) {
+    const resolve = treeResolver;
+    treeResolver = null; treeRejecter = null; treeGateWaiting.value = false;
+    resolve?.(decision);
 }
-export function submitPathChoice(pathId: string) { resolvePath({ pathId }); }
-export function submitPathReject(correction: string) { resolvePath({ correction }); }
+export function submitTreeConfirm() { resolveTree({ action: "confirm" }); }
+export function submitTreeRefine(correction: string, focusIds: string[]) { resolveTree({ action: "refine", correction, focusIds }); }
 
 /** ESC 中断：拒绝任何正在等待用户输入的 Promise（澄清答题 / 补充描述 / 路径确认） */
 export function cancelPendingInput() {
     clarifyWaiting.value = false;
-    pathGateWaiting.value = false;
-    if (pathRejecter) {
-        const r = pathRejecter;
-        pathResolver = null;
-        pathRejecter = null;
+    treeGateWaiting.value = false;
+    if (treeRejecter) {
+        const r = treeRejecter;
+        treeResolver = null;
+        treeRejecter = null;
         r(new InterruptError());
     }
     if (clarifyRejecter) {

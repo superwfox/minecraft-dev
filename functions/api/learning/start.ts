@@ -16,10 +16,7 @@ import {
     sameFixLearningAuthorization,
     type FixLearningAuthorization,
 } from "../../_lib/learning/fixAuthorization";
-import {
-    assessPlannerLearningAuthorization,
-    type PlannerLearningAuthorization,
-} from "../../_lib/learning/plannerAuthorization";
+import { projectExternalDeps } from "../../_lib/projectTree";
 import { learningSnapshot } from "../../_lib/learning/public";
 import { normalizeLearningTelemetry } from "../../_lib/learning/debug";
 import {
@@ -79,8 +76,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     let body: any = {};
     try { body = await context.request.json(); } catch { /* validated below */ }
     const taskId = typeof body.taskId === "string" ? body.taskId : "";
-    const stage: LearningStage | null = body.stage === "planner"
-        || body.stage === "fix"
+    if (body.stage === "planner") return json({ error: "旧规划学习阶段已停用", code: "LEARNING_STAGE_RETIRED" }, 400);
+    const stage: LearningStage | null = body.stage === "fix"
         || body.stage === "tool"
         ? body.stage
         : null;
@@ -91,7 +88,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!raw) return json({ error: "Task not found" }, 404);
     const state = JSON.parse(raw);
 
-    const chosenPathId = typeof body.chosenPathId === "string" ? body.chosenPathId.trim() : "";
     const toolRequestId = typeof body.toolRequestId === "string" ? body.toolRequestId.trim() : "";
     let toolRequest: ModelLearningRequest | null = null;
     if (stage === "tool") {
@@ -103,20 +99,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             }, 409);
         }
     }
-    let pathSelectionChanged = false;
-    if (stage === "planner") {
-        const paths = Array.isArray(state.grade?.paths) ? state.grade.paths : [];
-        const validChosenPath = !!chosenPathId && paths.some((path: any) => path?.id === chosenPathId);
-        if (state.grade?.gateRequired && !chosenPathId) {
-            return json({ error: "Missing chosenPathId", code: "PATH_NOT_CONFIRMED" }, 400);
-        }
-        if (chosenPathId && !validChosenPath) return json({ error: "Invalid chosenPathId" }, 400);
-        if (chosenPathId && state.grade?.chosenPathId !== chosenPathId) {
-            state.grade.chosenPathId = chosenPathId;
-            pathSelectionChanged = true;
-        }
-    }
-
     const requestedFixAuthorization = body.fixAuthorization as FixLearningAuthorization | undefined;
     const fixAuthorization = stage === "fix" ? currentFixLearningAuthorization(state) : null;
     if (stage === "fix" && !sameFixLearningAuthorization(
@@ -129,34 +111,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         }, 409);
     }
 
-    if (pathSelectionChanged) {
-        try {
-            await putTaskState(context.env, taskId, state, 3600, uid);
-        } catch (error) {
-            console.warn("learning path selection persistence failed", error);
-            return storageUnavailable();
-        }
-    }
-
-    const externalDeps = Array.isArray(state.grade?.vector?.external_deps)
-        ? state.grade.vector.external_deps
-        : [];
+    const externalDeps = projectExternalDeps(state);
     let needs: KnowledgeNeed[] = [];
     let contractCoveredCount = 0;
-    let plannerAuthorization: PlannerLearningAuthorization | undefined;
     let toolAuthorization: { requestId: string; needsFingerprint: string } | undefined;
-    if (stage === "planner") {
-        const plannerAssessment = await assessPlannerLearningAuthorization(state);
-        if (!plannerAssessment) {
-            return json({
-                error: "Planner learning authorization is no longer current",
-                reasonCode: "planner_authorization_expired",
-            }, 409);
-        }
-        needs = plannerAssessment.needs;
-        contractCoveredCount = plannerAssessment.coveredCount;
-        plannerAuthorization = plannerAssessment.authorization;
-    } else if (stage === "fix") {
+    if (stage === "fix") {
         const assessment = assessKnowledgeNeeds(state.fixKnowledgeNeeds, {
             coreType: state.coreType,
             mcVersion: state.version,
@@ -357,8 +316,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const baseLookupHash = await learningLookupHash(pendingNeeds);
         const authorizationLookupHash = fixAuthorization
             ? `${baseLookupHash}.${fixAuthorization.runId}.${fixAuthorization.previousRunId}.${fixAuthorization.diagnosticsFingerprint}.${fixAuthorization.repairAttempts}`
-            : plannerAuthorization
-                ? `${baseLookupHash}.${plannerAuthorization.needsFingerprint}.${plannerAuthorization.chosenPathId || "global"}`
                 : toolAuthorization
                     ? `${baseLookupHash}.${toolAuthorization.requestId}.${toolAuthorization.needsFingerprint}`
                     : baseLookupHash;
@@ -381,7 +338,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     runId: compileEvidence.runId, runAttempt: compileEvidence.runAttempt, headSha: compileEvidence.headSha,
                 } } : {}),
                 ...(negatives.length ? { cachedNegativeFactIds: negatives.map(fact => fact.factId) } : {}),
-                ...(plannerAuthorization ? { plannerAuthorization } : {}),
                 ...(fixAuthorization ? { fixAuthorization } : {}),
                 ...(toolAuthorization ? { toolAuthorization } : {}),
                 ...(active.length ? {

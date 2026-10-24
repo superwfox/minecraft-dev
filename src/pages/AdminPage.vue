@@ -2,19 +2,19 @@
   <div class="admin-page">
     <header class="ad-head">
       <h2 class="ad-title">管理后台</h2>
-      <button class="ad-icon-btn" type="button" title="刷新当前列表" :disabled="refreshing" @click="refreshCurrent">
+      <button v-lattice:icon class="ad-icon-btn" type="button" title="刷新当前列表" :disabled="refreshing" :aria-busy="refreshing" @click="refreshCurrent">
         <RefreshCw :size="16" :class="{ spin: refreshing }" aria-hidden="true" />
       </button>
     </header>
 
     <nav class="ad-tabs" aria-label="管理分类">
-      <button type="button" class="ad-tab" :class="{ active: activeTab === 'sponsor' }"
+      <button v-lattice type="button" class="ad-tab" :class="{ active: activeTab === 'sponsor' }"
               :aria-selected="activeTab === 'sponsor'" @click="activeTab = 'sponsor'">
         <CircleDollarSign :size="16" aria-hidden="true" />
         <span>充值审批</span>
         <span class="ad-count">{{ sponsorItems.length }}</span>
       </button>
-      <button type="button" class="ad-tab" :class="{ active: activeTab === 'knowledge' }"
+      <button v-lattice type="button" class="ad-tab" :class="{ active: activeTab === 'knowledge' }"
               :aria-selected="activeTab === 'knowledge'" @click="activeTab = 'knowledge'">
         <BookOpenCheck :size="16" aria-hidden="true" />
         <span>知识审核</span>
@@ -29,7 +29,7 @@
     <div v-else-if="forbidden" class="ad-tip warn">无权限，请使用配置在 ADMIN_UID 中的账号登录。</div>
 
     <template v-else>
-      <section v-if="activeTab === 'sponsor'" class="ad-section">
+      <section v-if="activeTab === 'sponsor'" v-lattice:one class="ad-section">
         <div class="ad-bar"><span>待审 {{ sponsorItems.length }} 条</span></div>
         <div v-if="!sponsorItems.length" class="ad-tip">暂无充值待审记录。</div>
         <div v-else class="ad-table-wrap">
@@ -39,16 +39,16 @@
             </thead>
             <tbody>
               <tr v-for="item in sponsorItems" :key="item.code">
-                <td>{{ item.login }}</td>
+                <td data-font="dynamic">{{ item.login }}</td>
                 <td class="ad-amount">¥{{ item.amount }}</td>
-                <td class="ad-code">{{ item.code }}</td>
-                <td class="ad-time">{{ formatDateTime(item.ts) }}</td>
+                <td data-font="dynamic" class="ad-code">{{ item.code }}</td>
+                <td data-font="dynamic" class="ad-time">{{ formatDateTime(item.ts) }}</td>
                 <td class="ad-actions">
-                  <button class="ad-btn approve" type="button" :disabled="busySponsor === item.code"
+                  <button v-lattice class="ad-btn approve" type="button" :disabled="busySponsor === item.code"
                           @click="reviewSponsor(item, 'approve')">
                     <Check :size="14" aria-hidden="true" /><span>通过</span>
                   </button>
-                  <button class="ad-btn reject" type="button" :disabled="busySponsor === item.code"
+                  <button v-lattice class="ad-btn reject" type="button" :disabled="busySponsor === item.code"
                           @click="reviewSponsor(item, 'reject')">
                     <X :size="14" aria-hidden="true" /><span>驳回</span>
                   </button>
@@ -60,11 +60,11 @@
         <div class="ad-hint">通过前请在收款记录中核对备注码与金额。</div>
       </section>
 
-      <section v-else class="ad-section">
+      <section v-else v-lattice:one class="ad-section">
         <div class="ad-bar"><span>知识条目 {{ knowledgeItems.length }} 条</span></div>
         <div v-if="!knowledgeItems.length" class="ad-tip">暂无知识审核条目。</div>
         <div v-else class="knowledge-list">
-          <article v-for="item in knowledgeItems" :key="item.knowledgeId" class="knowledge-item">
+          <article v-for="item in knowledgeItems" :key="item.knowledgeId" v-lattice:two class="knowledge-item">
             <div class="knowledge-head">
               <div class="knowledge-badges">
                 <span class="ad-badge kind">{{ kindLabel(item.kind) }}</span>
@@ -78,12 +78,12 @@
               <time class="ad-time" :datetime="isoDate(item.updatedAt)">{{ formatDateTime(item.updatedAt) }}</time>
             </div>
 
-            <div class="knowledge-summary">{{ item.summary }}</div>
-            <div class="knowledge-id">{{ item.lookupKey }}</div>
+            <div data-font="dynamic" class="knowledge-summary">{{ item.summary }}</div>
+            <div data-font="dynamic" class="knowledge-id">{{ item.lookupKey }}</div>
 
             <dl v-if="scopeEntries(item.scope).length" class="knowledge-scope">
               <template v-for="entry in scopeEntries(item.scope)" :key="entry[0]">
-                <dt>{{ scopeLabel(entry[0]) }}</dt><dd>{{ entry[1] }}</dd>
+                <dt>{{ scopeLabel(entry[0]) }}</dt><dd data-font="dynamic">{{ entry[1] }}</dd>
               </template>
             </dl>
 
@@ -94,18 +94,18 @@
 
             <div class="evidence-list">
               <div v-if="!item.sources.length" class="evidence-empty">没有可展示的证据来源。</div>
-              <section v-for="source in item.sources" :key="source.sourceId" class="evidence-source"
+              <section v-for="source in item.sources" :key="source.sourceId" v-lattice:three class="evidence-source"
                        :class="{ contradicts: source.relation === 'contradicts' }">
                 <div class="source-head">
                   <span class="source-relation">{{ relationLabel(source.relation) }}</span>
                   <a :href="source.url" target="_blank" rel="noopener noreferrer" class="source-link">
-                    <span>{{ source.title }}</span><ExternalLink :size="13" aria-hidden="true" />
+                    <span data-font="dynamic">{{ source.title }}</span><ExternalLink :size="13" aria-hidden="true" />
                   </a>
                 </div>
-                <div class="source-meta">
+                <div data-font="dynamic" class="source-meta">
                   {{ authorityLabel(source.authority) }} · {{ source.sourceType }} · {{ formatDate(source.publishedAt || source.fetchedAt) }}
                 </div>
-                <div v-if="source.excerpt" class="source-excerpt">{{ source.excerpt }}</div>
+                <div v-if="source.excerpt" data-font="dynamic" class="source-excerpt">{{ source.excerpt }}</div>
               </section>
             </div>
 
@@ -113,18 +113,18 @@
                       placeholder="审核备注（可选）" />
             <div class="knowledge-actions">
               <template v-if="item.status === 'needs_review'">
-                <button class="ad-btn approve" type="button"
+                <button v-lattice class="ad-btn approve" type="button"
                         :title="item.kind === 'strategy' ? '策略知识需等待后续晋升机制' : '批准并激活最新 revision'"
                         :disabled="busyKnowledge === item.knowledgeId || item.kind === 'strategy'"
                         @click="reviewKnowledge(item, 'approve')">
                   <Check :size="14" aria-hidden="true" /><span>通过</span>
                 </button>
-                <button class="ad-btn reject" type="button" :disabled="busyKnowledge === item.knowledgeId"
+                <button v-lattice class="ad-btn reject" type="button" :disabled="busyKnowledge === item.knowledgeId"
                         @click="reviewKnowledge(item, 'reject')">
                   <X :size="14" aria-hidden="true" /><span>驳回</span>
                 </button>
               </template>
-              <button class="ad-btn deprecate" type="button" :disabled="busyKnowledge === item.knowledgeId"
+              <button v-lattice class="ad-btn deprecate" type="button" :disabled="busyKnowledge === item.knowledgeId"
                       @click="reviewKnowledge(item, 'deprecate')">
                 <ShieldBan :size="14" aria-hidden="true" /><span>失效</span>
               </button>
@@ -133,7 +133,7 @@
         </div>
       </section>
 
-      <div v-if="message" class="ad-message" :class="messageKind">{{ message }}</div>
+      <div v-if="message" data-font="dynamic" class="ad-message" :class="messageKind">{{ message }}</div>
     </template>
   </div>
 </template>
@@ -407,12 +407,13 @@ onMounted(loadAll);
 </script>
 
 <style scoped>
+@layer legacy {
 .admin-page {
     width: min(1040px, 100%);
     margin: 0 auto;
     padding: 96px 20px 64px;
     color: #f4f1ec;
-    font-family: "ZhuoKai", system-ui, sans-serif;
+    font-family: var(--font-ui);
 }
 .ad-head {
     display: flex;
@@ -465,7 +466,7 @@ onMounted(loadAll);
     color: rgba(244, 241, 236, 0.58);
     background: rgba(244, 241, 236, 0.08);
     border-radius: 4px;
-    font: 10px/16px monospace;
+    font: 10px/16px var(--font-ui);
     text-align: center;
 }
 .ad-section { width: 100%; }
@@ -498,7 +499,7 @@ onMounted(loadAll);
 }
 .ad-table th { color: rgba(244, 241, 236, 0.4); font-size: 11px; font-weight: 400; }
 .ad-amount { color: #e6c477; }
-.ad-code { color: #e6c477; font-family: monospace; letter-spacing: 0; }
+.ad-code { color: #e6c477; font-family: var(--font-content); letter-spacing: 0; }
 .ad-time { color: rgba(244, 241, 236, 0.36); font-size: 11px; white-space: nowrap; }
 .ad-actions,
 .knowledge-actions { display: flex; align-items: center; gap: 6px; }
@@ -547,9 +548,9 @@ onMounted(loadAll);
 .ad-badge.risk-medium { color: #e2c88f; background: rgba(180, 143, 68, 0.12); }
 .ad-badge.risk-high { color: #edaaa0; background: rgba(187, 91, 78, 0.12); }
 .ad-badge.confidence,
-.ad-badge.revision { font-family: monospace; }
+.ad-badge.revision { font-family: var(--font-content); }
 .knowledge-summary { margin-top: 12px; color: rgba(244, 241, 236, 0.9); font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
-.knowledge-id { margin-top: 5px; color: rgba(244, 241, 236, 0.3); font: 10px/1.5 monospace; overflow-wrap: anywhere; }
+.knowledge-id { margin-top: 5px; color: rgba(244, 241, 236, 0.3); font: 10px/1.5 var(--font-ui); overflow-wrap: anywhere; }
 .knowledge-scope {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
@@ -558,7 +559,7 @@ onMounted(loadAll);
     font-size: 11px;
 }
 .knowledge-scope dt { color: rgba(244, 241, 236, 0.34); }
-.knowledge-scope dd { margin: 0; color: rgba(244, 241, 236, 0.65); font-family: monospace; overflow-wrap: anywhere; }
+.knowledge-scope dd { margin: 0; color: rgba(244, 241, 236, 0.65); font-family: var(--font-content); overflow-wrap: anywhere; }
 .knowledge-payload { margin-top: 12px; color: rgba(244, 241, 236, 0.54); font-size: 11px; }
 .knowledge-payload summary { width: fit-content; cursor: pointer; }
 .knowledge-payload pre {
@@ -570,7 +571,7 @@ onMounted(loadAll);
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid rgba(244, 241, 236, 0.08);
     border-radius: 4px;
-    font: 10px/1.55 monospace;
+    font: 10px/1.55 var(--font-content);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
@@ -622,7 +623,7 @@ onMounted(loadAll);
     border: 1px solid rgba(244, 241, 236, 0.14);
     border-radius: 6px;
     outline: none;
-    font-family: inherit;
+    font-family: var(--font-content);
     font-size: 12px;
     line-height: 1.5;
     letter-spacing: 0;
@@ -646,5 +647,7 @@ onMounted(loadAll);
     .source-head { align-items: flex-start; }
     .source-link { align-items: flex-start; }
     .ad-actions { min-width: 170px; }
+}
+
 }
 </style>

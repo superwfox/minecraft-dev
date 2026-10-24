@@ -1,0 +1,110 @@
+<template>
+  <section v-if="tree" class="project-tree" :class="`pt-${mode}`" aria-label="项目结构树">
+    <header class="pt-header">
+      <div><span class="pt-eyebrow">项目结构</span><h2>从模块到每一个文件</h2></div>
+      <div class="pt-header-meta"><span>{{ tree.modules.length }} 个模块</span><span>{{ tree.nodes.length }} 个文件</span><span>修订 {{ tree.revision }}</span></div>
+    </header>
+    <div class="pt-scroll" tabindex="0" aria-label="可滚动的项目结构图">
+      <div class="pt-map">
+        <div v-lattice:one class="pt-root">
+          <div class="pt-root-kicker"><Blocks :size="17" aria-hidden="true"/> 插件项目</div>
+          <h3 data-font="dynamic">{{ tree.project.projectName || '正在规划项目' }}</h3>
+          <code data-font="dynamic">{{ tree.project.packageName || '待确定包名' }}</code>
+          <p data-font="dynamic">{{ tree.project.summary || '结构树会随规划逐步展开' }}</p>
+          <div class="pt-platform"><span>{{ genTask.coreType }} {{ genTask.version }}</span><span>Java {{ tree.project.javaVersion }}</span></div>
+          <div v-if="mode === 'progress'" class="pt-root-progress">
+            <div><strong>{{ totals.done }}<small> / {{ totals.total }}</small></strong><span>文件已完成</span></div>
+            <div class="pt-meter"><span :style="{ width: `${totals.total ? totals.done / totals.total * 100 : 0}%` }"/></div>
+            <span>契约 {{ totals.passed }} / {{ totals.contracts }} 项</span>
+          </div>
+          <span v-else class="pt-root-note">{{ mode === 'draft' ? '正在构建结构树' : '待你确认后开始生成' }}</span>
+        </div>
+        <div class="pt-modules">
+          <div v-for="module in tree.modules" :key="module.id" class="pt-branch">
+            <button v-lattice:card type="button" class="pt-module" :class="{ selected: genTask.treeFocusIds.includes(module.id), 'pt-system': module.kind === 'system' }"
+                    :aria-pressed="mode === 'confirm' ? genTask.treeFocusIds.includes(module.id) : undefined" @click="openTarget(module.id)">
+              <span class="pt-module-top"><Folder :size="15" aria-hidden="true"/><span>{{ module.kind === 'system' ? '系统模块' : module.kind === 'common' ? '公共模块' : '业务模块' }}</span><Check v-if="mode === 'confirm' && genTask.treeFocusIds.includes(module.id)" :size="14" aria-hidden="true"/></span>
+              <strong data-font="dynamic">{{ module.title }}</strong>
+              <code data-font="dynamic">{{ moduleSuffix(module.id) }}</code>
+              <p data-font="dynamic">{{ module.responsibility }}</p>
+              <span v-if="mode === 'progress'" class="pt-module-count">{{ progress[module.id].done }} / {{ progress[module.id].total }} 已完成</span>
+              <span v-else class="pt-module-count">{{ progress[module.id].total }} 个文件</span>
+            </button>
+            <div class="pt-nodes">
+              <button v-for="node in tree.nodes.filter(node => node.moduleId === module.id)" :key="node.id" v-lattice:card type="button"
+                      class="pt-node" :class="[status(node).status, { selected: genTask.treeFocusIds.includes(node.id) }]"
+                      :aria-pressed="mode === 'confirm' ? genTask.treeFocusIds.includes(node.id) : undefined" :aria-busy="mode === 'progress' && status(node).status === 'generating'" @click="openTarget(node.id)">
+                <span class="pt-node-icon"><FileCode2 v-if="node.fqcn" :size="19" aria-hidden="true"/><FileText v-else :size="19" aria-hidden="true"/></span>
+                <span class="pt-node-body"><span class="pt-node-name"><strong data-font="dynamic">{{ node.id }}</strong><span v-if="mode === 'confirm' && genTask.treeFocusIds.includes(node.id)" class="pt-selected-mark"><Check :size="13" aria-hidden="true"/></span></span>
+                  <span class="pt-node-subtitle"><span data-font="dynamic">{{ node.title }}</span><span class="pt-kind">{{ generatorLabels[node.kind] }}</span></span>
+                  <span v-if="node.tag === 'gui' || node.origin === 'review' || status(node).buildError" class="pt-badges"><span v-if="node.tag === 'gui'">GUI</span><span v-if="node.origin === 'review'">审查追加</span><span v-if="status(node).buildError" class="pt-error-badge">编译错误</span></span>
+                </span>
+                <span class="pt-node-tail"><span v-if="mode === 'progress'" class="pt-state-label"><span class="pt-status-dot"/>{{ stateLabels[status(node).status] }}</span><span class="pt-contract-count">{{ contractLabel(node) }}</span><ChevronRight :size="14" aria-hidden="true"/></span>
+              </button>
+              <span v-if="!tree.nodes.some(node => node.moduleId === module.id)" class="pt-empty">等待添加文件</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <footer class="pt-footer"><span><MousePointer2 :size="13" aria-hidden="true"/>{{ mode === 'confirm' ? '点选模块或文件，查看契约并指定修正范围' : '点击文件查看职责、契约与源码' }}</span><span v-if="mode === 'progress'" class="pt-legend"><i/> 待生成 <i class="busy"/> 生成中 <i class="complete"/> 已完成</span><span v-else>模块对应子包 · 节点对应文件</span></footer>
+    <details v-if="mode === 'draft'" class="pt-operations" :open="genTask.treeOpsLog.length < 4">
+      <summary><span><GitBranch :size="14" aria-hidden="true"/>规划操作记录</span><span>本轮 {{ genTask.treeToolCallCount }} 次工具调用 · 第 {{ genTask.treeRound || 1 }} 轮</span></summary>
+      <ol><li v-for="(operation, index) in genTask.treeOpsLog.slice(-20)" :key="index" data-font="dynamic">{{ operation }}</li><li v-if="!genTask.treeOpsLog.length">正在准备结构规划…</li></ol>
+    </details>
+    <ProjectTreeDrawer v-if="drawerTarget" :target-id="drawerTarget" @close="drawerTarget = ''" @navigate="drawerTarget = $event"/>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { Blocks, Check, ChevronRight, FileCode2, FileText, Folder, GitBranch, MousePointer2 } from "lucide-vue-next";
+import { genTask } from "../logic/generateState";
+import { generatorLabels, moduleProgress, nodeStatusOf, treeTotals, type TreeNodeView } from "../logic/projectTree";
+import ProjectTreeDrawer from "./ProjectTreeDrawer.vue";
+const props = defineProps<{ mode: "draft" | "confirm" | "progress" }>();
+const tree = computed(() => genTask.tree);
+const drawerTarget = ref("");
+const totals = computed(() => tree.value ? treeTotals(tree.value, genTask.files, genTask.nodeChecks) : { done: 0, total: 0, passed: 0, contracts: 0 });
+const progress = computed(() => tree.value ? moduleProgress(tree.value, genTask.files) : {});
+const stateLabels = { pending: "待生成", generating: "生成中", done: "已完成", error: "待修复" };
+function status(node: TreeNodeView) { return nodeStatusOf(node, genTask.files, genTask.nodeChecks, genTask.buildDiagnostics); }
+function moduleSuffix(id: string) { return id === "_root" ? "根包 / Main.java" : id === "_build" ? "pom.xml" : id === "_resources" ? "src/main/resources" : `.${id}`; }
+function contractLabel(node: TreeNodeView) {
+  const check = genTask.nodeChecks[node.id];
+  if (check) return check.total ? `契约 ${check.passed}/${check.total}` : "无契约";
+  return node.id === "pom.xml" ? "无契约" : "契约待核对";
+}
+function openTarget(id: string) {
+  if (props.mode === "confirm") {
+    const index = genTask.treeFocusIds.indexOf(id);
+    if (index >= 0) genTask.treeFocusIds.splice(index, 1); else genTask.treeFocusIds.push(id);
+  }
+  drawerTarget.value = id;
+}
+</script>
+
+<style scoped>
+@layer legacy {
+.project-tree{border:1px solid var(--line);background:var(--surface-1);color:var(--text-primary)}
+.pt-header{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:26px 30px;border-bottom:1px solid var(--line-soft)}
+.pt-eyebrow{color:var(--oak);font-size:12px;letter-spacing:2px}.pt-header h2{margin:8px 0 0;font-size:21px;font-weight:400}.pt-header-meta{display:flex;gap:20px;font-size:12px;color:var(--text-secondary);white-space:nowrap}
+.pt-scroll{overflow-x:auto;padding:40px 34px 36px;outline-offset:-3px}.pt-map{display:grid;grid-template-columns:218px 1fr;gap:64px;align-items:center;min-width:850px}
+.pt-root{padding:24px 22px;position:relative;min-width:0;align-self:start;margin-top:72px}.pt-root::after{content:'';position:absolute;right:-33px;top:50%;width:32px;border-top:1px solid var(--line-warm)}
+.pt-root-kicker{display:flex;align-items:center;gap:9px;color:var(--oak);font-size:12px}.pt-root h3{margin:20px 0 10px;font-size:25px;overflow-wrap:anywhere;font-weight:500}.pt-root code{font-size:11px;color:var(--text-secondary);overflow-wrap:anywhere}.pt-root p{font-size:13px;line-height:1.8;color:var(--text-secondary);margin:17px 0 20px}.pt-platform{display:flex;flex-wrap:wrap;gap:9px;font-size:11px;color:var(--oak-hover)}.pt-platform span{padding:5px 8px;background:var(--surface-2);border:1px solid var(--line-soft)}
+.pt-root-note{display:block;margin-top:22px;padding-top:18px;border-top:1px solid var(--line-soft);font-size:12px;color:var(--text-muted)}
+.pt-root-progress{margin-top:25px;padding-top:20px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--text-secondary)}.pt-root-progress>div:first-child{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.pt-root-progress strong{font-size:26px;font-weight:400;color:var(--wheat)}.pt-root-progress small{font-size:14px;color:var(--text-muted)}.pt-meter{height:3px;background:var(--surface-3);margin:14px 0}.pt-meter span{height:100%;display:block;background:var(--oak);transition:width .3s}
+.pt-modules{position:relative;display:flex;flex-direction:column;gap:12px}.pt-modules::before{content:'';position:absolute;left:-32px;top:0;bottom:0;border-left:1px solid var(--line-warm)}
+.pt-branch{position:relative;display:grid;grid-template-columns:198px 1fr;gap:40px;align-items:center;padding:10px 0}.pt-branch::before{content:'';position:absolute;left:-32px;top:50%;width:32px;border-top:1px solid var(--line-warm)}
+.pt-module{position:relative;display:flex;flex-direction:column;align-items:stretch;gap:9px;min-width:0;padding:21px 18px;text-align:left;font:inherit;cursor:pointer}.pt-module::after{content:'';position:absolute;right:-41px;top:50%;width:40px;border-top:1px solid var(--line-warm)}.pt-module-top{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.5px;color:var(--oak)}.pt-module-top>svg:last-child:not(:first-child){margin-left:auto}.pt-module strong{font-size:18px;font-weight:400}.pt-module code{font-size:11px;color:var(--text-secondary);overflow-wrap:anywhere}.pt-module p{font-size:12px;color:var(--text-secondary);line-height:1.8;margin:1px 0 4px}.pt-module-count{font-size:10px;color:var(--text-muted)}.pt-system .pt-module-top{color:var(--text-muted)}
+.pt-nodes{position:relative;display:flex;flex-direction:column;gap:12px;padding-left:22px;min-width:0}.pt-nodes::before{content:'';position:absolute;left:0;top:26px;bottom:26px;border-left:1px solid var(--line-warm)}
+.pt-node{position:relative;display:flex;align-items:center;gap:14px;min-height:78px;min-width:0;text-align:left;padding:17px 18px;font:inherit;cursor:pointer}.pt-node::before{content:'';position:absolute;left:-23px;top:50%;width:22px;border-top:1px solid var(--line-warm)}.pt-node-icon{flex:none;color:var(--oak);display:flex;align-items:center}.pt-node-body{min-width:0;flex:1;display:flex;flex-direction:column;gap:7px}.pt-node-name{display:flex;align-items:center;gap:9px}.pt-node-name strong{font-size:14px;font-weight:500;overflow-wrap:anywhere}.pt-selected-mark{display:flex;color:var(--oak)}.pt-node-subtitle{display:flex;gap:9px;align-items:center;font-size:11px;flex-wrap:wrap;color:var(--text-secondary)}.pt-kind{border-left:1px solid var(--line);padding-left:9px;color:var(--text-muted)}.pt-node-tail{flex:none;display:flex;align-items:flex-end;flex-direction:column;gap:7px;font-size:10px;color:var(--text-muted);padding-left:8px}.pt-node-tail>svg{position:absolute;right:15px;top:18px;opacity:.45}.pt-state-label{display:flex;align-items:center;gap:6px;padding-right:16px}.pt-contract-count{padding-right:16px;white-space:nowrap}.pt-status-dot{width:5px;height:5px;border:1px solid var(--text-muted);border-radius:50%}.done .pt-status-dot{background:var(--oak);border-color:var(--oak)}.generating .pt-status-dot{background:var(--cyan);border-color:var(--cyan);animation:pt-pulse 1.5s infinite}.error .pt-status-dot{background:var(--cyan);border-color:var(--cyan)}.generating{border-color:var(--cyan)}.pt-badges{display:flex;gap:7px;flex-wrap:wrap}.pt-badges>span{font-size:9px;padding:3px 7px;border:1px solid var(--line-warm);color:var(--oak)}.pt-badges>.pt-error-badge{border-color:var(--cyan);color:var(--cyan)}
+.pt-node:hover,.pt-module:hover{border-color:var(--oak-hover);background:var(--surface-2)}.pt-node:focus-visible,.pt-module:focus-visible{outline:1px solid var(--oak);outline-offset:4px}.pt-node.selected,.pt-module.selected{border-color:var(--oak);background:var(--oak-soft)}.pt-draft .pt-node{animation:pt-appear .4s ease-out}.pt-empty{padding:20px;font-size:12px;color:var(--text-muted)}
+.pt-footer{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;border-top:1px solid var(--line-soft);padding:17px 28px;color:var(--text-muted);font-size:11px}.pt-footer>span{display:flex;align-items:center;gap:8px}.pt-legend i{height:5px;width:5px;border:1px solid var(--line-strong);border-radius:50%;margin-left:8px}.pt-legend i.busy{background:var(--cyan);border-color:var(--cyan)}.pt-legend i.complete{background:var(--oak);border-color:var(--oak)}
+.pt-operations{border-top:1px solid var(--line-soft);padding:20px 28px;color:var(--text-secondary);font-size:12px}.pt-operations summary{cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:16px;list-style:none}.pt-operations summary>span{display:flex;align-items:center;gap:8px}.pt-operations summary>span:last-child{font-size:11px;color:var(--text-muted)}.pt-operations ol{list-style:none;padding:15px 0 0;margin:0;display:grid;gap:10px}.pt-operations li{line-height:1.7;font-size:12px}
+@keyframes pt-pulse{50%{opacity:.25}}@keyframes pt-appear{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
+@media(max-width:650px){.pt-header{padding:22px;align-items:flex-start;flex-direction:column;gap:18px}.pt-scroll{padding:28px 22px}.pt-footer{padding:18px 22px}.pt-operations{padding:20px 22px}.pt-operations summary{align-items:flex-start;flex-direction:column}}
+@media(prefers-reduced-motion:reduce){.pt-draft .pt-node,.generating .pt-status-dot{animation:none}}
+}
+</style>
+

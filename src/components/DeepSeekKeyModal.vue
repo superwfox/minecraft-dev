@@ -2,8 +2,8 @@
   <Teleport to="body">
     <Transition name="key-modal">
       <div v-if="showDeepSeekKeyModal" class="key-mask" @click.self="close">
-        <section class="key-card" role="dialog" aria-modal="true" aria-labelledby="deepseek-key-title">
-          <button class="key-close" type="button" title="关闭" aria-label="关闭" @click="close">
+        <section v-lattice:card class="key-card" role="dialog" aria-modal="true" aria-labelledby="deepseek-key-title">
+          <button v-lattice:icon class="key-close" type="button" title="关闭" aria-label="关闭" @click="close">
             <X :size="18" aria-hidden="true"/>
           </button>
 
@@ -16,12 +16,12 @@
             填写你自己的 DeepSeek API Key 后即可继续使用；已有充值额度仍然保留，也可以不填写 Key 直接使用充值额度。
           </p>
 
-          <div v-if="reasonMessage" class="key-warning" role="alert">{{ reasonMessage }}</div>
+          <div v-if="reasonMessage" data-font="dynamic" class="key-warning" role="alert">{{ reasonMessage }}</div>
 
           <div v-if="deepSeekKeyConfigured && !editing" class="key-saved">
             <div>
               <span class="key-saved-label">当前 Key</span>
-              <strong>•••• {{ deepSeekKeyLastFour }}</strong>
+              <strong data-font="dynamic">•••• {{ deepSeekKeyLastFour }}</strong>
             </div>
             <span class="key-status">已保存在此浏览器</span>
           </div>
@@ -40,7 +40,7 @@
                 spellcheck="false"
                 @keyup.enter="save"
               >
-              <button
+              <button v-lattice:icon
                 class="key-reveal"
                 type="button"
                 :title="revealed ? '隐藏 Key' : '显示 Key'"
@@ -51,31 +51,31 @@
                 <Eye v-else :size="18" aria-hidden="true"/>
               </button>
             </div>
-            <div v-if="formError" class="key-error" role="alert">{{ formError }}</div>
+            <div v-if="formError" data-font="dynamic" class="key-error" role="alert">{{ formError }}</div>
           </div>
 
           <div v-if="clearConfirm" class="key-clear-confirm" role="alert">
             <span>清除后，新请求将改用充值额度；使用 BYOK 创建的进行中任务仍需 Key，清除后可能无法继续。</span>
             <div>
-              <button type="button" class="key-secondary" @click="clearConfirm = false">取消</button>
-              <button type="button" class="key-danger" @click="confirmClear">确认清除</button>
+              <button v-lattice type="button" class="key-secondary" @click="clearConfirm = false">取消</button>
+              <button v-lattice type="button" class="key-danger" @click="confirmClear">确认清除</button>
             </div>
           </div>
 
           <div v-else class="key-actions">
             <template v-if="deepSeekKeyConfigured && !editing">
-              <button type="button" class="key-secondary" @click="clearConfirm = true">
+              <button v-lattice type="button" class="key-secondary" @click="clearConfirm = true">
                 <Trash2 :size="16" aria-hidden="true"/>
                 清除
               </button>
-              <button type="button" class="key-primary" @click="beginEdit">
+              <button v-lattice type="button" class="key-primary" @click="beginEdit">
                 <Pencil :size="16" aria-hidden="true"/>
                 编辑 Key
               </button>
             </template>
             <template v-else>
-              <button v-if="deepSeekKeyConfigured" type="button" class="key-secondary" @click="cancelEdit">取消</button>
-              <button type="button" class="key-primary" :disabled="!draft.trim()" @click="save">保存 Key</button>
+              <button v-lattice v-if="deepSeekKeyConfigured" type="button" class="key-secondary" @click="cancelEdit">取消</button>
+              <button v-lattice type="button" class="key-primary" :disabled="!draft.trim()" @click="save">保存 Key</button>
             </template>
           </div>
 
@@ -179,6 +179,7 @@ watch(showDeepSeekKeyModal, (visible) => {
 </script>
 
 <style scoped>
+@layer legacy {
 .key-mask {
   position: fixed;
   inset: 0;
@@ -200,7 +201,7 @@ watch(showDeepSeekKeyModal, (visible) => {
   background: rgba(17, 17, 15, 0.98);
   box-shadow: 0 24px 72px rgba(0, 0, 0, 0.66);
   color: var(--text-primary);
-  font-family: "Monaco", "Jiangxizhuokai", system-ui, sans-serif;
+  font-family: var(--font-ui);
 }
 
 .key-close {
@@ -337,7 +338,7 @@ h2 {
   outline: none;
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-primary);
-  font: 13px/1 "Monaco", monospace;
+  font: 13px/1 var(--font-content);
 }
 
 .key-input-wrap input:focus {
@@ -494,5 +495,7 @@ h2 {
     flex-direction: column;
     gap: 8px;
   }
+}
+
 }
 </style>

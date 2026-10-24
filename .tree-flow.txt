@@ -1,0 +1,201 @@
+interface TreeRoundResult {
+    status: "continue" | "learning" | "ready" | "failed";
+    round: number; tree: ProjectTreeView; issues: TreeIssue[];
+    results: { ok: boolean; summary: string; error?: string }[];
+    learningToolRequests?: unknown[];
+}
+function applyTreeView(tree: ProjectTreeView | null) {
+    if (!tree) return;
+    genTask.tree = { ...tree, project: { ...tree.project, coreType: genTask.coreType, version: genTask.version } };
+    genTask.projectName = tree.project.projectName; genTask.packageName = tree.project.packageName; genTask.javaVersion = tree.project.javaVersion;
+}
+async function refreshTree() {
+    const result = await get(`/api/generate/tree?taskId=${encodeURIComponent(genTask.taskId)}`);
+    applyTreeView(result.tree);
+    Object.assign(genTask.nodeChecks, result.nodeChecks ?? {});
+    if (result.session) {
+        genTask.treeSessionStatus = result.session.status;
+        genTask.treeRound = result.session.round;
+        genTask.treeIssues = result.session.issues ?? [];
+    }
+    return result;
+}
+async function streamTreeRound(action: "build" | "refine" | "continue", learningToolJobs: Record<string, string>): Promise<TreeRoundResult> {
+    if (!genTask.treeRequestId) {
+        genTask.treeRequestId = `tree_${crypto.randomUUID().replace(/-/g, "")}`;
+        genTask.treeMode = action;
+    }
+    genTask.treeToolCallCount = 0;
+    persistGenTaskNow();
+    return streamPreflightRequest({
+        endpoint: "/api/generate/tree", stage: "tree", label: "结构树规划", requestIdField: "treeRequestId",
+        requestId: genTask.treeRequestId, taskId: genTask.taskId,
+        payload: { action: genTask.treeMode, correction: genTask.treeCorrection, focusIds: genTask.treeFocusIds, skillIds: [...selected], learningToolJobs },
+        inProgressCode: "TREE_IN_PROGRESS", recoveryCode: "TREE_RECOVERY_REQUIRED", normalizeRequestId: normalizeTreeRequestId,
+        onRecoverRequestId: requestId => { genTask.treeRequestId = requestId; persistGenTaskNow(); },
+        setController: controller => { treeAbort = controller; }, clearController: controller => { if (treeAbort === controller) treeAbort = null; },
+    });
+}
+export async function confirmTree(): Promise<void> {
+    if (!genTask.tree) throw new Error("结构树尚未就绪");
+    const result = await post("/api/generate/tree", { taskId: genTask.taskId, action: "confirm", revision: genTask.tree.revision });
+    applyTreeView(result.tree);
+    genTask.files = result.plan.map((file: GenFile) => ({ ...file, status: "pending", origin: genTask.tree?.nodes.find(node => node.id === file.nodeId)?.origin }));
+    genTask.currentBucket = 0; syncCurrentIndex(); setPhase("generating"); persistGenTaskNow();
+}
+export async function runTreeStage(initialAction: "build" | "refine" | "continue" | "gate"): Promise<void> {
+    let action = initialAction;
+    const learningToolJobs: Record<string, string> = {};
+    while (true) {
+        if (action === "gate") {
+            setPhase("tree_confirming", genTask.treeSessionStatus === "failed" ? "结构规划未完成，可提交修正意见继续" : "请确认项目结构树");
+            const decision = await waitForTreeDecision();
+            if (decision.action === "confirm") { await confirmTree(); return; }
+            genTask.treeCorrection = decision.correction; genTask.treeFocusIds = decision.focusIds; action = "refine";
+        }
+        setPhase("tree_planning", "正在规划项目结构树…");
+        const result = await streamTreeRound(action, learningToolJobs);
+        applyTreeView(result.tree);
+        genTask.treeSessionStatus = result.status; genTask.treeRound = result.round; genTask.treeIssues = result.issues ?? [];
+        genTask.treeRequestId = ""; persistGenTaskNow();
+        if (result.status === "learning") {
+            await runModelLearningToolRequests(result.learningToolRequests, learningToolJobs);
+            action = "continue";
+        } else action = result.status === "continue" ? "continue" : "gate";
+    }
+}
+async function createTask(userPrompt: string, coreType: string, version: string, runId: number) {
+    setPhase("creating", "正在创建任务…");
+    const result = await post("/api/generate/task", { userPrompt, coreType, version, skillIds: [...selected] });
+    genTask.taskId = result.taskId; applyTaskExpiration(result.taskId, result.expiresAt);
+    scheduleTaskKeepalive(result.taskId, runId); fetchMe(); persistGenTaskNow();
+}
+async function runBucket(bucketIndex: number): Promise<void> {
+    const learningToolJobs: Record<string, string> = {};
+    let noProgress = 0;
+    for (let guard = 0; guard < 1000; guard++) {
+        let result: Awaited<ReturnType<typeof streamBucketGeneration>>;
+        try { result = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs); }
+        catch (error) {
+            if (isInterrupt(error) || (error as { noRetry?: boolean; terminal?: boolean }).noRetry || (error as { terminal?: boolean }).terminal) throw error;
+            if (++noProgress >= 5) throw error;
+            await waitWithAbort(1500, generationSignal()); continue;
+        }
+        if (!result) { if (++noProgress >= 5) throw new Error("生成服务连续未返回进度，请稍后继续"); continue; }
+        for (const completed of [...(result.completed ?? []), ...(result.newFiles ?? [])]) {
+            const file = findFile(completed.path);
+            if (file) { file.status = "done"; if (typeof completed.content === "string") file.content = completed.content; }
+            if (completed.contractCheck) genTask.nodeChecks[completed.contractCheck.nodeId] = completed.contractCheck;
+        }
+        syncCurrentIndex();
+        if (await runModelLearningToolRequests(result.learningToolRequests, learningToolJobs)) { noProgress = 0; continue; }
+        if (result.bucketDone) return;
+        if (result.progressed) noProgress = 0;
+        else {
+            if (++noProgress >= 5) throw new Error("生成服务连续未推进，已保留阶段进度");
+            await waitWithAbort(Math.max(500, Math.min(5000, Number(result.retryAfterMs) || 1500)), generationSignal());
+        }
+    }
+    throw new Error("单桶推进次数超出上限，已保留当前进度");
+}
+export async function runBucketsVerifyBuild(): Promise<void> {
+    const bucketIds = [...new Set(genTask.files.map(file => file.bucket ?? 0))].sort((a, b) => a - b);
+    setPhase("generating");
+    for (const bucket of bucketIds.filter(bucket => bucket >= genTask.currentBucket)) {
+        await runBucket(bucket); genTask.currentBucket = bucket + 1; persistGenTaskNow();
+    }
+    setPhase("verifying", "正在校验树节点完整性…");
+    let result = await post("/api/generate/verify", { taskId: genTask.taskId });
+    for (let retry = 0; retry < 2 && !result.verified; retry++) {
+        const repair = await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
+        if (!Number.isInteger(repair.repairBucketIndex)) throw new Error("服务端未返回修补桶");
+        genTask.currentBucket = repair.repairBucketIndex;
+        for (const file of genTask.files) if (repair.missing.includes(file.path)) file.status = "pending";
+        setPhase("generating", "正在补齐缺失的树节点…");
+        await runBucket(repair.repairBucketIndex); genTask.currentBucket = repair.repairBucketIndex + 1;
+        setPhase("verifying"); result = await post("/api/generate/verify", { taskId: genTask.taskId });
+    }
+    if (!result.verified) throw new Error(`文件校验失败，仍缺失 ${result.missing.length} 个节点`);
+    await buildWithRetry();
+}
+let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
+export function canRetryGenerate(): boolean {
+    return (!!genTask.taskId || !!genTask.userPrompt || !!lastGenParams) && ["error", "idle", "interrupted"].includes(genTask.phase);
+}
+function getPreFileResumePhase(): GenPhase | "" {
+    if (genTask.tree?.status === "locked") return "generating";
+    if (genTask.tree || genTask.treeRequestId || genTask.preflightStage === "tree") return genTask.treeSessionStatus === "ready" || genTask.treeSessionStatus === "failed" ? "tree_confirming" : "tree_planning";
+    return genTask.moreInputHint ? "awaiting_input" : genTask.taskId ? "clarifying" : "creating";
+}
+export function retryGenerate() {
+    if (genTask.taskId) {
+        if (genTask.phase !== "interrupted") { genTask.interruptedFrom = genTask.files.length ? "generating" : getPreFileResumePhase(); genTask.phase = "interrupted"; }
+        resumeGenerate().catch(() => {}); return;
+    }
+    const params = lastGenParams ?? genTask;
+    if (params.userPrompt) startGenerate(params.userPrompt, params.coreType, params.version).catch(() => {});
+}
+export async function resumeGenerate(): Promise<void> {
+    if (!genTask.taskId) {
+        if (genTask.userPrompt) await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version);
+        return;
+    }
+    const from = genTask.phase === "interrupted" ? genTask.interruptedFrom || getPreFileResumePhase() : genTask.phase;
+    if (["idle", "done", "error"].includes(from)) return;
+    beginGenerationRun(); const runId = generationRunId;
+    genTask.phase = from as GenPhase; genTask.interruptedFrom = ""; clearGenerateError();
+    try {
+        await ensureTaskAlive(genTask.taskId, runId);
+        if (["uploading", "building"].includes(from)) { await buildWithRetry(true); return; }
+        if (from === "fixing") { await resumeFixingStage(genTask.taskId, genTask.fixResumeStage); return; }
+        if (["clarifying", "awaiting_input", "creating"].includes(from)) { await runClarifyStage(from === "awaiting_input" ? "awaiting_input" : "clarifying"); await runTreeStage("build"); }
+        else {
+            const restored = await refreshTree();
+            if (genTask.tree?.status !== "locked") {
+                const status = restored.session?.status;
+                await runTreeStage(status === "ready" || status === "failed" ? "gate" : genTask.treeRequestId ? genTask.treeMode : status ? "continue" : "build");
+            }
+        }
+        await runBucketsVerifyBuild();
+    } catch (error) {
+        if (!isGenerationRunCurrent(runId)) return;
+        if (isInterrupt(error)) markInterrupted(genTask.phase);
+        else { setGenerateError(error); appendGenLog(`× ${genTask.error}`); persistGenTaskNow(); }
+    }
+}
+export async function startGenerate(userPrompt: string, coreType: string, version: string, options?: { resumePrepared?: boolean }): Promise<void> {
+    if (options?.resumePrepared) { await resumeGenerate(); return; }
+    if (isGeneratingPhase(genTask.phase)) throw new Error("当前已有构建任务正在进行");
+    beginGenerationRun(); const runId = generationRunId;
+    lastGenParams = { userPrompt, coreType, version };
+    recordPromptHistory({ prompt: userPrompt, coreType, version, skillIds: [...selected] });
+    resetGenTask(); Object.assign(genTask, { userPrompt, coreType, version });
+    try {
+        await createTask(userPrompt, coreType, version, runId);
+        await runClarifyStage(); await runTreeStage("build"); await runBucketsVerifyBuild();
+    } catch (error) {
+        if (!isGenerationRunCurrent(runId)) return;
+        if (isInterrupt(error)) markInterrupted(genTask.phase);
+        else { setGenerateError(error); appendGenLog(`× ${genTask.error}`); persistGenTaskNow(); }
+    }
+}
+export async function loadNodeContent(path: string): Promise<string> {
+    const file = findFile(path); if (file?.content !== undefined) return file.content;
+    const result = await get(`/api/generate/source?taskId=${encodeURIComponent(genTask.taskId)}&path=${encodeURIComponent(path)}`);
+    if (file) file.content = result.content;
+    return result.content;
+}
+export async function downloadSourceZip(): Promise<void> {
+    const taskId = genTask.taskId;
+    const response = await fetchWithByokFallback(`/api/generate/source?taskId=${encodeURIComponent(taskId)}`);
+    if (!response.ok) throw await responseError(response, "源码下载失败");
+    const result = await response.json() as { projectName: string; tree: ProjectTreeView; files: { path: string; content: string }[] };
+    const zip = new JSZip(), root = zip.folder(result.projectName)!;
+    for (const file of result.files) root.file(file.path, file.content);
+    result.tree.project.coreType = genTask.coreType; result.tree.project.version = genTask.version;
+    root.file("PROJECT_TREE.md", renderTreeMarkdown(result.tree, genTask.nodeChecks));
+    const blob = await zip.generateAsync({ type: "blob" }), url = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = url; link.download = `${result.projectName}-source.zip`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+

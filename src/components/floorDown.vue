@@ -1,11 +1,11 @@
 <template>
   <div class="floor-down">
     <section v-for="(item, i) in sections" :key="i"
-             class="floor-section" :class="i % 2 === 0 ? 'img-right' : 'img-left'">
+             v-lattice:card class="floor-section" :class="i % 2 === 0 ? 'img-right' : 'img-left'">
       <div class="floor-text">
         <h2 class="floor-title">{{ item.title }}</h2>
         <p class="floor-desc">{{ item.desc }}</p>
-        <button v-if="item.action" class="floor-btn" @click="goChat">{{ item.action }}</button>
+        <button v-lattice v-if="item.action" class="floor-btn" @click="goChat">{{ item.action }}</button>
       </div>
       <div class="floor-img-wrap">
         <img :src="item.img" class="floor-img floor-img-loading"
@@ -50,6 +50,7 @@ const sections = [
 </script>
 
 <style scoped>
+@layer legacy {
 .floor-down {
   position: relative;
   margin-top: 100vh;
@@ -75,7 +76,7 @@ const sections = [
 .floor-title {
   font-size: 36px;
   margin-bottom: 16px;
-  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
 }
 
 .floor-desc {
@@ -92,7 +93,7 @@ const sections = [
   background: rgba(255,255,255,0.05);
   color: wheat;
   font-size: 15px;
-  font-family: "ZhuoKai", system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
   cursor: pointer;
   backdrop-filter: blur(6px);
   transition: background 0.2s;
@@ -138,5 +139,7 @@ const sections = [
 .floor-img-wrap::after {
   bottom: 0;
   background: linear-gradient(to top, #000, transparent);
+}
+
 }
 </style>

@@ -1,19 +1,19 @@
 <template>
   <div class="step-render">
     <div class="step-tags" v-if="block.coreType || block.version">
-      <span class="tag tag-core" v-if="block.coreType">{{ block.coreType }}</span>
-      <span class="tag tag-ver" v-if="block.version">{{ block.version }}</span>
+      <span data-font="dynamic" class="tag tag-core" v-if="block.coreType">{{ block.coreType }}</span>
+      <span data-font="dynamic" class="tag tag-ver" v-if="block.version">{{ block.version }}</span>
     </div>
 
-    <div v-for="s in block.steps" :key="s.step" class="step-item">
+    <div v-for="s in block.steps" :key="s.step" v-lattice:three class="step-item">
       <div class="step-head">
         <span class="step-num">Step {{ s.step }}</span>
-        <span v-if="s.event" class="badge badge-event">{{ s.event }}</span>
-        <span v-if="s.function" class="badge badge-func">{{ s.function }}</span>
+        <span v-if="s.event" data-font="dynamic" class="badge badge-event">{{ s.event }}</span>
+        <span v-if="s.function" data-font="dynamic" class="badge badge-func">{{ s.function }}</span>
       </div>
-      <div class="step-content" v-if="s.content">{{ s.content }}</div>
+      <div data-font="dynamic" class="step-content" v-if="s.content">{{ s.content }}</div>
       <div class="step-params" v-if="s.params && s.params.length">
-        <span v-for="(p, i) in s.params" :key="i" class="badge badge-param">{{ p }}</span>
+        <span v-for="(p, i) in s.params" :key="i" data-font="dynamic" class="badge badge-param">{{ p }}</span>
       </div>
     </div>
   </div>
@@ -25,6 +25,7 @@ defineProps<{ block: ChatBlock }>();
 </script>
 
 <style scoped>
+@layer legacy {
 .step-render {
   display: flex;
   flex-direction: column;
@@ -93,5 +94,7 @@ defineProps<{ block: ChatBlock }>();
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
 }
 </style>

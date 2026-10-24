@@ -10,7 +10,7 @@
             <span>今天想构建什么</span>
             <template v-if="welcomeLogin">
               <span>，</span>
-              <span class="welcome-user" :title="welcomeLogin">{{ welcomeLogin }}</span>
+              <span data-font="dynamic" class="welcome-user" :title="welcomeLogin">{{ welcomeLogin }}</span>
             </template>
             <span>？</span>
           </h1>
@@ -20,26 +20,26 @@
       <!-- Q&A 收敛：需求确认完成的问答收敛成 ─问/·答 -->
       <div v-if="qaRecap.length" class="qa-recap">
         <div v-for="(qa, i) in qaRecap" :key="i" class="qa-item">
-          <div class="qa-q">─{{ qa.q }}</div>
-          <div class="qa-a">·{{ qa.a }}</div>
+          <div data-font="dynamic" class="qa-q">─{{ qa.q }}</div>
+          <div data-font="dynamic" class="qa-a">·{{ qa.a }}</div>
         </div>
       </div>
 
       <!-- 活动卡：核心类型 / 版本（缺失才弹） -->
-      <div v-if="selectingBlock" class="select-panel">
+      <div v-if="selectingBlock" v-lattice:card class="select-panel">
         <div v-if="missingFields.includes('coreType')" class="select-group">
           <span class="select-label">核心类型</span>
-          <span v-for="c in CORE_TYPES" :key="c"
+          <button v-lattice type="button" v-for="c in CORE_TYPES" :key="c"
                 class="select-chip" :class="{active: selectCore === c}"
-                @click="selectCore = c">{{ c }}</span>
+                @click="selectCore = c">{{ c }}</button>
         </div>
         <div v-if="missingFields.includes('version')" class="select-group">
           <span class="select-label">版本</span>
-          <span v-for="v in VERSIONS" :key="v"
+          <button v-lattice type="button" v-for="v in VERSIONS" :key="v"
                 class="select-chip" :class="{active: selectVer === v}"
-                @click="selectVer = v">{{ v }}</span>
+                @click="selectVer = v">{{ v }}</button>
         </div>
-        <button class="floor-btn" @click="confirmSelect"
+        <button v-lattice class="floor-btn" @click="confirmSelect"
                 :disabled="(missingFields.includes('coreType') && !selectCore) || (missingFields.includes('version') && !selectVer)">
           确认
         </button>
@@ -56,7 +56,7 @@
         <span class="cs-label">技能</span>
         <span v-for="b in chosenSkills" :key="b.id" class="cs-chip" :title="b.capability || ''">
           {{ b.name || b.id }}
-          <button class="cs-x" :disabled="composerDisabled" @click="removeSkill(b.id)" title="移除技能"><X :size="12"/></button>
+          <button v-lattice:icon class="cs-x" :disabled="composerDisabled" @click="removeSkill(b.id)" title="移除技能"><X :size="12"/></button>
         </span>
       </div>
 
@@ -70,7 +70,7 @@
         }"
       >
         <div class="composer" :class="{ disabled: composerDisabled }">
-          <div class="composer-input-shell" :class="{ 'is-processing': liveProcessVisible }">
+          <div v-lattice:card class="composer-input-shell" :class="{ 'is-processing': liveProcessVisible }" :aria-busy="liveProcessActive">
             <!-- 前置阶段的 thinking / output 与输入框共用一个聊天栏容器 -->
             <section v-if="liveProcessVisible" class="live-process" aria-live="polite">
               <div class="live-process-head">
@@ -78,7 +78,7 @@
                   <LoaderCircle v-if="liveProcessActive" class="live-spinner" :size="15" aria-hidden="true"/>
                   <span>{{ liveStageLabel }}</span>
                 </span>
-                <button
+                <button v-lattice
                   v-if="activeThinking"
                   type="button"
                   class="thinking-toggle"
@@ -102,7 +102,7 @@
                 </div>
                 <div v-else-if="liveProcessActive" class="live-waiting">等待首个响应片段…</div>
               </div>
-              <button
+              <button v-lattice:icon
                 v-if="!livePinned"
                 type="button"
                 class="live-scroll-bottom"
@@ -127,12 +127,12 @@
                     :class="{ 'is-spinning': composerMessage.kind === 'progress' }"
                   />
                 </span>
-                <div class="composer-message-copy">
+                <div data-font="dynamic" class="composer-message-copy">
                   <strong>{{ composerMessage.title }}</strong>
                   <span v-if="composerMessage.detail" class="composer-message-detail">{{ composerMessage.detail }}</span>
                 </div>
                 <div v-if="composerMessage.actions.length" class="composer-message-actions">
-                  <button
+                  <button v-lattice
                     v-for="action in composerMessage.actions"
                     :key="action.id"
                     type="button"
@@ -152,7 +152,7 @@
                   <ListChecks :size="16" aria-hidden="true"/>
                   <span>{{ activeIncomplete.heading }}</span>
                 </div>
-                <ol class="incomplete-guidance-list">
+                <ol data-font="dynamic" class="incomplete-guidance-list">
                   <li v-for="item in activeIncomplete.items" :key="item.topic + ':' + item.detail">
                     <strong>{{ item.topic }}</strong><span v-if="item.detail">：{{ item.detail }}</span>
                   </li>
@@ -165,7 +165,7 @@
                          @compositionstart="onImeCompositionStart"
                          @compositionend="onImeCompositionEnd"
                          @keydown.enter="onExtraEnter"/>
-                  <button class="floor-btn" :disabled="!extraInput.trim()" @click="sendExtra">
+                  <button v-lattice class="floor-btn" :disabled="!extraInput.trim()" @click="sendExtra">
                     提交补充
                   </button>
                 </div>
@@ -183,26 +183,27 @@
               />
             </template>
             <div class="composer-actions">
-              <button class="action-btn skill-toggle" :class="{ on: trayOpen }" :disabled="composerDisabled" @click="toggleTray" title="技能">
+              <button v-lattice class="action-btn skill-toggle" :class="{ on: trayOpen }" :disabled="composerDisabled" @click="toggleTray" title="技能">
                 <Layers3 :size="17"/><span>技能</span>
                 <span v-if="selected.length" class="skill-toggle-badge">{{ selected.length }}</span>
               </button>
               <span class="composer-mode"><Blocks :size="15" aria-hidden="true"/><span>插件生成</span></span>
-              <button
+              <button v-lattice
                 v-if="formatPhase === 'loading'"
                 type="button"
                 class="action-btn format-action"
+                aria-busy="true"
                 disabled
                 title="正在整理需求"
               ><LoaderCircle class="format-spinner" :size="16"/><span>整理中</span></button>
-              <button
+              <button v-lattice
                 v-else-if="formatPhase === 'ready'"
                 type="button"
                 class="action-btn format-action ready"
                 title="应用格式化结果"
                 @click="applyFormattedPrompt"
               ><WandSparkles :size="16"/><span>应用格式</span></button>
-              <button
+              <button v-lattice:icon
                 v-if="formatUndo"
                 type="button"
                 class="action-btn icon-action"
@@ -212,7 +213,7 @@
               ><Undo2 :size="16"/></button>
               <div class="composer-spacer"></div>
               <div ref="promptHistoryRootEl" class="prompt-history-control">
-                <button
+                <button v-lattice:icon
                   type="button"
                   class="action-btn icon-action history-trigger"
                   :class="{ on: promptHistoryOpen }"
@@ -223,24 +224,24 @@
                   @click="togglePromptHistory"
                 ><Clock3 :size="16"/></button>
                 <Transition name="prompt-history-popover">
-                  <section v-if="promptHistoryOpen" class="prompt-history-menu" aria-label="提示词历史">
+                  <section v-if="promptHistoryOpen" v-lattice:two class="prompt-history-menu" aria-label="提示词历史">
                     <div class="prompt-history-head">
                       <strong>提示词历史</strong>
                       <span>{{ promptHistory.length }} 条</span>
                     </div>
                     <div class="prompt-history-list">
                       <div v-for="entry in promptHistory" :key="entry.id" class="prompt-history-row">
-                        <button
+                        <button v-lattice
                           type="button"
                           class="prompt-history-main"
                           title="载入此提示词"
                           @click="loadHistoryPrompt(entry)"
                         >
-                          <span class="prompt-history-text">{{ entry.prompt }}</span>
-                          <span class="prompt-history-meta">{{ promptHistoryMeta(entry) }}</span>
+                          <span data-font="dynamic" class="prompt-history-text">{{ entry.prompt }}</span>
+                          <span data-font="dynamic" class="prompt-history-meta">{{ promptHistoryMeta(entry) }}</span>
                         </button>
                         <div class="prompt-history-actions">
-                          <button
+                          <button v-lattice:icon
                             type="button"
                             class="prompt-history-icon"
                             :disabled="!canReplayPromptHistory"
@@ -248,7 +249,7 @@
                             aria-label="重新调用"
                             @click="replayHistoryPrompt(entry)"
                           ><Play :size="15"/></button>
-                          <button
+                          <button v-lattice:icon
                             type="button"
                             class="prompt-history-icon"
                             title="删除记录"
@@ -261,10 +262,10 @@
                   </section>
                 </Transition>
               </div>
-              <button class="action-btn icon-action refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部" aria-label="重置全部">
+              <button v-lattice:icon class="action-btn icon-action refresh-btn" @click="onRefresh" :disabled="!canRefresh" title="重置全部" aria-label="重置全部">
                 <RotateCcw :size="16"/>
               </button>
-              <button class="send-btn icon-action" @click="send"
+              <button v-lattice:icon class="send-btn icon-action" @click="send"
                       :disabled="composerDisabled || !inputText.trim()" title="发送 (Enter)" aria-label="发送"><Send :size="17"/></button>
             </div>
           </div>
@@ -277,10 +278,10 @@
     <!-- ════════ 生成阶段：进度视图 ════════ -->
     <template v-else>
       <GenerateProgress/>
-      <button class="reset-fab icon-btn refresh-btn" :disabled="!canRefresh" @click="onRefresh" title="重置 / 新建"><RotateCcw :size="19"/></button>
+      <button v-lattice:icon class="reset-fab icon-btn refresh-btn" :disabled="!canRefresh" @click="onRefresh" title="重置 / 新建"><RotateCcw :size="19"/></button>
     </template>
 
-    <button
+    <button v-lattice:icon
       v-if="inFocusPhase && (clarifyWaiting || pathGateWaiting)"
       class="reset-fab icon-btn refresh-btn"
       :disabled="!canRefresh"
@@ -292,21 +293,21 @@
     <!-- 重置确认弹窗 -->
     <Teleport to="body">
       <div v-if="showResetModal" class="reset-overlay" @click.self="closeResetModal">
-        <div class="reset-modal">
+        <div v-lattice:card class="reset-modal">
           <div class="reset-title">确认重置？</div>
           <div class="reset-desc">
             此操作将清空：
             <ul class="reset-list">
               <li>所有聊天记录</li>
-              <li>已生成的代码文件（包括 IDE 中的本地编辑）</li>
+              <li>已生成的代码文件</li>
               <li>当前生成进度与构建状态</li>
             </ul>
             <span class="reset-warning">此操作不可撤销。</span>
           </div>
           <div v-if="resetError" class="reset-error" role="alert">{{ resetError }}</div>
           <div class="reset-actions">
-            <button class="floor-btn reset-cancel" :disabled="resetting" @click="closeResetModal">取消</button>
-            <button class="floor-btn reset-confirm" :disabled="resetting" @click="doReset">
+            <button v-lattice class="floor-btn reset-cancel" :disabled="resetting" @click="closeResetModal">取消</button>
+            <button v-lattice class="floor-btn reset-confirm" :disabled="resetting" :aria-busy="resetting" @click="doReset">
               {{ resetting ? "正在重置…" : "确认重置" }}
             </button>
           </div>
@@ -1151,10 +1152,6 @@ async function doReset() {
     persistSession();
     try {
         await deleteRemoteTask(tid);
-        if (tid) {
-            const {useIDEStore} = await import("../ide/composables/useIDEStore");
-            await useIDEStore().resetTask(tid);
-        }
         resetChat();
         clearSession();
         resetGenTask();
@@ -1257,6 +1254,7 @@ watch(() => genTask.phase, (p) => {
 </script>
 
 <style scoped>
+@layer legacy {
 .chat-page {
   --surface: #040402;
   --surface-raised: #090907;
@@ -1280,7 +1278,7 @@ watch(() => genTask.phase, (p) => {
   position: relative;
   background: #11110f;
   color: var(--text);
-  font-family: system-ui, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
 }
 
 /* 聚焦阶段：整列垂直居中 */
@@ -1332,7 +1330,7 @@ watch(() => genTask.phase, (p) => {
   max-width: min(780px, calc(100vw - 110px));
   margin: 0;
   color: #f0ede7;
-  font-family: "Jiangxizhuokai", "Songti SC", "STSong", serif;
+  font-family: var(--font-ui);
   font-size: 46px;
   font-weight: 400;
   line-height: 1.2;
@@ -1379,7 +1377,7 @@ watch(() => genTask.phase, (p) => {
   flex-direction: column;
   gap: 12px;
   padding: 2px;
-  font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
 }
 .qa-item {
   display: flex;
@@ -1580,7 +1578,7 @@ watch(() => genTask.phase, (p) => {
   gap: 5px;
 }
 .cs-label {
-  font-family: "MinecrafterAlt", sans-serif;
+  font-family: var(--font-ui);
   font-size: 10px;
   color: rgba(209, 200, 182, 0.42);
   margin-right: 4px;
@@ -1625,7 +1623,7 @@ watch(() => genTask.phase, (p) => {
   outline: none;
   color: #f4f1ec;
   caret-color: var(--warm-light);
-  font: 400 16px/1.52 system-ui, "Noto Sans SC", "PingFang SC", sans-serif;
+  font: 400 16px/1.52 var(--font-ui);
 }
 .composer-actions {
   display: flex;
@@ -1806,7 +1804,7 @@ watch(() => genTask.phase, (p) => {
   background: rgba(8, 8, 6, 0.78);
   color: rgba(232, 227, 217, 0.76);
   box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  font: 12px/1 system-ui, "Noto Sans SC", sans-serif;
+  font: 12px/1 var(--font-ui);
   cursor: pointer;
   transition: top 0.1s, color 0.16s, border-color 0.16s, background 0.16s, box-shadow 0.1s;
 }
@@ -2082,7 +2080,7 @@ watch(() => genTask.phase, (p) => {
 .live-output pre {
   margin: 0;
   color: inherit;
-  font: 12px/1.65 "Monaco", "Noto Sans SC", monospace;
+  font: 12px/1.65 var(--font-content);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2317,5 +2315,7 @@ watch(() => genTask.phase, (p) => {
   .reset-modal { animation: none; }
   .welcome-collapse-enter-active,
   .welcome-collapse-leave-active { transition: none; }
+}
+
 }
 </style>

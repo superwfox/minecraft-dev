@@ -4,11 +4,8 @@ import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../..
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
-import {
-    assessPlannerLearningAuthorization,
-    assessPlannerResultAuthorization,
-    samePlannerResultAuthorization,
-} from "../../_lib/learning/plannerAuthorization";
+import { appendReviewNode, findNodeByPath, nodePath, planItemForNode, projectExternalDeps, publicTreeView, type TreeNode } from "../../_lib/projectTree";
+import { checkNodeContract, nodeGenerationContext, nodeReviewContext } from "../../_lib/projectTreeContract";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 import {
@@ -296,6 +293,7 @@ async function callAIStream(
 type FileGenerationStage = "generate" | "review" | "rework" | "dynamic_generate";
 
 interface DynamicFileCheckpoint {
+    nodeId?: string;
     className: string;
     path: string;
     role: string;
@@ -467,9 +465,7 @@ async function callWithLearningTool(input: {
         round: (previousRequest?.round ?? 0) + 1,
         coreType: input.coreType,
         mcVersion: input.mcVersion,
-        allowedDependencies: Array.isArray(input.state.grade?.vector?.external_deps)
-            ? input.state.grade.vector.external_deps
-            : [],
+        allowedDependencies: projectExternalDeps(input.state),
     }) : null;
     if (nextRequest) {
         if (previousRequest) removeModelLearningRequest(input.state, previousRequest.requestId);
@@ -511,11 +507,14 @@ async function processFileStage(
 ): Promise<FileStageOutcome> {
     assertBucketActive(operationAbort.signal);
     const filePath = target.path;
+    const node = findNodeByPath(state.tree, filePath);
+    if (!node) throw new Error("文件不在锁定的结构树中");
+    const treeContext = nodeGenerationContext(state.tree, node);
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
     const apiContractInput = {
         coreType: ctx.coreType,
         version: ctx.version,
-        externalDeps: state.grade?.vector?.external_deps ?? [],
+        externalDeps: projectExternalDeps(state),
         generatedFiles: [
             ...(state.generatedFiles ?? []),
             ...summaries
@@ -532,6 +531,7 @@ async function processFileStage(
         skillCtx,
         apiContractCtx,
         knowledgeContext,
+        treeContext,
     );
     const outcome = (nextStage: FileGenerationStage): FileStageOutcome => ({
         path: filePath,
@@ -549,6 +549,8 @@ async function processFileStage(
         learningToolRequests: [request],
     });
     const complete = async (): Promise<FileStageOutcome> => {
+        state.nodeChecks ??= {};
+        state.nodeChecks[node.id] = checkNodeContract(state.tree, node, checkpoint.content);
         const apiSummary = extractFileSummary(filePath, checkpoint.content, target.role);
         dbg("file:return", {
             path: filePath,
@@ -586,6 +588,7 @@ async function processFileStage(
             apiContractCtx,
             knowledgeContext,
         );
+        rw.user += "\n\n" + treeContext;
         const call = await callWithLearningTool({
             llm,
             state,
@@ -671,6 +674,7 @@ async function processFileStage(
             order: 0,
             generatorType: inferGeneratorType(dynamic.className, dynamic.path),
         };
+        const dynamicNode = findNodeByPath(state.tree, dynamic.path);
         const subDispatched = dispatchGen(
             inferredFile,
             ctx,
@@ -679,6 +683,7 @@ async function processFileStage(
             skillCtx,
             apiContractCtx,
             knowledgeContext,
+            dynamicNode ? nodeGenerationContext(state.tree, dynamicNode) : "",
         );
         await writeSSE(writer, encoder, { type: "phase", path: dynamic.path, phase: "generating" }, operationAbort);
         await logGeneration(
@@ -744,13 +749,18 @@ async function processFileStage(
     dbg("file:review-begin", { path: filePath, round: checkpoint.reworkCount });
     let review: any;
     let reviewUsedModel = false;
+    const contractCheck = checkNodeContract(state.tree, node, checkpoint.content);
+    const failedContracts = contractCheck.items.filter(item => !item.ok);
     const knownApiIssues = findKnownApiIssues(apiContractInput, checkpoint.content);
-    if (knownApiIssues.length) {
+    if (failedContracts.length) {
+        review = { is_ok: false, reason: "结构树契约未满足：" + failedContracts.map(item => item.label).join("；"), missing_classes: [] };
+    } else if (knownApiIssues.length) {
         review = { is_ok: false, reason: knownApiIssues.join("；"), missing_classes: [] };
         dbg("file:review-known-api", { path: filePath, issues: knownApiIssues.length });
     } else {
         reviewUsedModel = true;
         const check = dispatched.checker(filePath, checkpoint.content);
+        check.user += "\n\n" + nodeReviewContext(state.tree, node);
         // 首轮用快速模型；只有返工后的复审才启用深度模型，兼顾常规速度与问题文件质量。
         const call = await callWithLearningTool({
             llm,
@@ -796,22 +806,17 @@ async function processFileStage(
 
     if (missingClasses.length > 0 && !checkpoint.dynamicGenDone) {
         checkpoint.dynamicGenDone = true;
-        const alreadyGenerated = new Set([
-            ...summaries.map(summary => summary.className).filter((name): name is string => !!name),
-            ...(state.generatedFiles ?? [])
-                .map((file: any) => String(file.path || "").split("/").pop()?.replace(/\.java$/i, ""))
-                .filter((name: unknown): name is string => typeof name === "string" && !!name),
-            ...(state.plan ?? [])
-                .map((file: any) => String(file.path || "").split("/").pop()?.replace(/\.java$/i, ""))
-                .filter((name: unknown): name is string => typeof name === "string" && !!name),
-        ]);
-        const dynamicFiles = missingClasses
-            .filter(className => !alreadyGenerated.has(className))
-            .map(className => ({
-                className,
-                path: `src/main/java/${ctx.packageName.replace(/\./g, "/")}/${className}.java`,
-                role: `${className} — 被 ${filePath.split("/").pop()} 引用`,
-            }));
+        const dynamicFiles: DynamicFileCheckpoint[] = [];
+        for (const className of missingClasses) {
+            const hadCommon = state.tree.modules.some(module => module.id === "common");
+            const appended = appendReviewNode(state.tree, { className, referencedByNodeId: node.id });
+            if (!appended?.created) continue;
+            const path = nodePath(state.tree, appended.node);
+            dynamicFiles.push({ className, path, role: appended.node.responsibility, nodeId: appended.node.id });
+            state.plan.push(planItemForNode(state.tree, appended.node, target.bucket ?? 0, state.plan.length + 1));
+            const view = publicTreeView(state.tree);
+            await writeSSE(writer, encoder, { type: "tree_patch", node: view.nodes.find(item => item.id === appended.node.id), ...(!hadCommon && appended.node.moduleId === "common" ? { module: view.modules.find(module => module.id === "common") } : {}) }, operationAbort);
+        }
         if (dynamicFiles.length > 0) {
             checkpoint.dynamicFiles = dynamicFiles;
             checkpoint.dynamicIndex = 0;
@@ -864,36 +869,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     // 挂了 skill 的任务：prompt 更大、文件更多，强制串行，避免大 prompt × 并发撞 CF Worker 限制
     if (state.skills?.length) concurrency = 1;
 
-    if (state.plannerBillingSettled === false || state.plannerAttemptBillingPending) {
-        return new Response(JSON.stringify({
-            error: "Planner 额度结算尚未完成，请先重试 Planner",
-            code: "PLANNER_SETTLEMENT_PENDING",
-        }), {
-            status: 503,
-            headers: { "Content-Type": "application/json", "Retry-After": "2" },
-        });
-    }
+    if (state.tree?.status !== "locked") return new Response(JSON.stringify({ error: "请先确认结构树", code: "TREE_NOT_LOCKED" }), { status: 409, headers: { "Content-Type": "application/json" } });
 
     if (state.quotaExhausted && !llm.byok) {
         return new Response(JSON.stringify({ error: "充值额度已用尽", code: "QUOTA_EXHAUSTED" }), {
             status: 402, headers: { "Content-Type": "application/json" },
-        });
-    }
-
-    const [plannerAssessment, plannerResultAuthorization] = await Promise.all([
-        assessPlannerLearningAuthorization(state),
-        assessPlannerResultAuthorization(state),
-    ]);
-    if (!plannerAssessment || !plannerResultAuthorization || !samePlannerResultAuthorization(
-        state.plannerResultAuthorization,
-        plannerResultAuthorization,
-    )) {
-        return new Response(JSON.stringify({
-            error: "Planner 路径授权已失效，请重新规划",
-            code: "PLANNER_AUTHORIZATION_EXPIRED",
-        }), {
-            status: 409,
-            headers: { "Content-Type": "application/json" },
         });
     }
 
@@ -938,7 +918,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         javaVersion: state.javaVersion,
     };
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
-    const needs = plannerAssessment.needs;
+    const needs = state.tree.knowledgeNeeds;
     const knowledge = await loadKnowledgeContext({
         env: context.env,
         needs,
@@ -1031,12 +1011,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                         path: file.path,
                         content: file.content,
                         reworkCount: Math.max(0, Number(file.reworkCount) || 0),
+                        contractCheck: state.nodeChecks?.[findNodeByPath(state.tree, file.path)?.id ?? ""],
                     }));
             };
             const dynamicFilesForClient = () => state.generatedFiles
                 .filter((file: any) => !plannedPaths.has(file.path))
                 .map((file: any) => ({
                     path: file.path,
+                    nodeId: findNodeByPath(state.tree, file.path)?.id,
+                    contractCheck: state.nodeChecks?.[findNodeByPath(state.tree, file.path)?.id ?? ""],
                     role: typeof file.role === "string" && file.role ? file.role : "动态补全文件",
                     content: file.content,
                 }));
@@ -1129,6 +1112,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const results = settled.filter((result): result is FileStageOutcome => !!result);
             const learningToolRequests = results.flatMap((result) => result.learningToolRequests);
             const upsertGeneratedFile = (file: GeneratedFileOutput & { reworkCount?: number }) => {
+                const node = findNodeByPath(state.tree, file.path);
+                state.nodeChecks ??= {};
+                if (node) state.nodeChecks[node.id] = checkNodeContract(state.tree, node, file.content);
                 const entry = {
                     path: file.path,
                     role: file.role,
@@ -1172,11 +1158,18 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const retryable = errors.length > 0 && errors.every(error => error.retryable);
             for (const result of results) {
                 dbg("stage:persisted", { path: result.path, stage: result.nextStage, done: !!result.completed });
+                for (const file of result.newFiles) {
+                    const node = findNodeByPath(state.tree, file.path);
+                    await writeSSE(writer, encoder, { type: "new_file", ...file, nodeId: node?.id, contractCheck: node ? state.nodeChecks[node.id] : undefined }, operationAbort);
+                    await writeSSE(writer, encoder, { type: "file_done", path: file.path, content: file.content, contractCheck: node ? state.nodeChecks[node.id] : undefined }, operationAbort);
+                }
                 if (result.completed) {
                     await writeSSE(writer, encoder, {
                         type: "file_done",
                         path: result.completed.path,
                         content: result.completed.content,
+                        nodeId: findNodeByPath(state.tree, result.completed.path)?.id,
+                        contractCheck: state.nodeChecks?.[findNodeByPath(state.tree, result.completed.path)?.id ?? ""],
                     }, operationAbort);
                 }
             }

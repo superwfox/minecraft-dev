@@ -1,9 +1,8 @@
 <template>
   <nav class="topnav">
     <div class="topnav-tabs">
-      <router-link to="/ide" class="tab" :class="{ active: act('ide'), busy: ideBusy }">ide</router-link>
-      <router-link to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }">chat</router-link>
-      <router-link to="/skills" class="tab" :class="{ active: act('skills') }">skill</router-link>
+      <router-link v-lattice to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }" :aria-busy="chatBusy">chat</router-link>
+      <router-link v-lattice to="/skills" class="tab" :class="{ active: act('skills') }">skill</router-link>
     </div>
     <div class="topnav-status">{{ statusText }}</div>
   </nav>
@@ -13,16 +12,13 @@
 import { computed, inject } from "vue";
 import type { Ref } from "vue";
 import { useRoute } from "vue-router";
-import { genTask } from "../logic/generateState";
-import { useIDEStore } from "../ide/composables/useIDEStore";
-import { useIDEChat } from "../ide/composables/useIDEChat";
+import { genTask, clarifyWaiting, pathGateWaiting } from "../logic/generateState";
 
 const route = useRoute();
 const centerText = inject<Ref<string>>("centerText");
 
-function act(which: "ide" | "chat" | "skills"): boolean {
+function act(which: "chat" | "skills"): boolean {
     const p = route.path;
-    if (which === "ide") return p === "/ide" || p.startsWith("/ide/");
     if (which === "chat") return p === "/chat";
     return p === "/skills";
 }
@@ -32,21 +28,17 @@ const BUSY_PHASES = new Set([
     "planning", "clarifying", "grading", "confirming", "generating",
     "verifying", "uploading", "building", "polling", "fixing",
 ]);
-const chatBusy = computed(() => BUSY_PHASES.has(genTask.phase));
-
-// IDE 运行态：加载任务 / IDE 内 AI 流式
-const ideStore = useIDEStore();
-const ideChat = useIDEChat();
-const ideBusy = computed(() => ideStore.state.loading || ideChat.state.streaming);
+const chatBusy = computed(() => BUSY_PHASES.has(genTask.phase) && !clarifyWaiting.value && !pathGateWaiting.value);
 
 // busy 时把 centerText（如「正在分析需求…」）降级为切换栏下方小字
-const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerText?.value || "") : "");
+const statusText = computed(() => chatBusy.value ? (centerText?.value || "") : "");
 </script>
 
 <style scoped>
+@layer legacy {
 .topnav {
     position: relative;
-    font-family: "MinecrafterAlt", sans-serif;
+    font-family: var(--font-brand);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -133,7 +125,7 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
     max-width: 220px;
     height: 13px;
     line-height: 13px;
-    font-family: "Monaco", "ZhuoKai", sans-serif;
+    font-family: var(--font-ui);
     font-size: 10px;
     letter-spacing: 0;
     color: rgba(225, 225, 221, 0.48);
@@ -159,5 +151,7 @@ const statusText = computed(() => (chatBusy.value || ideBusy.value) ? (centerTex
         max-width: 150px;
         font-size: 9px;
     }
+}
+
 }
 </style>

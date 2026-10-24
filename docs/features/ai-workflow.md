@@ -22,8 +22,8 @@
 
 | 模型 / 档位 | 用途 | 备注 |
 |------|------|------|
-| `deepseek-flash` / 原 flash 档 | 预检、Generator 主生成、Summarizer、Dynamic Gen、IDE 助手、对话兜底 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }` |
-| `deepseek-flash` / 原 pro 档 | clarify / **grade** / planner / reChecker / rework / fix / 增量需求 / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 flash 档 | 预检、Generator 主生成、Summarizer、Dynamic Gen、对话兜底 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 pro 档 | clarify / **grade** / planner / reChecker / rework / fix / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 两档均使用 DeepSeek-V4.1-Flash，通过思考强度区分任务分工。Responses 联网发现同样使用 `deepseek-flash`，对应参数为 `reasoning: { effort: "low" }`。
 
@@ -333,7 +333,5 @@ sequenceDiagram
 
 - [完整演示](/guide/demo-showcase)：看 AI 如何处理实际案例
 - [技能库](/features/skills)：给生成注入 Paper 默认 API 之外的能力
-- [浏览器 IDE](/features/ide)：生成后如何在线编辑与二次加工
-- [可视化蓝图](/features/blueprint)：把生成的逻辑变成可视节点图
 - [系统架构](/technical/architecture)：理解系统如何协调各 Agent
 - [API 参考](/technical/api-reference)：plan / clarify / grade / bucket / fix 端点细节

@@ -37,6 +37,7 @@ export const GENERATOR_TYPES: GeneratorType[] = [
 
 /** Planner 输出中描述主类编排的"主干蓝图" */
 export interface MainBlueprint {
+    fqcn?: Record<string, string>;
     events: { event: string; listenerClass: string; priority?: string }[];
     commands: { name: string; executorClass: string; aliases?: string[]; permission?: string }[];
     tasks: { taskClass: string; schedule: "timer" | "once" | "async"; periodTicks?: number; delayTicks?: number; async?: boolean }[];
@@ -58,6 +59,8 @@ export interface BlueprintSlice {
 
 /** Planner 输出的单个文件项 */
 export interface PlanFileItem {
+    nodeId?: string;
+    moduleId?: string;
     path: string;
     role: string;
     order: number;
@@ -226,7 +229,7 @@ export function plannerClarifyPrompt(
     };
 }
 
-// ─── Grader（复杂度分级 + 实现路径）────────────────────────────
+// ─── Grader（结构规划 + 实现路径）────────────────────────────
 
 export function graderPrompt(
     userPrompt: string,
@@ -246,7 +249,7 @@ export function graderPrompt(
         : "";
 
     return {
-        system: `你是一个 Minecraft ${coreType} ${version} 插件需求的「复杂度分级 + 实现路径」分析器。在生成完整 plan 之前，先抽取打分向量、定级，并在非直接级时给出可视化的实现路径。
+        system: `你是一个 Minecraft ${coreType} ${version} 插件需求的「结构规划 + 实现路径」分析器。在生成完整 plan 之前，先抽取打分向量、定级，并在非直接级时给出可视化的实现路径。
 
 只输出 JSON（不要任何解释、不要 markdown 代码块），格式：
 {
@@ -424,7 +427,7 @@ export function skillClarifyContext(bundles: SkillBundle[]): string {
     });
     return "\n\n══ 用户已挂载以下能力包（生成时会按此实现，分析需求时必须纳入考虑）══\n"
         + blocks.join("\n\n")
-        + "\n\n要点：澄清问题 / 复杂度分级都要**优先围绕这些能力的落地细节**——要对接的服务端/地址/端口/凭证、目标对象（群号等）、要启用能力包里的哪些子功能、与现有业务如何衔接；不要问能力包已替用户决定好的事，也不要给出与能力包 deny 冲突的方向。";
+        + "\n\n要点：澄清问题 / 结构规划都要**优先围绕这些能力的落地细节**——要对接的服务端/地址/端口/凭证、目标对象（群号等）、要启用能力包里的哪些子功能、与现有业务如何衔接；不要问能力包已替用户决定好的事，也不要给出与能力包 deny 冲突的方向。";
 }
 
 export function plannerPrompt(
@@ -453,7 +456,7 @@ export function plannerPrompt(
     };
     const axes = gradeContext?.axes ?? [];
     const axisBlock = axes.length
-        ? "\n\n据复杂度分级，本需求点亮了以下轴，plan 必须覆盖对应内容（写进相关文件的 role），但实现一律取最简：\n"
+        ? "\n\n据结构规划，本需求点亮了以下轴，plan 必须覆盖对应内容（写进相关文件的 role），但实现一律取最简：\n"
         + axes.map(a => "- " + (AXIS_REQ[a] || a)).join("\n")
         : "";
     const pathBlock = gradeContext?.chosenPath
@@ -626,7 +629,8 @@ export function reCheckerPrompt(
         : "";
 
     return {
-        system: `你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
+        system: `missing_classes 只列出既不在结构树类名列表、也不在已生成摘要中的类。
+你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
 检查是否存在对插件主类的直接类型引用或强制转换（如 (MainClass) getPlugin(...)、MainClass.getInstance()）。代码应通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 获取插件实例，类型为 Plugin 接口。发现此类模式视为错误。
 文件职责：${fileRole || "未提供显式颜色例外"}
 ${additionalContext ?? ""}
@@ -729,6 +733,7 @@ function formatBlueprintForMain(bp: MainBlueprint): string {
         "调度任务：", tasks,
         "服务（Main 持有）：", services,
         `配置：defaultsCopied=${bp.config.defaultsCopied}, files=${cfgFiles}`,
+        ...Object.values(bp.fqcn ?? {}).map(fqcn => `import ${fqcn};`),
     ].join("\n");
 }
 
@@ -991,14 +996,16 @@ export function dispatchGen(
     skillContext?: string,
     apiContractContext?: string,
     knowledgeContext?: string,
+    treeContext = "",
 ): {
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
 } {
     const spec = specializationBlock(file, slice, ctx);
-    const additionalContext = [spec, apiContractContext, knowledgeContext, skillContext].filter((v): v is string => !!v).join("\n\n");
+    const additionalContext = [spec, apiContractContext, knowledgeContext, skillContext, treeContext].filter((v): v is string => !!v).join("\n\n");
     // 统一输出规范由 fileGenPrompt 放在最终尾部，确保专项规则与 skill 骨架不能覆盖它。
     const gen = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries, additionalContext);
+    if (treeContext) gen.user += "\n\n" + treeContext;
     const checkerSpec = [checkerSpecializationBlock(file, slice), apiContractContext, knowledgeContext]
         .filter((v): v is string => !!v)
         .join("\n\n");
@@ -1054,6 +1061,7 @@ export function buildFixPrompt(
     apiContractContext?: string,
     knowledgeContext?: string,
     progressContext?: string,
+    treeContext?: string,
 ): { system: string; user: string } {
     const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
     const isPom = filePath.toLowerCase().endsWith("pom.xml");
@@ -1075,7 +1083,65 @@ Maven 编译失败。根据下方的编译错误日志修正文件，使其能�
 编译器给出的 required/found、候选重载和符号信息是事实，优先级高于模型记忆。
 必须处理列出的每一条诊断；只修改诊断涉及的代码及必要 import，不要顺手改动无关逻辑，也不要臆测第三方 API 在目标版本改变了返回类型。
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
-${fileRules}`,
+${fileRules}
+${treeContext ?? ""}`,
         user: `文件 ${filePath} 编译失败。\n\n${progressContext ? `修复进度：\n${progressContext}\n\n` : ""}编译错误诊断：\n${buildErrors}\n\n文件内容：\n${fileContent}`,
+    };
+}
+
+export interface TreeBuilderInput {
+    userPrompt: string; coreType: string; version: string; clarifyRounds?: ClarifyRound[];
+    treeSnapshot: string; issues: { code: string; message: string }[];
+    lastResults: { ok: boolean; error?: string }[]; mode: "build" | "refine";
+    correction: string; focusIds: string[]; round: number; maxRounds: number;
+    apiContractContext?: string; knowledgeContext?: string; skillContext?: string;
+}
+export function treeBuilderPrompt(input: TreeBuilderInput): { system: string; user: string } {
+    const decisions = input.clarifyRounds?.flatMap(round => round.todos.map(todo => `- ${todo.question} → ${JSON.stringify(round.answers[todo.id])}`)).join("\n") ?? "";
+    return {
+        system: `你是 Minecraft ${input.coreType} ${input.version} 项目结构规划器。用工具构建结构树，不输出 JSON 正文。
+模块对应 Java 子包，模块数等于业务域数；只有一个业务域时只建一个模块。只有被两个以上模块共用的代码才放 common。
+节点对应单个文件并携带完整成员契约。项目名 PascalCase，模块 id 小写英文，Java 节点 id 为类名且全项目不区分大小写唯一。
+最多 10 个业务模块、40 个业务节点，每轮最多 60 次工具调用。
+CommandGen：commands 非空，同时实现 CommandExecutor 和 TabCompleter。
+ListenerGen：events 非空，实现 Listener；GUI 持有类可以无事件，但必须与监听类 tag=gui、pairId 互指，并包含 InventoryClickEvent。
+TaskGen：schedule 非空，继承 BukkitRunnable，由 Main 启动。
+ManagerGen：集中服务状态；ConfigClassGen：YAML 配置包装；ModelGen：POJO；EnumGen：枚举；UtilGen：无状态工具。
+ConfigGen 只能放 _resources，声明 configKeys 时必须添加 config.yml。所有 methods、constructors、events、commands、schedule、configKeys、lifecycle 都是必须遵守的契约。
+一轮可以批量调用多个树工具。认为完成时调用 finish_tree。learn_public_api 不能与树工具在同一轮混用。
+系统模块 _build、_resources、_root 不可删除改名；pom.xml、plugin.yml、Main 由系统维护，不能改动；MainGen 和 FileRelatedGen 不可由模型创建。
+不使用的 schedule.mode、lifecycle、tag 填 none，其余可选语义用空字符串或空数组。
+refine 模式只改动修正意见和选中对象所涉及的部分，保持其余节点 id 不变。
+极简原则（严格遵守）：
+- 只规划用户需求中明确提到或逻辑上必需的文件，不要自行扩展功能范围
+- 对无状态的事件动作采用自然最小默认值：未要求反馈就不额外发消息，未要求权限就不增加权限节点，未要求首次奖励或防刷就不增加持久化记录；“进入服务器时”按每次成功加入后的事件处理，不追溯插件加载时已经在线的玩家
+- 规划向玩家物品栏发放物品的职责时，必须在相关 节点职责 中写明处理 Inventory.addItem 返回的剩余物，背包已满时在玩家位置自然掉落，避免静默丢失；这是技术完整性处理，不扩展为邮件、暂存或领取系统
+- 每个文件的 role 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
+- 用户原始需求若明确指定了某条输出的颜色或格式，必须把该要求原样写入每个相关 节点职责，供逐文件生成与审查识别例外；未明确指定时不得自行添加其他颜色
+- 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
+- 能在一个文件中实现的逻辑不要拆分成多个文件
+- 不要规划与用户需求无关的辅助类、工具类、基类、接口
+- 功能类只实现 role 中描述的功能，不要预留扩展方法
+- 禁止把 Manager 标成 Util；禁止把 TabCompleter 与 Executor 拆成两个文件
+
+Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
+- **命令类（CommandGen）**：onCommand + onTabComplete 必须在同一个类中，不要拆文件；无论需求是否明说，规划阶段都必须为命令准备完整实现并在 plugin.yml 的 commands 节点声明
+- **事件监听类（ListenerGen）**：由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
+- **Inventory GUI**：若涉及自定义 GUI，必须列出两条 ListenerGen 文件——一条是 GUI 持有类（implements InventoryHolder，提供构造 Inventory 的方法），一条是 InventoryClickEvent 监听类。两条都标 tag="gui"，pairId 互相指向对方
+- **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml（ConfigGen），并由 Main.onEnable 调用 saveDefaultConfig
+- **数据持久化**：**仅当**需要集中管理「较多结构化数据」（多条记录 / 需增删查的集合）时，才规划独立 ManagerGen 类（管理 File + YamlConfiguration，Main.onDisable 落盘）；**少量数据（单玩家数据 / 几个值）优先用 PDC 或直接 getConfig()/saveConfig()，不要为此引入 ManagerGen 重类**——无谓的重类会抬高复杂度、易生成失败而功能收益极小
+- **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
+- **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
+- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘
+按需求落实以下约束，不新增用户未要求的业务：
+【持久化】只用 YAML 配置文件 或 PDC（PersistentDataContainer），禁止 SQL/JDBC/数据库；须写明：存什么、读写时机、由 Main.onDisable 落盘。**状态极少（单玩家数据 / 几个值）时优先用 PDC 或直接 getConfig()，不要为此新建独立 ManagerGen / DataManager 重类**。
+【调度任务】须写明：周期(periodTicks)或一次性、主线程约束、由 Main 启动并在 onDisable cancel。
+【共享状态】须写明：这份可变状态唯一写入方是谁、其他类只读、读取一致性如何保证（避免多处并发写）。
+【外部硬集成】须在 plugin.yml 声明 depend/softdepend，写明缺失该插件时的降级行为；只用 Vault/PlaceholderAPI/WorldGuard 这类。
+【GUI 会话】须写明：会话状态存哪、InventoryClickEvent 点击如何路由、InventoryCloseEvent 关闭时如何清理。
+${input.apiContractContext ?? ""}
+${input.knowledgeContext ?? ""}
+${input.skillContext ?? ""}`,
+        user: `原始需求：${input.userPrompt}\n\n用户已确认的决策（必须严格遵守）：\n${decisions}\n\n当前树快照：\n${input.treeSnapshot}\n\n上一轮失败操作：\n${input.lastResults.filter(r => !r.ok).map(r => r.error).join("\n")}\n\n校验问题：\n${input.issues.map(i => `${i.code}: ${i.message}`).join("\n")}\n\n第 ${input.round}/${input.maxRounds} 轮\n${input.mode === "refine" ? `用户修正原文：${input.correction}\n选中对象（id 与标题见快照）：${input.focusIds.join(", ")}` : ""}`,
     };
 }

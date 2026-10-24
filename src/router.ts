@@ -6,7 +6,7 @@ const router = createRouter({
         {path: "/", component: () => import("./pages/HomePage.vue")},
         {path: "/chat", component: () => import("./pages/ChatPage.vue")},
         {path: "/skills", component: () => import("./pages/SkillsPage.vue")},
-        {path: "/ide/:taskId?", component: () => import("./ide/pages/IDEPage.vue")},
+        {path: "/ide/:taskId?", redirect: "/chat"},
         {path: "/admin", component: () => import("./pages/AdminPage.vue")},
     ],
 });

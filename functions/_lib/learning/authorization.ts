@@ -1,8 +1,4 @@
 import { currentFixLearningAuthorization, sameFixLearningAuthorization } from "./fixAuthorization";
-import {
-    assessPlannerLearningAuthorization,
-    samePlannerLearningAuthorization,
-} from "./plannerAuthorization";
 import type { LearningJobRecord, LearningReasonCode } from "./types";
 import { taskOperationLeaseFromState } from "../taskStore";
 import { currentCompileApiEvidence } from "./compileApiEvidence";
@@ -64,9 +60,5 @@ export async function learningJobAuthorizationFailure(
         ) ? undefined : reasonCode;
     }
 
-    const assessment = await assessPlannerLearningAuthorization(state);
-    return assessment && samePlannerLearningAuthorization(
-        assessment.authorization,
-        job.work.plannerAuthorization,
-    ) ? undefined : reasonCode;
+    return reasonCode;
 }

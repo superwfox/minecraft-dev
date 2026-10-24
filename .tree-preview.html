@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>项目结构树 · 验收预览</title></head><body><div id="app"></div><script type="module">
+import { createApp } from 'vue';
+import Preview from '/.tree-preview.vue';
+import { lattice } from '/src/ui/lattice.ts';
+import '/src/styles/lattice.css';
+import '/src/styles/typography.css';
+createApp(Preview).directive('lattice', lattice).mount('#app');
+</script></body></html>

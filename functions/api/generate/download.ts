@@ -1,5 +1,5 @@
 import { downloadArtifact, deleteBranch } from "../../_lib/github";
-import { deleteTask, getOwnedTask } from "../../_lib/taskStore";
+import { getOwnedTask } from "../../_lib/taskStore";
 
 interface Env {
     GITHUB_PAT: string;
@@ -25,7 +25,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         if (state.buildBranch) {
             deleteBranch(token, state.buildBranch).catch(() => { });
         }
-        context.waitUntil(deleteTask(context.env, taskId, uid).catch(() => { }));
 
         return new Response(resp.body, {
             headers: {

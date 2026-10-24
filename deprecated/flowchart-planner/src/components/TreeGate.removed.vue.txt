@@ -1,0 +1,31 @@
+<template>
+  <section v-if="treeGateWaiting" v-lattice:one class="tree-gate" aria-labelledby="tree-gate-title">
+    <div class="tg-heading"><div><span class="tg-eyebrow">结构确认</span><h2 id="tree-gate-title">这就是插件的文件结构</h2></div><span class="tg-node-count">{{ genTask.tree?.nodes.length ?? 0 }} 个文件</span></div>
+    <p class="tg-description">确认后按这棵树逐个生成。需要调整时，在上方选中相关模块或文件，再描述你的想法。</p>
+    <div v-if="genTask.treeSessionStatus === 'failed' || genTask.treeIssues.length" class="tg-issues"><span>结构规划还有待处理的问题，请提交修正意见后继续。</span><ul><li v-for="(issue, index) in genTask.treeIssues" :key="index" data-font="dynamic">{{ issue.message }}</li></ul></div>
+    <div v-if="genTask.treeFocusIds.length" class="tg-selection"><span class="tg-selection-label">修正范围</span><button v-for="id in genTask.treeFocusIds" :key="id" type="button" class="tg-chip" :aria-label="`移除选择 ${id}`" @click="removeFocus(id)"><span data-font="dynamic">{{ focusTitle(id) }}</span><X :size="12" aria-hidden="true"/></button><button type="button" class="tg-clear" @click="genTask.treeFocusIds = []">清空选择</button></div>
+    <label for="tree-correction" class="tg-label">修正意见<span>可选</span></label>
+    <textarea id="tree-correction" v-model="genTask.treeCorrection" maxlength="1000" rows="3" placeholder="描述要调整的地方，例如：把传送冷却并入 home 模块"/>
+    <div class="tg-actions"><button v-lattice:two type="button" class="tg-refine" :disabled="!genTask.treeCorrection.trim()" @click="refine"><MessageSquare :size="15" aria-hidden="true"/>提交修正</button><button v-lattice type="button" class="tg-confirm" :disabled="!canConfirm" @click="confirm"><Check :size="16" aria-hidden="true"/>确认结构并开始生成<span class="tg-button-count">{{ genTask.tree?.nodes.length ?? 0 }}</span></button></div>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { computed } from "vue";
+import { Check, MessageSquare, X } from "lucide-vue-next";
+import { genTask, submitTreeConfirm, submitTreeRefine, treeGateWaiting } from "../logic/generateState";
+const emit = defineEmits<{ decision: [action: "confirm" | "refine"] }>();
+const canConfirm = computed(() => genTask.tree?.status === "ready" && genTask.treeSessionStatus === "ready" && !genTask.treeIssues.length);
+function removeFocus(id: string) { genTask.treeFocusIds = genTask.treeFocusIds.filter(focus => focus !== id); }
+function focusTitle(id: string) { const target = genTask.tree?.nodes.find(node => node.id === id) ?? genTask.tree?.modules.find(module => module.id === id); return target ? `${target.title} · ${id}` : id; }
+function refine() { if (!genTask.treeCorrection.trim()) return; submitTreeRefine(genTask.treeCorrection.trim(), [...genTask.treeFocusIds]); emit("decision", "refine"); }
+function confirm() { if (!canConfirm.value) return; submitTreeConfirm(); emit("decision", "confirm"); }
+</script>
+
+<style scoped>
+@layer legacy {
+.tree-gate{padding:28px 30px}.tg-heading{display:flex;justify-content:space-between;align-items:center;gap:18px}.tg-eyebrow{font-size:11px;color:var(--oak);letter-spacing:2px}.tg-heading h2{font-size:21px;font-weight:400;margin:9px 0 0}.tg-node-count{flex:none;font-size:12px;color:var(--text-muted)}.tg-description{font-size:13px;line-height:1.9;color:var(--text-secondary);margin:18px 0 24px}.tg-issues{padding:18px;border:1px solid var(--cyan);color:var(--cyan);font-size:12px;line-height:1.8;margin-bottom:22px}.tg-issues ul{padding-left:18px;margin:10px 0 0}.tg-selection{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:22px}.tg-selection-label{font-size:11px;color:var(--text-muted);margin-right:2px}.tg-chip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;min-height:34px;background:var(--oak-soft);border:1px solid var(--line-warm);color:var(--oak);font-size:11px;line-height:1.6;cursor:pointer;max-width:100%;text-align:left}.tg-chip span{overflow-wrap:anywhere}.tg-chip svg{flex:none}.tg-clear{border:0;background:transparent;padding:8px;color:var(--text-muted);font-size:11px;cursor:pointer}.tg-label{display:flex;align-items:center;gap:10px;font-size:12px;margin-bottom:12px}.tg-label span{color:var(--text-muted);font-size:10px}.tree-gate textarea{display:block;width:100%;box-sizing:border-box;resize:vertical;padding:16px 18px;background:var(--surface-0);border:1px solid var(--line);color:var(--text-primary);font-size:13px;line-height:1.9;min-height:105px;border-radius:0}.tree-gate textarea::placeholder{color:var(--text-muted)}.tg-actions{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-top:22px;flex-wrap:wrap}.tg-refine{display:inline-flex;align-items:center;justify-content:center;gap:10px;padding:13px 20px;min-height:48px;color:var(--text-primary);font:inherit;font-size:13px;line-height:1.6;cursor:pointer}.tg-refine:disabled{opacity:.35;cursor:not-allowed}.tg-confirm{min-height:48px}.tg-button-count{font-size:11px;padding:3px 8px;border:1px solid currentColor;line-height:1.3;margin-left:4px}
+@media(max-width:650px){.tree-gate{padding:24px 22px}.tg-heading{align-items:flex-start}.tg-confirm{width:100%}.tg-actions{gap:14px}}
+}
+</style>
+

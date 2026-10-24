@@ -1,12 +1,12 @@
 <template>
-  <button class="contrib-btn" @click="openModal">+ 贡献 skill</button>
+  <button v-lattice class="contrib-btn" @click="openModal">+ 贡献 skill</button>
 
   <Teleport to="body">
     <div v-if="open" class="cs-overlay" @click.self="close">
-      <div class="cs-modal glass2">
+      <div v-lattice:card class="cs-modal glass2">
         <div class="cs-head">
           <span class="cs-title">贡献 skill</span>
-          <button class="cs-x" @click="close">✕</button>
+          <button v-lattice:icon class="cs-x" @click="close">✕</button>
         </div>
 
         <div class="cs-body">
@@ -15,7 +15,7 @@
             <div class="cs-done-icon">✓</div>
             <p>已提交，已为你在仓库创建 PR 并 @ 了你的 GitHub 账号。</p>
             <p>审核结果（通过/打回/评论）会通过 GitHub 通知到你。</p>
-            <a :href="result" target="_blank" rel="noreferrer" class="cs-pr-link">查看 PR →</a>
+            <a v-lattice :href="result" target="_blank" rel="noreferrer" class="cs-pr-link">查看 PR →</a>
           </div>
 
           <template v-else>
@@ -26,7 +26,7 @@
                  @drop.prevent="onDrop"
                  @click="fileInput?.click()">
               <input ref="fileInput" type="file" accept=".zip" class="cs-file" @change="onPick"/>
-              <div class="cs-drop-main">{{ fileName || "把 skill 的 .zip 拖到这里，或点击选择" }}</div>
+              <div :data-font="fileName ? 'dynamic' : undefined" class="cs-drop-main">{{ fileName || "把 skill 的 .zip 拖到这里，或点击选择" }}</div>
               <div class="cs-drop-sub">
                 zip 内须含 <code>brief.json</code> + 各 md，目录最多一层。规范见
                 <router-link to="/skills" @click="close">技能库 README</router-link>
@@ -34,20 +34,20 @@
             </div>
 
             <div v-if="parsing" class="cs-msg">解析中…</div>
-            <div v-if="error" class="cs-err">{{ error }}</div>
+            <div v-if="error" data-font="dynamic" class="cs-err">{{ error }}</div>
 
             <!-- 解析预览 -->
             <div v-if="parsed" class="cs-preview">
               <div class="cs-pv-head">
-                <span class="cs-pv-name">{{ parsed.brief.name }}</span>
-                <span class="cs-pv-id">{{ parsed.skillId }}</span>
+                <span data-font="dynamic" class="cs-pv-name">{{ parsed.brief.name }}</span>
+                <span data-font="dynamic" class="cs-pv-id">{{ parsed.skillId }}</span>
               </div>
-              <p v-if="parsed.brief.capability" class="cs-pv-cap">{{ parsed.brief.capability }}</p>
+              <p v-if="parsed.brief.capability" data-font="dynamic" class="cs-pv-cap">{{ parsed.brief.capability }}</p>
               <div class="cs-pv-files">
                 <div class="cs-pv-files-title">{{ parsed.files.length }} 个文件</div>
                 <div v-for="f in parsed.files" :key="f.path" class="cs-pv-file">
-                  <span class="cs-pv-path">{{ f.path }}</span>
-                  <span class="cs-pv-size">{{ fmtSize(f.size) }}</span>
+                  <span data-font="dynamic" class="cs-pv-path">{{ f.path }}</span>
+                  <span data-font="dynamic" class="cs-pv-size">{{ fmtSize(f.size) }}</span>
                 </div>
               </div>
               <textarea v-model="note" class="cs-note" rows="2" maxlength="500"
@@ -57,8 +57,8 @@
         </div>
 
         <div v-if="!result" class="cs-foot">
-          <button class="cs-btn ghost" @click="close">取消</button>
-          <button class="cs-btn primary" :disabled="!parsed || submitting" @click="submit">
+          <button v-lattice class="cs-btn ghost" @click="close">取消</button>
+          <button v-lattice class="cs-btn primary" :disabled="!parsed || submitting" :aria-busy="submitting" @click="submit">
             {{ submitting ? "提交中…" : "提交贡献" }}
           </button>
         </div>
@@ -207,6 +207,7 @@ async function submit() {
 </script>
 
 <style scoped>
+@layer legacy {
 .contrib-btn {
     border: 1px solid rgba(209, 200, 182, 0.24);
     background: rgba(209, 200, 182, 0.045);
@@ -236,7 +237,7 @@ async function submit() {
     flex-direction: column;
     width: min(560px, 94vw);
     max-height: 100%;
-    border-radius: 8px !important;
+    border-radius: 0;
     padding: 0 !important;
     overflow: hidden;
     color: #d1c8b6;
@@ -276,12 +277,12 @@ async function submit() {
 .cs-preview { margin-top: 16px; }
 .cs-pv-head { display: flex; align-items: baseline; gap: 10px; }
 .cs-pv-name { font-size: 16px; font-weight: 700; color: #d5c9ac; }
-.cs-pv-id { font-size: 12px; color: rgba(209, 200, 182, 0.5); font-family: "Monaco", monospace; }
+.cs-pv-id { font-size: 12px; color: rgba(209, 200, 182, 0.5); font-family: var(--font-content); }
 .cs-pv-cap { font-size: 13px; line-height: 1.55; color: rgba(209, 200, 182, 0.75); margin-top: 6px; }
 .cs-pv-files { margin-top: 12px; border: 1px solid rgba(209, 200, 182, 0.1); border-radius: 4px; overflow: hidden; }
 .cs-pv-files-title { font-size: 12px; color: rgba(255, 245, 235, 0.5); padding: 8px 12px; background: rgba(255, 255, 255, 0.03); }
 .cs-pv-file { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 12px; border-top: 1px solid rgba(255, 240, 225, 0.06); }
-.cs-pv-path { font-family: "Monaco", monospace; color: #f3e7d4; }
+.cs-pv-path { font-family: var(--font-content); color: #f3e7d4; }
 .cs-pv-size { color: rgba(255, 245, 235, 0.45); }
 .cs-note {
     width: 100%;
@@ -329,4 +330,6 @@ async function submit() {
 .cs-btn.ghost:hover { opacity: 1; background: rgba(255, 255, 255, 0.06); }
 .cs-btn.primary { background: #d5c9ac; color: #040402; border-color: #e1d8c4; font-weight: 700; }
 .cs-btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+}
 </style>

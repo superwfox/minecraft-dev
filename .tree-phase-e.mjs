@@ -1,0 +1,16 @@
+import fs from 'node:fs';
+import path from 'node:path';
+const read = p => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+const write = (p, s) => fs.writeFileSync(p, s);
+const file = 'functions/api/generate/build.ts';
+let s = read(file);
+const start = s.indexOf('/**\n * 在 plugin.yml'), end = s.indexOf('function json(', start);
+const watermark = s.slice(start, end);
+write('functions/_lib/pluginWatermark.ts', 'export const TAHAI_TAG = "§eTAHAI§r";\n\n' + watermark.replace('function injectTahaiAuthor', 'export function injectTahaiAuthor'));
+s = 'import { injectTahaiAuthor } from "../../_lib/pluginWatermark";\n' + s.slice(0, start) + s.slice(end);
+s = s.replace('const TAHAI_TAG = "§eTAHAI§r";\n', '');
+const archived = 'deprecated/flowchart-planner/' + file.replace(/\.ts$/, '.removed.ts'); fs.mkdirSync(path.dirname(archived), { recursive: true }); fs.appendFileSync(archived, watermark);
+write(file, s);
+const downloadFile = 'functions/api/generate/download.ts'; let download = read(downloadFile);
+fs.writeFileSync('deprecated/flowchart-planner/functions/api/generate/download.removed.ts', '        context.waitUntil(deleteTask(context.env, taskId, uid).catch(() => { }));\n');
+download = download.replace('deleteTask, getOwnedTask', 'getOwnedTask').replace('        context.waitUntil(deleteTask(context.env, taskId, uid).catch(() => { }));\n', ''); write(downloadFile, download);

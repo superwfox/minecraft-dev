@@ -1,6 +1,6 @@
 <template>
-  <section v-if="taskId && (knowledgeCount > 0 || publicSourceCount > 0 || statusVisible)" class="learning-evidence">
-    <button class="learning-toggle" type="button" @click="toggle"
+  <section v-if="taskId && (knowledgeCount > 0 || publicSourceCount > 0 || statusVisible)" v-lattice:two class="learning-evidence">
+    <button v-lattice class="learning-toggle" type="button" @click="toggle"
             :aria-expanded="expanded" :aria-controls="bodyId">
       <BookOpenCheck :size="17" aria-hidden="true" />
       <span>学习证据</span>
@@ -17,7 +17,7 @@
       </div>
       <div v-else-if="error" class="learning-empty error">
         <span>{{ error }}</span>
-        <button type="button" class="retry" title="重新加载" @click="load">
+        <button v-lattice:icon type="button" class="retry" title="重新加载" @click="load">
           <RefreshCw :size="16" aria-hidden="true" />
         </button>
       </div>
@@ -34,20 +34,20 @@
           </header>
           <div class="diagnostic-list">
             <article v-for="(event, index) in diagnostics" :key="`${event.at}:${event.code}:${index}`"
-                     class="diagnostic-item" :class="event.status">
+                     v-lattice:three class="diagnostic-item" :class="event.status">
               <div class="diagnostic-head">
                 <span class="diagnostic-stage">{{ diagnosticStageLabel(event.stage) }}</span>
                 <code>{{ event.code }}</code>
                 <time>{{ formatDiagnosticTime(event.at) }}</time>
               </div>
-              <p>{{ event.message }}</p>
+              <p data-font="dynamic">{{ event.message }}</p>
               <div v-if="event.query" class="diagnostic-value">
                 <span>查询</span>
                 <code>{{ event.query }}</code>
               </div>
               <a v-if="event.url" class="diagnostic-url" :href="event.url"
                  target="_blank" rel="noopener noreferrer">{{ event.url }}</a>
-              <div v-if="diagnosticMeta(event).length" class="diagnostic-meta">
+              <div v-if="diagnosticMeta(event).length" data-font="dynamic" class="diagnostic-meta">
                 <span v-for="meta in diagnosticMeta(event)" :key="meta">{{ meta }}</span>
               </div>
             </article>
@@ -63,7 +63,7 @@
           <div class="searched-list">
             <article v-for="(source, index) in searchedSources"
                      :key="`${source.needId}:${source.canonicalUrl || source.url}:${index}`"
-                     class="searched-source">
+                     v-lattice:three class="searched-source">
               <div class="searched-head">
                 <span class="source-status" :class="source.status">{{ sourceStatusLabel(source.status) }}</span>
                 <span class="source-meta-inline">
@@ -72,22 +72,22 @@
               </div>
               <div v-if="source.question" class="source-question">
                 <span>技术问题</span>
-                <p>{{ source.question }}</p>
+                <p data-font="dynamic">{{ source.question }}</p>
               </div>
               <div class="source-reason">
                 <span>搜索理由</span>
-                <p>{{ source.reason || "未记录搜索理由" }}</p>
+                <p data-font="dynamic">{{ source.reason || "未记录搜索理由" }}</p>
               </div>
               <a v-if="sourceLinkUrl(source)" class="searched-link" :href="sourceLinkUrl(source)"
                  target="_blank" rel="noopener noreferrer">
-                <span class="searched-link-copy">
+                <span data-font="dynamic" class="searched-link-copy">
                   <strong>{{ source.title || sourceHost(source) }}</strong>
                   <small>{{ sourceDisplayUrl(source) }}</small>
                 </span>
                 <ExternalLink :size="15" aria-hidden="true" />
               </a>
               <div v-else class="searched-link invalid">
-                <span class="searched-link-copy">
+                <span data-font="dynamic" class="searched-link-copy">
                   <strong>未通过安全校验的 URL</strong>
                   <small>{{ sourceDisplayUrl(source) || "候选未提供可展示的 URL" }}</small>
                 </span>
@@ -96,7 +96,7 @@
                 {{ rejectionLabel(source.rejectionCode) }}
                 <code>{{ source.rejectionCode }}</code>
               </div>
-              <div v-if="sourceTechnicalMeta(source).length" class="source-technical-meta">
+              <div v-if="sourceTechnicalMeta(source).length" data-font="dynamic" class="source-technical-meta">
                 <span v-for="meta in sourceTechnicalMeta(source)" :key="meta">{{ meta }}</span>
               </div>
             </article>
@@ -110,35 +110,35 @@
             <span>{{ items.length }}</span>
           </header>
           <div class="learning-items">
-            <article v-for="item in items" :key="item.knowledgeId" class="learning-item">
+            <article v-for="item in items" :key="item.knowledgeId" v-lattice:three class="learning-item">
               <div class="learning-item-head">
                 <span class="learning-status" :class="item.status">{{ statusLabel(item.status) }}</span>
                 <span class="learning-confidence">{{ Math.round(item.confidence * 100) }}%</span>
               </div>
-              <div class="learning-summary">{{ item.summary }}</div>
+              <div data-font="dynamic" class="learning-summary">{{ item.summary }}</div>
               <div v-if="item.reason" class="learning-reason">
                 <span>学习原因</span>
-                <p>{{ item.reason.message }}</p>
+                <p data-font="dynamic">{{ item.reason.message }}</p>
               </div>
-              <div v-if="item.scope" class="learning-scope">{{ formatScope(item.scope) }}</div>
+              <div v-if="item.scope" data-font="dynamic" class="learning-scope">{{ formatScope(item.scope) }}</div>
 
               <div v-if="item.recipe" class="recipe-block">
                 <div class="recipe-head">
-                  <strong>{{ item.recipe.title }}</strong>
+                  <strong data-font="dynamic">{{ item.recipe.title }}</strong>
                   <span>{{ integrationLabel(item.recipe.integrationKind) }}</span>
                 </div>
                 <dl class="recipe-facts">
                   <div>
                     <dt>适用版本</dt>
-                    <dd>{{ item.recipe.versionScope }}</dd>
+                    <dd data-font="dynamic">{{ item.recipe.versionScope }}</dd>
                   </div>
                   <div v-if="item.recipe.prerequisites.length">
                     <dt>前置条件</dt>
-                    <dd>{{ item.recipe.prerequisites.join("；") }}</dd>
+                    <dd data-font="dynamic">{{ item.recipe.prerequisites.join("；") }}</dd>
                   </div>
                   <div v-if="item.recipe.notes.length">
                     <dt>使用说明</dt>
-                    <dd>{{ item.recipe.notes.join("；") }}</dd>
+                    <dd data-font="dynamic">{{ item.recipe.notes.join("；") }}</dd>
                   </div>
                 </dl>
                 <div v-if="item.recipe.imports.length" class="code-group">
@@ -160,8 +160,8 @@
                 <a v-for="source in item.sources" :key="source.sourceId"
                    class="learning-source" :href="source.url" target="_blank" rel="noopener noreferrer">
                   <span class="source-main">
-                    <span class="source-title">{{ source.title }}</span>
-                    <span class="source-meta">
+                    <span data-font="dynamic" class="source-title">{{ source.title }}</span>
+                    <span data-font="dynamic" class="source-meta">
                       {{ source.relation === "contradicts" ? "反驳" : "支持" }} ·
                       {{ authorityLabel(source.authority) }} · {{ sourceTypeLabel(source.sourceType) }} ·
                       {{ formatDate(source.publishedAt || source.fetchedAt) }}
@@ -490,6 +490,7 @@ watch(() => props.learningStatus, (status) => {
 </script>
 
 <style scoped>
+@layer legacy {
 .learning-evidence {
   border-top: 1px solid rgba(209, 200, 182, 0.12);
   padding-top: 10px;
@@ -515,7 +516,7 @@ watch(() => props.learningStatus, (status) => {
   border-radius: 4px;
   background: rgba(67, 128, 145, 0.16);
   color: #8db4be;
-  font-family: monospace;
+  font-family: var(--font-ui);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -566,7 +567,7 @@ watch(() => props.learningStatus, (status) => {
   color: rgba(244, 241, 236, 0.68);
 }
 .evidence-section-head h3 { margin: 0; font-size: 12px; font-weight: 650; }
-.evidence-section-head span { margin-left: auto; color: rgba(244, 241, 236, 0.34); font: 11px monospace; }
+.evidence-section-head span { margin-left: auto; color: rgba(244, 241, 236, 0.34); font: 11px var(--font-ui); }
 .searched-source,
 .learning-item,
 .diagnostic-item { padding: 12px 2px; border-top: 1px solid rgba(244, 241, 236, 0.08); }
@@ -587,13 +588,13 @@ watch(() => props.learningStatus, (status) => {
   background: rgba(67, 128, 145, 0.14);
   font-size: 11px;
 }
-.diagnostic-head code { min-width: 0; color: rgba(244, 241, 236, 0.58); font: 10.5px monospace; overflow-wrap: anywhere; }
-.diagnostic-head time { margin-left: auto; flex: 0 0 auto; color: rgba(244, 241, 236, 0.3); font: 10.5px monospace; }
+.diagnostic-head code { min-width: 0; color: rgba(244, 241, 236, 0.58); font: 10.5px var(--font-ui); overflow-wrap: anywhere; }
+.diagnostic-head time { margin-left: auto; flex: 0 0 auto; color: rgba(244, 241, 236, 0.3); font: 10.5px var(--font-ui); }
 .diagnostic-item p { margin: 7px 0 0; color: rgba(244, 241, 236, 0.7); font-size: 12px; line-height: 1.5; }
 .diagnostic-value { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; margin-top: 7px; }
 .diagnostic-value span { color: rgba(244, 241, 236, 0.34); font-size: 11px; }
 .diagnostic-value code,
-.diagnostic-url { color: rgba(166, 204, 213, 0.86); font: 11px/1.5 monospace; overflow-wrap: anywhere; }
+.diagnostic-url { color: rgba(166, 204, 213, 0.86); font: 11px/1.5 var(--font-ui); overflow-wrap: anywhere; }
 .diagnostic-url { display: block; margin-top: 7px; text-decoration: none; }
 .diagnostic-url:hover { color: #c2e0e6; }
 .diagnostic-meta,
@@ -604,7 +605,7 @@ watch(() => props.learningStatus, (status) => {
   border: 1px solid rgba(244, 241, 236, 0.1);
   border-radius: 4px;
   color: rgba(244, 241, 236, 0.42);
-  font: 10px monospace;
+  font: 10px var(--font-ui);
 }
 .searched-head,
 .learning-item-head,
@@ -626,7 +627,7 @@ watch(() => props.learningStatus, (status) => {
 .source-status.skipped,
 .learning-status.needs_review { color: #e2c88f; background: rgba(180, 143, 68, 0.14); }
 .source-meta-inline,
-.learning-confidence { margin-left: auto; color: rgba(244, 241, 236, 0.38); font: 11px monospace; }
+.learning-confidence { margin-left: auto; color: rgba(244, 241, 236, 0.38); font: 11px var(--font-ui); }
 .source-question,
 .source-reason,
 .learning-reason { margin-top: 8px; }
@@ -679,7 +680,7 @@ watch(() => props.learningStatus, (status) => {
 }
 .rejection-reason code { color: rgba(244, 241, 236, 0.36); font-size: 10px; }
 .learning-summary { color: rgba(244, 241, 236, 0.82); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
-.learning-scope { margin-top: 6px; color: rgba(244, 241, 236, 0.4); font: 11px/1.5 monospace; overflow-wrap: anywhere; }
+.learning-scope { margin-top: 6px; color: rgba(244, 241, 236, 0.4); font: 11px/1.5 var(--font-ui); overflow-wrap: anywhere; }
 .recipe-block { margin-top: 12px; padding-top: 11px; border-top: 1px dashed rgba(244, 241, 236, 0.1); }
 .recipe-head { align-items: flex-start; }
 .recipe-head strong { min-width: 0; color: rgba(244, 241, 236, 0.88); font-size: 13px; line-height: 1.45; }
@@ -698,7 +699,7 @@ watch(() => props.learningStatus, (status) => {
   border-radius: 4px;
   background: #090907;
 }
-.code-group code { color: rgba(224, 231, 232, 0.86); font: 11px/1.55 "SFMono-Regular", Consolas, monospace; white-space: pre; }
+.code-group code { color: rgba(224, 231, 232, 0.86); font: 11px/1.55 var(--font-content); white-space: pre; }
 .recipe-empty { margin-top: 10px; color: rgba(226, 200, 143, 0.62); font-size: 11.5px; line-height: 1.5; }
 .learning-sources { margin-top: 10px; display: flex; flex-direction: column; }
 .source-link-icon { flex: 0 0 auto; }
@@ -722,5 +723,7 @@ watch(() => props.learningStatus, (status) => {
 @media (prefers-reduced-motion: reduce) {
   .learning-chevron,
   .spin { animation: none; transition: none; }
+}
+
 }
 </style>

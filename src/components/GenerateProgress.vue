@@ -2,7 +2,7 @@
   <div class="gen-wrap" ref="wrapRef">
     <!-- 超级并发开关：默认逐阶段串行；开启后并行推进多个文件阶段 -->
     <div class="gen-super-bar" v-if="genTask.phase !== 'idle'">
-      <button class="gen-super-toggle" :class="{ on: superConcurrency }"
+      <button v-lattice class="gen-super-toggle" :class="{ on: superConcurrency }"
               @click="setSuperConcurrency(!superConcurrency)">
         <span class="dot"></span>{{ superConcurrency ? "⚡ 超级并发 · 开" : "超级并发 · 关" }}
       </button>
@@ -11,14 +11,14 @@
           ? "并行推进多个文件阶段；中断时从已保存阶段继续"
           : "默认逐阶段串行，完成一个阶段就保存一次进度" }}
       </span>
-      <button v-if="genTask.taskId" class="gen-super-toggle dbg" @click="downloadDebug"
+      <button v-lattice v-if="genTask.taskId" class="gen-super-toggle dbg" @click="downloadDebug"
               title="下载已脱敏的生成与联网学习诊断（JSON）">
         ⬇ 安全 Debug
       </button>
     </div>
 
     <!-- 规划卡片 -->
-    <div class="glass2 gen-card" v-if="genTask.phase !== 'idle'">
+    <div v-lattice:one class="glass2 gen-card" v-if="genTask.phase !== 'idle'" :aria-busy="genTask.preflightActive || genTask.phase === 'planning'">
       <div class="gen-card-head">
         <div class="gen-card-title">▪ 项目规划</div>
         <ThinkingMarquee v-if="marqueeOn" variant="compact"/>
@@ -29,12 +29,13 @@
           {{ p.label }}
         </span>
       </div>
-      <div v-if="genTask.projectName" class="gen-info">
+      <div v-if="genTask.projectName" data-font="dynamic" class="gen-info">
         <span class="tag">{{ genTask.projectName }}</span>
         <span class="tag">Java {{ genTask.javaVersion }}</span>
         <span class="tag">{{ genTask.packageName }}</span>
       </div>
-      <section v-if="genTask.learningProgress.status !== 'idle'" class="learning-progress"
+      <section v-if="genTask.learningProgress.status !== 'idle'" v-lattice:two class="learning-progress"
+               :aria-busy="!learningTerminal"
                :class="{
                  deferred: learningStopped,
                  ready: genTask.learningProgress.status === 'ready',
@@ -46,7 +47,7 @@
             <span class="learning-dot" :class="{ active: !learningTerminal }" aria-hidden="true"></span>
             <div class="learning-copy">
               <div class="learning-title">{{ learningTitle }}</div>
-              <div class="learning-message">
+              <div data-font="dynamic" class="learning-message">
                 {{ genTask.learningProgress.message || learningStatusLabel }}
               </div>
             </div>
@@ -60,7 +61,7 @@
 
         <div v-if="!learningTerminal && genTask.learningProgress.currentNeed" class="learning-need">
           <span class="learning-need-label">当前查证</span>
-          <span class="learning-need-text">{{ genTask.learningProgress.currentNeed }}</span>
+          <span data-font="dynamic" class="learning-need-text">{{ genTask.learningProgress.currentNeed }}</span>
         </div>
 
         <div class="learning-track" role="list" aria-label="联网查证阶段">
@@ -99,7 +100,7 @@
         </div>
       </section>
       <section v-if="genTask.negativeFactsUsed.length" class="negative-api-evidence" aria-label="不可用 API 证据">
-        <article v-for="fact in genTask.negativeFactsUsed" :key="fact.factId" class="negative-api-fact">
+        <article v-for="fact in genTask.negativeFactsUsed" :key="fact.factId" data-font="dynamic" class="negative-api-fact">
           <span class="negative-api-status">{{ fact.source === "cache" ? "命中不可用 API 缓存" : "已验证不可用" }}</span>
           <code>{{ fact.symbol }}</code>
           <span class="negative-api-dependency">{{ fact.dependencyIdentity }}</span>
@@ -117,10 +118,10 @@
     </div>
 
     <!-- 文件生成卡片：按生成器分组 -->
-    <div class="glass2 gen-card" v-if="genTask.files.length">
+    <div v-lattice:one class="glass2 gen-card" v-if="genTask.files.length" :aria-busy="genTask.phase === 'generating' || genTask.phase === 'verifying'">
       <div class="gen-card-title">▪ 代码生成</div>
       <div class="gen-groups">
-        <div v-for="g in fileGroups" :key="g.type" class="gen-group">
+        <div v-for="g in fileGroups" :key="g.type" v-lattice:two class="gen-group" :aria-busy="g.files.some(f => f.status === 'generating')">
           <div class="gen-group-header">
             <span class="gen-group-label">{{ generatorLabels[g.type] || g.type }}</span>
             <span class="gen-group-count">{{ g.files.length }}</span>
@@ -131,10 +132,10 @@
                 <span class="gen-file-icon">
                   {{ f.status === "done" ? "●" : f.status === "generating" ? "◌" : f.status === "error" ? "×" : "○" }}
                 </span>
-                <span class="gen-file-path">{{ f.path }}</span>
+                <span data-font="dynamic" class="gen-file-path">{{ f.path }}</span>
                 <span v-if="f.tag === 'gui'" class="gen-file-badge">GUI</span>
                 <span v-if="f.streamingPhase" class="gen-file-phase">{{ streamPhaseLabels[f.streamingPhase] || f.streamingPhase }}</span>
-                <span class="gen-file-role">{{ f.role }}</span>
+                <span data-font="dynamic" class="gen-file-role">{{ f.role }}</span>
               </div>
               <div v-if="f.status === 'generating' && f.streamingContent" class="gen-file-stream">
                 <pre>{{ f.streamingContent }}</pre>
@@ -143,13 +144,13 @@
           </div>
         </div>
       </div>
-      <div v-if="expandedFile?.content" class="gen-preview">
+      <div v-if="expandedFile?.content" v-lattice:three class="gen-preview">
         <div class="gen-preview-toolbar">
           <span v-if="copyState !== 'idle'" class="gen-preview-copy-status"
                 :class="{ error: copyState === 'error' }" role="status" aria-live="polite">
             {{ copyState === "success" ? "已复制" : "复制失败，请手动选择代码" }}
           </span>
-          <button type="button" class="gen-preview-copy"
+          <button v-lattice:icon type="button" class="gen-preview-copy"
                   :class="{ success: copyState === 'success', error: copyState === 'error' }"
                   :title="copyState === 'success' ? '已复制' : copyState === 'error' ? '复制失败，请手动选择代码' : '复制当前文件代码'"
                   :aria-label="copyState === 'success' ? '已复制当前文件代码' : '复制当前文件代码'"
@@ -165,65 +166,48 @@
     </div>
 
     <!-- AI 流式输出卡片 -->
-    <div class="glass2 gen-card" v-if="genTask.streamingPhase">
-      <div class="gen-card-title">{{ streamPhaseLabel }} {{ genTask.streamingFile }}</div>
+    <div v-lattice:one class="glass2 gen-card" v-if="genTask.streamingPhase" :aria-busy="['generating', 'verifying', 'fixing'].includes(genTask.phase)">
+      <div class="gen-card-title">{{ streamPhaseLabel }} <span data-font="dynamic">{{ genTask.streamingFile }}</span></div>
       <div class="gen-stream-wrap" ref="streamRef">
         <pre class="gen-stream-text" :key="streamKey">{{ genTask.streamingContent }}</pre>
       </div>
     </div>
 
     <!-- 构建卡片 -->
-    <div class="glass2 gen-card" v-if="showBuild">
+    <div v-lattice:one class="glass2 gen-card" v-if="showBuild" :aria-busy="['uploading', 'building', 'polling', 'fixing'].includes(genTask.phase)">
       <div class="gen-card-title">▪ 构建</div>
       <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
         <div class="gen-spinner"></div>
         <span>{{ genTask.phase === "uploading" ? "上传中..." : "构建中，请稍候..." }}</span>
       </div>
       <div v-if="genTask.phase === 'done'" class="gen-done">
-        <a :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
-        <router-link :to="`/ide/${genTask.taskId}`" class="gen-download-btn ide">在 IDE 打开</router-link>
+        <a v-lattice :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
       </div>
     </div>
 
-    <div class="glass2 gen-card gen-interrupted-card" v-if="genTask.phase === 'interrupted'">
+    <div v-lattice:card class="glass2 gen-card gen-interrupted-card" v-if="genTask.phase === 'interrupted'">
       <div class="gen-card-title">▪ 任务已中断</div>
       <div class="gen-interrupted-copy">已保存当前进度，不会自动恢复或继续消耗 token。</div>
-      <button class="gen-resume-btn" :disabled="resumeBusy" @click="continueGeneration">
+      <button v-lattice class="gen-resume-btn" :disabled="resumeBusy" :aria-busy="resumeBusy" @click="continueGeneration">
         <Play :size="15" aria-hidden="true"/><span>继续任务</span>
       </button>
     </div>
 
     <!-- 失败卡片：手动重试入口（自动兜底用尽后，交回用户手动操作） -->
-    <div class="glass2 gen-card gen-error-card" v-if="genTask.phase === 'error'">
+    <div v-lattice:card class="glass2 gen-card gen-error-card" v-if="genTask.phase === 'error'">
       <div class="gen-card-title">▪ 生成失败</div>
-      <div class="gen-error">{{ genTask.error }}</div>
+      <div data-font="dynamic" class="gen-error">{{ genTask.error }}</div>
       <div class="gen-error-actions">
-        <button v-if="canRetry" class="gen-retry-btn" @click="retryGenerate">↻ 重试（用上次需求重跑）</button>
-        <button v-if="genTask.taskId" class="gen-retry-btn ghost" @click="downloadDebug">⬇ 下载安全 Debug</button>
-      </div>
-    </div>
-
-    <!-- 继续完善：生成完成后直接追加需求（增量补充现有项目）-->
-    <div class="glass2 gen-card" v-if="genTask.phase === 'done'">
-      <div class="gen-card-title">▪ 继续完善</div>
-      <div class="gen-append">
-        <textarea v-model="appendText" class="gen-append-input" rows="3"
-                  placeholder="描述要追加 / 修改的功能，AI 将在当前项目上增量实现并重新编译（如：再加一条 /heal 命令）"
-                  @compositionstart="onImeCompositionStart"
-                  @compositionend="onImeCompositionEnd"
-                  @keydown.enter.exact="onAppendEnter"></textarea>
-        <div class="gen-append-foot">
-          <span class="gen-append-hint">增量基于当前生成版本 · Enter 提交</span>
-          <button class="gen-append-btn" :disabled="!appendText.trim()" @click="submitAppend">追加并重建</button>
-        </div>
+        <button v-lattice v-if="canRetry" class="gen-retry-btn" @click="retryGenerate">↻ 重试（用上次需求重跑）</button>
+        <button v-lattice v-if="genTask.taskId" class="gen-retry-btn ghost" @click="downloadDebug">⬇ 下载安全 Debug</button>
       </div>
     </div>
 
     <!-- 日志卡片 -->
-    <div class="glass2 gen-card" v-if="genTask.logs.length">
+    <div v-lattice:one class="glass2 gen-card" v-if="genTask.logs.length">
       <div class="gen-card-title">▪ 日志</div>
       <div class="gen-logs" ref="logRef">
-        <div v-for="(log, i) in genTask.logs" :key="i" class="gen-log">{{ log }}</div>
+        <div v-for="(log, i) in genTask.logs" :key="i" data-font="dynamic" class="gen-log">{{ log }}</div>
       </div>
     </div>
   </div>
@@ -233,8 +217,7 @@
 import {ref, computed, watch, nextTick, onMounted, onBeforeUnmount} from "vue";
 import {genTask, superConcurrency, setSuperConcurrency} from "../logic/generateState";
 import type {GeneratorType, GenFile, LearningStatus} from "../logic/generateState";
-import {getDownloadUrl, appendFeature, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
-import {isImeComposing, onImeCompositionEnd, onImeCompositionStart} from "../logic/keyboard";
+import {getDownloadUrl, retryGenerate, canRetryGenerate, resumeGenerate} from "../logic/generateHandler";
 import {buildSafeDebugExport} from "../logic/safeDebug";
 import {Check, Copy, Play} from "lucide-vue-next";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
@@ -498,21 +481,6 @@ async function downloadDebug() {
     URL.revokeObjectURL(url);
 }
 
-// 继续完善：追加需求 → 增量补充
-const appendText = ref("");
-function submitAppend() {
-    const t = appendText.value.trim();
-    if (!t) return;
-    appendText.value = "";
-    appendFeature(t);
-}
-
-function onAppendEnter(event: KeyboardEvent) {
-    if (isImeComposing(event)) return;
-    event.preventDefault();
-    submitAppend();
-}
-
 const generatorLabels: Record<GeneratorType, string> = {
     MainGen:        "主类",
     CommandGen:     "命令",
@@ -604,6 +572,7 @@ watch(() => genTask.streamingContent, async () => {
 </script>
 
 <style scoped>
+@layer legacy {
 .negative-api-evidence { display: grid; gap: 10px; margin: 14px 0; }
 .negative-api-fact { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 14px 16px; border: 1px solid var(--line, #474743); border-radius: 12px; }
 .negative-api-status { display: inline-block; padding: 6px 10px; line-height: 1.45; background: rgba(217, 119, 6, .10); color: var(--text-primary, #925208); border-radius: 7px; }
@@ -862,7 +831,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .learning-time strong {
   color: rgba(244, 241, 236, 0.88);
-  font: 600 13px/1.35 monospace;
+  font: 600 13px/1.35 var(--font-ui);
 }
 .learning-time span {
   color: rgba(244, 241, 236, 0.38);
@@ -928,7 +897,7 @@ watch(() => genTask.streamingContent, async () => {
   place-items: center;
   border: 1px solid currentColor;
   border-radius: 50%;
-  font: 10px/1 monospace;
+  font: 10px/1 var(--font-ui);
 }
 .learning-metrics {
   display: grid;
@@ -949,7 +918,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .learning-metric strong {
   color: rgba(244, 241, 236, 0.9);
-  font: 600 14px/1.3 monospace;
+  font: 600 14px/1.3 var(--font-ui);
 }
 .learning-metric span {
   color: rgba(244, 241, 236, 0.4);
@@ -999,7 +968,7 @@ watch(() => genTask.streamingContent, async () => {
   font-size: 11px;
   color: rgba(255,255,255,0.3);
   margin-left: auto;
-  font-family: monospace;
+  font-family: var(--font-content);
 }
 .gen-group-files {
   display: flex;
@@ -1021,7 +990,7 @@ watch(() => genTask.streamingContent, async () => {
 .gen-file.generating { color: var(--oak-highlight, #AF9876); }
 .gen-file.pending { color: rgba(255,255,255,0.3); }
 .gen-file-icon { flex: 0 0 20px; }
-.gen-file-path { color: inherit; font-family: monospace; }
+.gen-file-path { color: inherit; font-family: var(--font-content); }
 .gen-file-badge {
   font-size: 10px;
   padding: 1px 6px;
@@ -1029,12 +998,12 @@ watch(() => genTask.streamingContent, async () => {
   background: rgba(255,255,255,0.1);
   color: rgba(255,255,255,0.7);
   letter-spacing: 0;
-  font-family: monospace;
+  font-family: var(--font-ui);
 }
 .gen-file-phase {
   font-size: 11px;
   color: var(--oak-highlight, #AF9876);
-  font-family: monospace;
+  font-family: var(--font-ui);
   margin-left: 4px;
 }
 .gen-file-role { margin-left: auto; color: rgba(255,255,255,0.3); font-size: 12px; }
@@ -1048,7 +1017,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .gen-file-stream pre {
   color: rgba(255,255,255,0.7);
-  font-family: "Monaco", monospace;
+  font-family: var(--font-content);
   font-size: 10px;
   line-height: 1.4;
   white-space: pre-wrap;
@@ -1125,7 +1094,7 @@ watch(() => genTask.streamingContent, async () => {
 .gen-preview pre {
   color: rgba(255,255,255,0.8);
   font-size: 12px;
-  font-family: "Consolas", "Fira Code", monospace;
+  font-family: var(--font-content);
   white-space: pre-wrap;
   margin: 0;
 }
@@ -1165,62 +1134,11 @@ watch(() => genTask.streamingContent, async () => {
   transition: opacity 0.2s;
 }
 .gen-download-btn:hover { opacity: 0.85; }
-.gen-download-btn.ide {
-  background: rgba(255,255,255,0.08);
-  color: var(--oak-highlight, #AF9876);
-  border: 1px solid rgba(134,112,83,0.55);
-}
 
 .gen-error {
   color: #ff9a8b;
   font-size: 14px;
 }
-
-.gen-append {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.gen-append-input {
-  width: 100%;
-  resize: none;
-  background: #090907;
-  border: 1px solid rgba(209, 200, 182, 0.18);
-  border-radius: 4px;
-  padding: 10px 12px;
-  color: #f4f1ec;
-  font-size: 14px;
-  line-height: 1.5;
-  outline: none;
-  font-family: inherit;
-  transition: border-color 0.2s;
-}
-.gen-append-input:focus { border-color: var(--oak-highlight, #AF9876); }
-.gen-append-input::placeholder { color: rgba(255, 255, 255, 0.3); }
-.gen-append-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.gen-append-hint {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.35);
-}
-.gen-append-btn {
-  flex-shrink: 0;
-  padding: 8px 20px;
-  border-radius: 4px;
-  border: 1px solid #e1d8c4;
-  background: #d5c9ac;
-  color: #040402;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-.gen-append-btn:hover:not(:disabled) { opacity: 0.85; }
-.gen-append-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .gen-logs {
   display: flex;
@@ -1233,7 +1151,7 @@ watch(() => genTask.streamingContent, async () => {
 .gen-log {
   font-size: 12px;
   color: rgba(255,255,255,0.35);
-  font-family: monospace;
+  font-family: var(--font-content);
 }
 
 .gen-stream-wrap {
@@ -1245,7 +1163,7 @@ watch(() => genTask.streamingContent, async () => {
 }
 .gen-stream-text {
   color: rgba(255,255,255,0.8);
-  font-family: "Monaco", monospace;
+  font-family: var(--font-content);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1281,5 +1199,7 @@ watch(() => genTask.streamingContent, async () => {
   .learning-dot.active,
   .gen-spinner,
   .gen-stream-text { animation: none; }
+}
+
 }
 </style>

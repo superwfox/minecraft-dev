@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>踏海组件参考</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#151713;color:#e6e8dc;font:14px/1.7 "Microsoft YaHei",sans-serif}
+main{width:min(1060px,calc(100% - 64px));margin:52px auto 72px}
+h1,h2,h3,p{margin:0}
+section{margin-top:32px}
+.frame{--surface:#20251c;--edge:#59634c;position:relative;background:var(--surface);border:1px solid var(--edge);padding:30px 34px;isolation:isolate}
+.corner{position:absolute;top:-1px;left:-1px;width:64px;height:64px;color:#b5bda3;pointer-events:none;overflow:visible}
+.corner.end{top:auto;left:auto;bottom:-1px;right:-1px;transform:rotate(180deg)}
+.frame h3{font:400 24px/1.5 "KaiTi","STKaiti","Songti SC",serif;letter-spacing:1px}
+.frame p{color:#aeb79f;margin-top:10px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
+.eyebrow{font-size:11px;letter-spacing:2px;color:#949c87}
+.tag{padding:3px 10px;border:1px solid #4d5841;font-size:11px;color:#c5ceb5;white-space:nowrap}
+.foot{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid #3b4432;color:#a5ae96;font-size:12px}
+.actions{display:flex;align-items:center;flex-wrap:wrap;gap:14px}
+.button{--surface:#dce3ce;position:relative;display:inline-flex;justify-content:center;align-items:center;gap:12px;min-height:46px;max-width:100%;padding:12px 25px;border:1px solid #dce3ce;background:var(--surface);color:#252e1e;font:400 14px/1.5 "Microsoft YaHei",sans-serif;cursor:pointer;text-decoration:none;transition:background .15s,border-color .15s}
+.button .corner{width:27px;height:27px;color:currentColor}
+.button > .corner:not(.end){top:1px;left:1px}
+.button > .corner.end{top:auto;left:auto;bottom:1px;right:1px}
+.button:hover:not(:disabled){--surface:#eef2e5;background:var(--surface);border-color:#eef2e5}
+.button:active:not(:disabled){transform:translateY(1px)}
+.button:focus-visible{outline:2px solid #d6e1c2;outline-offset:5px}
+.button:disabled{opacity:.34;cursor:not-allowed}
+.layer{padding:26px clamp(10px,2.2vw,28px)}
+.layer > .corner{width:44px;height:44px}
+.layer-one{--surface:#1b2017;--edge:#414d35}
+.layer-two{--surface:#252d1e;--edge:#5d6c4a;margin-top:20px}
+.layer-three{--surface:#303c26;--edge:#8f9f76;margin-top:20px;padding:28px clamp(12px,2.5vw,32px)}
+.layer-label{display:flex;justify-content:space-between;align-items:center;gap:16px;color:#c6d0b5;font-size:13px;letter-spacing:1px}
+.layer-label small{font-size:11px;color:#a0ae8b;letter-spacing:2px}
+.task{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:24px;margin-top:22px}
+.task h3{font-size:27px}
+.task p{margin-top:6px}
+.dot{display:inline-block;width:5px;height:5px;background:#b6c79a;margin-right:8px;vertical-align:middle}
+.status{margin-top:18px;color:#b6c3a3;font-size:12px}
+.symbols{position:absolute;width:0;height:0;overflow:hidden}
+.corner rect{transform-box:fill-box;transform-origin:center}
+.frame[aria-busy="true"] > .corner rect,.button[aria-busy="true"] > .corner rect{animation:lattice-top 3s infinite;animation-delay:calc(var(--step) * .13s);animation-timing-function:cubic-bezier(.22,.68,.36,1)}
+.frame[aria-busy="true"] > .corner rect.lattice-side,.button[aria-busy="true"] > .corner rect.lattice-side{animation-name:lattice-side}
+.button > .corner rect{transform-origin:center top}
+.button > .corner rect.lattice-side{transform-origin:left center}
+.button[aria-busy="true"] > .corner rect{animation-name:lattice-inset-top}
+.button[aria-busy="true"] > .corner rect.lattice-side{animation-name:lattice-inset-side}
+@keyframes lattice-inset-top{0%,8%,100%{transform:scaleY(1);stroke-width:1}2.8%{transform:scaleY(1.5);stroke-width:1.65}5.5%{transform:scaleY(.96);stroke-width:1}}
+@keyframes lattice-inset-side{0%,8%,100%{transform:scaleX(1);stroke-width:1}2.8%{transform:scaleX(1.5);stroke-width:1.65}5.5%{transform:scaleX(.96);stroke-width:1}}
+@keyframes lattice-top{0%,8%,100%{transform:translateY(0) scale(1);stroke-width:1}2.8%{transform:translateY(-4px) scale(1.08);stroke-width:1.65}5.5%{transform:translateY(1px) scale(.98);stroke-width:1}}
+@keyframes lattice-side{0%,8%,100%{transform:translateX(0) scale(1);stroke-width:1}2.8%{transform:translateX(-4px) scale(1.08);stroke-width:1.65}5.5%{transform:translateX(1px) scale(.98);stroke-width:1}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}.corner rect{animation:none!important}}
+
+.sample-card{max-width:520px}
+</style>
+</head>
+<body>
+<svg class="symbols" aria-hidden="true"><defs><symbol id="lattice" viewBox="0 0 64 64" overflow="visible"><g fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="miter"><path d="M1 63V1H63"/><rect x="3" y="-3" width="4" height="4"/><rect x="11" y="-7" width="8" height="8"/><rect x="24" y="-13" width="14" height="14"/><rect x="43" y="-7" width="8" height="8"/><rect x="55" y="-3" width="4" height="4"/><rect x="-3" y="3" width="4" height="4"/><rect x="-7" y="11" width="8" height="8"/><rect x="-13" y="24" width="14" height="14"/><rect x="-7" y="43" width="8" height="8"/><rect x="-3" y="55" width="4" height="4"/></g></symbol></defs></svg>
+<main>
+<section class="sample-card"><article class="frame">
+        <svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>
+        <div class="card-top"><span class="eyebrow">当前项目</span><span class="tag">待确认</span></div>
+        <h3>服务器欢迎插件</h3><p>让每一次加入，都有恰到好处的欢迎。</p>
+        <div class="foot"><span>Paper · 1.21.4</span><span>查看项目 ↗</span></div>
+      </article></section>
+<section><div class="actions">
+      <button class="button" type="button"><svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>确认方案并开始生成<span aria-hidden="true">→</span></button>
+      <button class="button" type="button"><svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>确认方案</button>
+      <button class="button" type="button">稍后处理</button>
+      <button class="button" type="button" aria-busy="true" disabled>正在准备</button>
+    </div></section>
+<section><div class="frame layer layer-one">
+      <svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>
+      <div class="layer-label"><span>工作区</span></div>
+      <div class="frame layer layer-two">
+        <svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>
+        <div class="layer-label"><span>项目计划</span></div>
+        <div class="frame layer layer-three">
+          <svg class="corner" aria-hidden="true"><use href="#lattice"/></svg><svg class="corner end" aria-hidden="true"><use href="#lattice"/></svg>
+          <div class="layer-label"><span>当前任务</span></div>
+          <div class="task"><div><h3>准备生成项目</h3><p>方案已经就绪，下一步开始构建代码。</p></div><button class="button" type="button">开始生成 →</button></div>
+          <div class="status"><span class="dot"></span>等待开始</div>
+        </div>
+      </div>
+    </div></section>
+</main>
+<script>
+const lattice = document.getElementById('lattice');
+document.querySelectorAll('button.button').forEach(button=>{
+  if(Array.from(button.children).some(child=>child.classList.contains('corner')))return;
+  ['corner','corner end'].forEach(className=>{
+    const corner=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    corner.setAttribute('class',className);
+    corner.setAttribute('aria-hidden','true');
+    button.appendChild(corner);
+  });
+});
+document.querySelectorAll('svg.corner').forEach(corner=>{
+  corner.setAttribute('viewBox','0 0 64 64');
+  corner.innerHTML=lattice.innerHTML;
+  if(corner.parentElement.matches("button.button")){
+    corner.querySelectorAll('rect[width="4"]').forEach(rect=>rect.remove());
+  }
+  const rectangles=Array.from(corner.querySelectorAll('rect'));
+  const side=rectangles.filter(rect=>Number(rect.getAttribute('x'))<0).sort((a,b)=>Number(b.getAttribute('y'))-Number(a.getAttribute('y')));
+  const top=rectangles.filter(rect=>Number(rect.getAttribute('y'))<0).sort((a,b)=>Number(a.getAttribute('x'))-Number(b.getAttribute('x')));
+  if(corner.parentElement.matches("button.button")){
+    top.forEach(rect=>rect.setAttribute("y","1"));
+    side.forEach(rect=>rect.setAttribute("x","1"));
+  }
+  const offset=corner.classList.contains('end')?rectangles.length:0;
+  side.forEach(rect=>rect.classList.add('lattice-side'));
+  [...side,...top].forEach((rect,index)=>rect.style.setProperty('--step',offset+index));
+});
+</script>
+</body>
+</html>

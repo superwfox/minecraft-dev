@@ -715,6 +715,4 @@ OP 执行：/setnotice 服务器升级中，预计 30 分钟后开放
 
 - [了解 AI 工作流](/features/ai-workflow)：深入理解 Grader、Planner、Generator、reChecker 的设计
 - [技能库](/features/skills)：挂载额外能力扩展生成边界
-- [浏览器 IDE](/features/ide)：在生成结果上继续在线编辑
-- [可视化蓝图](/features/blueprint)：把生成的逻辑变成可视节点图
 - [查看架构设计](/technical/architecture)：了解系统如何协调各个组件

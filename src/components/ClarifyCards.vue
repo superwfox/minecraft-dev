@@ -3,7 +3,7 @@
     <!-- 顶部：进度 + 当前问题 -->
     <div class="cc-head">
       <div class="cc-progress">{{ qIndex + 1 }} / {{ todos.length }}</div>
-      <div class="cc-question">{{ current?.question }}</div>
+      <div data-font="dynamic" class="cc-question">{{ current?.question }}</div>
       <div class="cc-sub">
         {{ current?.multiSelect ? "多选 · 向下拖动加入组合" : "单选 · 向下拖动选择" }} · ← → 切换题目
       </div>
@@ -29,16 +29,12 @@
         :style="outerStyle(c)"
       >
         <div
-          class="cc-card-inner"
+          v-lattice:card class="cc-card-inner"
           :class="{ active: activeId === c.id, grabbing: drag && drag.id === c.id, selected: c.selected, custom: c.isCustom }"
           :style="innerStyle(c)"
           @pointerdown="startDrag($event, c)"
         >
-          <svg class="cc-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet">
-            <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
-                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
-          </svg>
-          <div class="cc-card-label">{{ c.label }}</div>
+          <div data-font="dynamic" class="cc-card-label">{{ c.label }}</div>
           <div v-if="c.selected" class="cc-card-badge">已选</div>
         </div>
       </div>
@@ -53,21 +49,21 @@
              @compositionend="onImeCompositionEnd"
              @keydown.enter="onCustomEnter"
              @keydown.esc.stop.prevent="cancelCustom"/>
-      <button class="cc-btn primary" :disabled="!customText.trim()" @click="confirmCustom">确定</button>
-      <button class="cc-btn ghost" @click="cancelCustom">取消</button>
+      <button v-lattice class="cc-btn primary" :disabled="!customText.trim()" @click="confirmCustom">确定</button>
+      <button v-lattice class="cc-btn ghost" @click="cancelCustom">取消</button>
     </div>
 
     <!-- 底部控制 -->
     <div class="cc-foot">
-      <button class="cc-nav" @click="goPrev" :disabled="qIndex === 0" title="上一题 (←)">‹</button>
-      <button class="cc-btn ghost" @click="skip">跳过</button>
+      <button v-lattice:icon class="cc-nav" @click="goPrev" :disabled="qIndex === 0" title="上一题 (←)">‹</button>
+      <button v-lattice class="cc-btn ghost" @click="skip">跳过</button>
       <span class="cc-foot-spacer"></span>
       <span class="cc-count">已答 {{ answeredCount }} / {{ todos.length }}</span>
-      <button v-if="current?.multiSelect" class="cc-btn" :disabled="selectedCount === 0" @click="confirmMulti">
+      <button v-lattice v-if="current?.multiSelect" class="cc-btn" :disabled="selectedCount === 0" @click="confirmMulti">
         本题确认（{{ selectedCount }}）
       </button>
-      <button v-if="allAnswered" class="cc-btn primary" @click="finish">完成确认</button>
-      <button class="cc-nav" @click="goNext" :disabled="qIndex >= todos.length - 1" title="下一题 (→)">›</button>
+      <button v-lattice v-if="allAnswered" class="cc-btn primary" @click="finish">完成确认</button>
+      <button v-lattice:icon class="cc-nav" @click="goNext" :disabled="qIndex >= todos.length - 1" title="下一题 (→)">›</button>
     </div>
   </div>
 </template>
@@ -212,11 +208,9 @@ function outerStyle(card: CardKind) {
 function innerStyle(card: CardKind) {
     const g = geom(card); if (!g) return {};
     return {
-        background: palette[card.color].bg, color: palette[card.color].text,
         transform: `rotate(${g.rot}deg) scale(${g.scale})`,
     };
 }
-const dotColor = (card: CardKind) => palette[card.color].dot;
 
 // ── 悬停聚焦 ──
 function onMove(e: MouseEvent) {
@@ -454,6 +448,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+@layer legacy {
 .clarify-cards {
     --cc-head-top: 118px;
     --cc-stage-shift: 28px;
@@ -466,7 +461,7 @@ onUnmounted(() => {
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
     animation: ccFadeIn 0.3s ease-out;
-    font-family: "Jiangxizhuokai", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-family: var(--font-ui);
 }
 @keyframes ccFadeIn { from { opacity: 0; } to { opacity: 1; } }
 
@@ -574,7 +569,6 @@ onUnmounted(() => {
 .cc-card-inner.selected { box-shadow: 0 0 0 2px rgba(213, 201, 172, .72), 0 18px 48px rgba(0, 0, 0, .52); }
 .cc-card-inner.custom { background-image: linear-gradient(155deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .12)); }
 
-.cc-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .cc-card-label {
     position: relative;
     z-index: 2;
@@ -703,5 +697,7 @@ onUnmounted(() => {
     .cc-card, .cc-card-inner, .cc-hint {
         transition: transform 0.15s linear, box-shadow 0.15s linear, opacity 0.15s linear;
     }
+}
+
 }
 </style>

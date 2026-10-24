@@ -29,7 +29,7 @@ const CORE_DEPENDENCY_KEYS = new Set([
     "adventure", "bukkit", "minecraft", "paper", "paperapi", "spigot", "spigotapi",
 ]);
 
-export type ModelLearningOrigin = "planner" | "generate" | "review" | "rework" | "fix";
+export type ModelLearningOrigin = "tree" | "planner" | "generate" | "review" | "rework" | "fix";
 
 export interface ModelToolCall {
     id: string;
@@ -493,7 +493,7 @@ function validRequest(value: unknown): value is ModelLearningRequest {
     const request = value as ModelLearningRequest;
     return request.schemaVersion === "model_learning_tool.v1"
         && /^learnreq_[a-f0-9]{32}$/i.test(request.requestId)
-        && ["planner", "generate", "review", "rework", "fix"].includes(request.origin)
+        && ["tree", "planner", "generate", "review", "rework", "fix"].includes(request.origin)
         && !!request.originKey
         && Number.isInteger(request.round)
         && request.round >= 1

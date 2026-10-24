@@ -8,7 +8,7 @@
       <circle v-if="tooltip" class="curve-dot"
               :cx="tooltip.px" :cy="tooltip.py" r="3"/>
     </svg>
-    <div v-if="tooltip" class="curve-tip"
+    <div v-if="tooltip" data-font="dynamic" class="curve-tip"
          :style="{ left: tooltip.px + 'px', top: (tooltip.py - 28) + 'px' }">
       x={{ Math.round(tooltip.x) }} → y={{ formatY(tooltip.y) }}
     </div>

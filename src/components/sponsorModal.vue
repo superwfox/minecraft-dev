@@ -1,12 +1,12 @@
 <template>
   <div v-if="showSponsorModal" class="sp-mask" @click.self="close">
-    <div class="sp-card">
+    <div v-lattice:card class="sp-card" :aria-busy="requesting || submitted && !success">
       <div class="sp-title">支持踏海 · 充值额度</div>
 
       <!-- 已到账 -->
       <template v-if="success">
         <div class="sp-done">✓ 到账成功，+{{ success.added }} 件</div>
-        <button class="sp-btn" @click="close">完成</button>
+        <button v-lattice class="sp-btn" @click="close">完成</button>
       </template>
 
       <!-- 已提交，等待确认 -->
@@ -15,8 +15,8 @@
           <div class="sp-spinner"></div>
           <div class="sp-wait-text">已提交，等待管理员确认<br>通常 1-2 分钟自动到账，本窗口会提示</div>
         </div>
-        <div class="sp-note">备注码 <b>{{ code }}</b> · 金额 ¥{{ amount }}</div>
-        <div class="sp-close" @click="close">先关闭（到账后顶栏额度会刷新）</div>
+        <div class="sp-note">备注码 <b data-font="dynamic">{{ code }}</b> · 金额 ¥{{ amount }}</div>
+        <button v-lattice type="button" class="sp-close" @click="close">先关闭（到账后顶栏额度会刷新）</button>
       </template>
 
       <!-- 选档位 + 付款 -->
@@ -27,7 +27,7 @@
         </div>
 
         <div class="sp-tiers">
-          <button v-for="t in SPONSOR_TIERS" :key="t.id"
+          <button v-lattice v-for="t in SPONSOR_TIERS" :key="t.id"
                   class="sp-tier" :class="{ active: selectedTier === t.id }"
                   :disabled="requesting" @click="selectTier(t)">
             <span class="sp-tier-amt">{{ t.label }}</span>
@@ -40,14 +40,14 @@
           <input v-model="customAmount" type="number" min="1" step="1" inputmode="numeric"
                  class="sp-custom-input" placeholder="金额(元，取整)"
                  :disabled="requesting" @keyup.enter="selectCustom"/>
-          <button class="sp-custom-go" :disabled="requesting || !customValid" @click="selectCustom">确定</button>
+          <button v-lattice class="sp-custom-go" :disabled="requesting || !customValid" :aria-busy="requesting" @click="selectCustom">确定</button>
         </div>
 
         <template v-if="code">
           <div class="sp-pay">
             <div class="sp-methods">
-              <span class="sp-method" :class="{ active: method === 'alipay' }" @click="method = 'alipay'; qrError = false">支付宝</span>
-              <span class="sp-method" :class="{ active: method === 'wechat' }" @click="method = 'wechat'; qrError = false">微信</span>
+              <button v-lattice type="button" class="sp-method" :class="{ active: method === 'alipay' }" @click="method = 'alipay'; qrError = false">支付宝</button>
+              <button v-lattice type="button" class="sp-method" :class="{ active: method === 'wechat' }" @click="method = 'wechat'; qrError = false">微信</button>
             </div>
             <img class="sp-qr" :src="method === 'alipay' ? '/alipay.png' : '/wechatPay.jpg'" :alt="method"
                  @error="qrError = true"/>
@@ -56,15 +56,15 @@
           </div>
 
           <div class="sp-code-box" @click="copyCode" title="点击复制">
-            转账备注：<b class="sp-code">{{ code }}</b>
+            转账备注：<b data-font="dynamic" class="sp-code">{{ code }}</b>
             <span class="sp-copy">{{ copied ? "已复制" : "复制" }}</span>
           </div>
 
-          <button class="sp-btn" @click="onPaid">我已付款，提交待确认</button>
+          <button v-lattice class="sp-btn" @click="onPaid">我已付款，提交待确认</button>
         </template>
 
-        <div v-if="errMsg" class="sp-err">{{ errMsg }}</div>
-        <div class="sp-close" @click="close">关闭</div>
+        <div v-if="errMsg" data-font="dynamic" class="sp-err">{{ errMsg }}</div>
+        <button v-lattice type="button" class="sp-close" @click="close">关闭</button>
       </template>
     </div>
   </div>
@@ -170,6 +170,7 @@ function close() {
 </script>
 
 <style scoped>
+@layer legacy {
 .sp-mask {
     position: fixed;
     inset: 0;
@@ -190,7 +191,7 @@ function close() {
     box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
     color: wheat;
     text-align: center;
-    font-family: "ZhuoKai", system-ui, sans-serif;
+    font-family: var(--font-ui);
 }
 .sp-title { font-size: 21px; margin-bottom: 14px; }
 .sp-body {
@@ -331,4 +332,6 @@ function close() {
     user-select: none;
 }
 .sp-close:hover { color: rgba(255, 255, 255, 0.85); }
+
+}
 </style>

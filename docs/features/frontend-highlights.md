@@ -133,33 +133,22 @@ function animate() {
 
 <!-- 截图：首页粒子背景效果 -->
 
-### 4. 毛玻璃 UI（Glass Morphism）
+### 4. 窗棂回纹界面
 
-全局样式 `.glass2` 提供统一的毛玻璃效果。
+导航、聊天框、生成进度和弹窗采用黑色素面、麦色强调、直角细框与对称凸型角花。独立结构参考保存在 `参考/refer.html`，样稿保留归档时的配色；技能卡面和手牌交互暂时保留原样。
 
-**CSS 实现**：
-```css
-.glass2 {
-  background: rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(8px) brightness(0.75);
-  border: 3px solid rgba(255, 255, 255, 0.03);
-  border-radius: 22px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-}
+`src/ui/lattice.ts` 提供全局 `v-lattice` 指令，`src/styles/lattice.css` 维护共享外观。组件原有样式归入 `legacy` 层，共享主题与窗棂层依次覆盖，保证按钮不会因嵌套或 scoped 样式而改变。
+
+```vue
+<div v-lattice:card :aria-busy="running">运行内容</div>
+<div v-lattice:two>第二层内容</div>
+<button v-lattice :aria-busy="submitting">确认方案</button>
+<button v-lattice:icon aria-label="关闭">×</button>
 ```
 
-**关键属性**：
-- `backdrop-filter: blur(8px)`：背景模糊
-- `brightness(0.75)`：降低背景亮度 25%，确保深色主题下文字可读
-- `rgba(255, 255, 255, 0.02)`：极低透明度白色，营造玻璃质感
+卡片外角保留“小—中—大—中—小”，按钮内角保留“中—大—中”。仅 `aria-busy="true"` 的元素顺时针播放角花动画：卡片轻跳，按钮向内部生长。状态结束后恢复静态，并遵循系统减少动态效果设置。角花只作用于元素自己的直接子节点，不随父级运行状态联动。
 
-**应用场景**：
-- 导航栏
-- 对话块
-- 生成进度面板
-- 输入框
-
-<!-- 截图：毛玻璃效果展示 -->
+字体由 `src/styles/typography.css` 统一配置：顶栏品牌与 chat / skill 导航保留 Minecrafter，其他固定文案、按钮和占位提示用全量江西拙楷，输入、AI 回复、方案、代码与日志用全量钉钉进步体。内容区域以 `data-font="dynamic"` 标记，`input`、`textarea`、富文本输入和代码元素自动使用内容字体；字体文件随站点本地托管，使用 `font-display: swap`。独立参考样稿保留归档时的字体。
 
 ### 5. 打字机效果
 
@@ -314,7 +303,6 @@ watch(() => genTask.streamingContent, async () => {
 - 刷新页面后视觉状态完整恢复；
 - 若刷新时 phase 处于进行中态（planning / clarifying / generating / building 等），强制改为 `error` 并提示「刷新中断，请重新生成」——避免 UI 永远卡在等待已死掉的 SSE 或 Promise resolver。
 
-> IDE 模块则用 IndexedDB 单独持久化编辑中的文件，详见[浏览器 IDE](/features/ide)。
 
 ## 为什么不用 Vuex/Pinia？
 
@@ -386,6 +374,5 @@ const { list, containerProps, wrapperProps } = useVirtualList(
 
 ## 下一步
 
-- [浏览器 IDE](/features/ide)：Monaco 编辑器与字节码补全
 - [查看架构设计](/technical/architecture)：了解前后端如何协作
 - [API 参考](/technical/api-reference)：查看完整的 API 文档

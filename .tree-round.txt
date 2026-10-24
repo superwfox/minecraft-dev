@@ -1,0 +1,74 @@
+                const session = state.treeSession as TreeSession;
+                let tree = state.tree as ProjectTree;
+                const round = session.round + 1;
+                const externalDeps = tree.project.externalDeps;
+                if (Array.isArray(body.skillIds)) state.skills = body.skillIds.length
+                    ? await getSkillBundles(context.env, body.skillIds, { signal: operationDeadline.signal }) : [];
+                if (learningResolution?.status === "resolved" && session.learningRequestId === learningResolution.request.requestId) {
+                    tree.knowledgeNeeds = deduplicateKnowledgeNeeds([...tree.knowledgeNeeds, ...learningResolution.request.needs]).slice(0, 8);
+                    state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, learningResolution.knowledgeUsed);
+                }
+                const knowledge = await loadKnowledgeContext({ env: context.env, needs: tree.knowledgeNeeds, maxCharacters: 4800, title: "结构规划已验证公共技术知识" });
+                state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, knowledge.used);
+                const prompt = treeBuilderPrompt({
+                    userPrompt: state.userPrompt, coreType: state.coreType, version: state.version,
+                    clarifyRounds: state.clarifyRounds, treeSnapshot: treePromptSnapshot(tree),
+                    issues: session.issues, lastResults: session.lastResults, mode: session.mode,
+                    correction: session.correction, focusIds: session.focusIds.map(id => {
+                        const target = tree.nodes.find(n => n.id === id) ?? tree.modules.find(m => m.id === id);
+                        return target ? `${id}（${target.title}）` : id;
+                    }), round, maxRounds: MAX_TREE_ROUNDS,
+                    apiContractContext: buildApiContractContext({ coreType: state.coreType, version: state.version, externalDeps, generatedFiles: [] }),
+                    knowledgeContext: knowledge.context, skillContext: state.skills?.length ? skillPlannerContext(state.skills) : "",
+                });
+                const messages: ModelChatMessage[] = learningResolution?.status === "resolved"
+                    && session.learningRequestId === learningResolution.request.requestId
+                    ? learningResolution.messages : [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user }];
+                const idle = createPreflightIdleDeadline(PREFLIGHT_UPSTREAM_FIRST_CHUNK_MS, PREFLIGHT_UPSTREAM_IDLE_MS, "结构规划模型长时间无有效输出", operationDeadline.signal);
+                let modelResult: Awaited<ReturnType<typeof consumeChatStream>>;
+                try {
+                    const response = await withPreflightDeadline(() => fetch(llm.url, {
+                        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
+                        body: JSON.stringify({ model: llm.modelFor("pro"), ...thinkingFor(llm, "pro", "high"), stream: true, stream_options: { include_usage: true }, messages, tools: [...treeToolDefinitions(), ...learningToolDefinition(llm)] }),
+                        signal: idle.signal,
+                    }), idle.signal, "结构规划模型连接超时");
+                    modelResult = await withPreflightDeadline(() => consumeChatStream(response, {
+                        requireUsage: !llm.byok, onActivity: () => idle.arm(), onUsage: value => { usage = value; },
+                        onThinking: content => writeSSE(writer, encoder, { type: "reasoning", stage: "tree", content }, operationAbort, operationDeadline.signal),
+                        onOutput: content => writeSSE(writer, encoder, { type: "delta", stage: "tree", content }, operationAbort, operationDeadline.signal),
+                        onToolCall: (index, name) => writeSSE(writer, encoder, { type: "tool_call", stage: "tree", index, name }, operationAbort, operationDeadline.signal),
+                    }), idle.signal, "结构规划模型长时间无有效输出");
+                } finally { idle.dispose(); }
+                usage = modelResult.usage;
+                assertTreeOperationActive(operationDeadline.signal);
+                const calls = modelResult.message.tool_calls ?? [];
+                const hasLearning = calls.some(call => call.function.name === LEARNING_TOOL_NAME);
+                if (session.learningRequestId) removeModelLearningRequest(state, session.learningRequestId);
+                session.learningRequestId = null;
+                let learningToolRequests: unknown[] | undefined;
+                if (hasLearning) {
+                    const request = await createModelLearningRequest({ message: modelResult.message, messages, origin: "tree", originKey: `tree:${round}`, round, coreType: state.coreType, mcVersion: state.version, allowedDependencies: externalDeps });
+                    if (!request || !llm.canAutoLearn || llm.providerId !== "deepseek") throw new Error("本次模型配置不支持公共 API 学习");
+                    putModelLearningRequest(state, request);
+                    session.learningRequestId = request.requestId;
+                    session.status = "learning";
+                    session.lastResults = calls.filter(c => c.function.name !== LEARNING_TOOL_NAME).map((call, index) => ({ index, tool: call.function.name, ok: false, summary: "操作已忽略", error: "已忽略：与学习调用混用" }));
+                    learningToolRequests = [request];
+                } else {
+                    const applied = applyTreeToolCalls(tree, calls);
+                    tree = applied.tree;
+                    state.tree = tree;
+                    session.lastResults = applied.results;
+                    session.status = "continue";
+                    if (!calls.length) session.emptyRounds++;
+                    if (applied.finishRequested || !calls.length) {
+                        session.issues = validateProjectTree(tree);
+                        if (!session.issues.length) { tree.status = "ready"; session.status = "ready"; }
+                    }
+                    if (session.status !== "ready" && (session.emptyRounds >= 2 || round >= MAX_TREE_ROUNDS)) session.status = "failed";
+                }
+                session.round = round;
+                if (session.status === "learning" && round >= MAX_TREE_ROUNDS) session.status = "failed";
+                state.status = session.status === "ready" || session.status === "failed" ? "tree_confirming" : "tree_planning";
+                const result: Record<string, unknown> = { status: session.status, round, tree: publicTreeView(tree), issues: session.issues, results: session.lastResults, ...(learningToolRequests ? { learningToolRequests } : {}) };
+

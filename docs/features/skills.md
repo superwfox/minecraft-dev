@@ -53,4 +53,3 @@
 
 - [快速开始](/guide/quick-start)：先把第一个插件跑通
 - [AI 工作流](/features/ai-workflow)：看技能在哪一步被注入生成
-- [可视化蓝图](/features/blueprint)：生成后用节点图理解与调整逻辑

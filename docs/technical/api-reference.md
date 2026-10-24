@@ -5,7 +5,6 @@
 ```
 functions/api/chat.ts              → POST /api/chat
 functions/api/stream.ts            → POST /api/stream
-functions/api/maven/jar.ts         → GET  /api/maven/jar        (IDE 补全：Maven 仓库代理)
 functions/api/generate/plan.ts     → POST /api/generate/plan    (双模式：建任务 / 出蓝图+文件树+深度桶)
 functions/api/generate/clarify.ts  → POST /api/generate/clarify (SSE，多轮澄清)
 functions/api/generate/bucket.ts   → POST /api/generate/bucket  (SSE，单桶并发生成，主路径)
@@ -25,8 +24,8 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 | 模型 / 档位 | 用途 | 自动注入 |
 |------|------|----------|
-| `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / IDE 助手 / 对话兜底 / Responses 联网发现 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }`（Responses 使用 `reasoning: { effort: "low" }`） |
-| `deepseek-flash` / 原 pro 档 | clarify / grade / planner / reChecker / rework / fix / 增量需求 / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
+| `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / 对话兜底 / Responses 联网发现 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }`（Responses 使用 `reasoning: { effort: "low" }`） |
+| `deepseek-flash` / 原 pro 档 | clarify / grade / planner / reChecker / rework / fix / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 两档统一调用 DeepSeek-V4.1-Flash，API 模型名为 `deepseek-flash`。`/api/chat` 和 `/api/stream` 优先读取 `reasoning_effort`（`low`、`high`、`max`），默认 `low`；未提供有效 effort 时，旧客户端模型名中的 `pro` / `reason` 仍映射到 `high`。`max` 会原样用于 DeepSeek 请求。需求整理器固定使用 `low`。DeepSeek BYOK 与平台请求采用相同路由；GLM BYOK 保持现有模型和参数策略。
 
@@ -54,7 +53,7 @@ DeepSeek `model` 统一解析为 `deepseek-flash`；服务端显式启用 thinki
 
 ### POST /api/stream
 
-流式对话，用于 IDE 助手、对话兜底等。
+流式对话，用于需求预检、信息提取和对话兜底。旧 `purpose=append` 请求返回 `410 FEATURE_DEPRECATED`。
 
 **请求**：`{ "model": "deepseek-flash", "reasoning_effort": "low", "messages": [...], "stream": true }`
 
@@ -64,25 +63,6 @@ data: {"choices":[{"delta":{"content":"文本片段"}}]}
 
 data: [DONE]
 ```
-
-## Maven 代理 API（IDE 补全）
-
-### GET /api/maven/jar
-
-浏览器无法直接拉 Maven 仓库（CORS），IDE 通过此端点代理拉取 API JAR / metadata 用于补全。仅允许白名单仓库（PaperMC / SpigotMC / Maven Central）。
-
-**请求**：
-```
-GET /api/maven/jar?coords=<groupId>:<artifactId>:<version>&kind=jar|metadata
-```
-
-- `kind=jar`（默认）：返回 JAR 二进制（`application/java-archive`）
-- `kind=metadata`：返回 `maven-metadata.xml` 文本（`application/xml`）
-
-**说明**：
-- 按 groupId 自动选仓库；`-SNAPSHOT` 版本会读 `maven-metadata.xml` 解析出真实 `timestamp-buildNumber` 文件名
-- 边缘缓存 6 小时，响应带 `Access-Control-Allow-Origin: *` 与 `X-Resolved-Url`
-- 错误：`400`（coords 格式错误）/ `404`（snapshot 无法解析 / 上游 404）
 
 ## 项目生成 API
 
@@ -208,9 +188,13 @@ Planner 若缺少版本敏感的公开 API 事实，可先返回 `learningToolRe
 
 ### POST /api/generate/build
 
+仅构建服务端已保存的生成文件。旧 IDE 或追加需求提交的 `files`、`meta` 字段不再接受，返回 `410 FEATURE_DEPRECATED`。
+
 上传文件到 GitHub 并触发构建。
 
-**请求**：`{ "taskId": "..." }`
+**请求**：`{ "taskId": "...", "buildRequestId": "build_<32位十六进制ID>" }`
+
+同一次构建的重试复用原 `buildRequestId`，避免重复触发工作流。
 **响应**：`{ "buildBranch": "build-1710556800000-abc123", "runId": 12345678 }`
 
 - 创建临时分支 `build-{taskId}`

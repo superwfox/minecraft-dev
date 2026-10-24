@@ -1,4 +1,4 @@
-export type PreflightStage = "clarify" | "grade";
+export type PreflightStage = "clarify" | "grade" | "tree";
 export type PreflightOperationStatus = "running" | "retryable" | "cancelled" | "completed";
 
 export interface PreflightOperationRecord {
@@ -33,7 +33,7 @@ export async function preflightInputHash(input: Record<string, unknown>): Promis
 }
 
 export function parsePreflightRequestId(stage: PreflightStage, value: unknown): string {
-    const prefix = stage === "clarify" ? "clarify" : "grade";
+    const prefix = stage;
     return typeof value === "string" && new RegExp(`^${prefix}_[a-z0-9]{16,64}$`, "i").test(value)
         ? value
         : "";

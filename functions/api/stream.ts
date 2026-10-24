@@ -12,7 +12,6 @@ import {
     type LLMProvider,
 } from "../_lib/llm";
 import { getOwnedTask, markTaskQuotaExhausted } from "../_lib/taskStore";
-import { buildApiContractContext } from "../_lib/apiContracts";
 import {
     ClientCancelledError,
     abortOnWriteFailure,
@@ -27,6 +26,11 @@ interface Env {
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
     const body = await context.request.json() as any;
+    if (body.purpose === "append") {
+        return new Response(JSON.stringify({ error: "追加需求功能已停用", code: "FEATURE_DEPRECATED" }), {
+            status: 410, headers: { "Content-Type": "application/json" },
+        });
+    }
     const taskId: string | undefined = body.taskId;
     const uid: string = (context.data as any)?.uid || "";
     let taskState: any = null;
@@ -56,24 +60,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const messages = Array.isArray(body.messages)
         ? body.messages.map((message: any) => ({ ...message }))
         : [];
-    if (body.purpose === "append") {
-        const fallback = body.projectContext ?? {};
-        const generatedFiles = Array.isArray(taskState?.generatedFiles)
-            ? taskState.generatedFiles.filter((file: any) => !/(^|\/)pom\.xml$/i.test(file.path))
-            : [];
-        const pomContent = fallback.pomContent
-            || taskState?.generatedFiles?.find((file: any) => /(^|\/)pom\.xml$/i.test(file.path))?.content;
-        if (pomContent) generatedFiles.push({ path: "pom.xml", content: String(pomContent) });
-        const apiContract = buildApiContractContext({
-            coreType: taskState?.coreType || fallback.coreType,
-            version: taskState?.version || fallback.version,
-            externalDeps: taskState?.grade?.vector?.external_deps ?? [],
-            generatedFiles,
-        });
-        const systemMessage = messages.find((message: any) => message.role === "system");
-        if (systemMessage) systemMessage.content = `${systemMessage.content}\n\n${apiContract}`;
-        else messages.unshift({ role: "system", content: apiContract });
-    }
 
     const payload: any = {
         model,

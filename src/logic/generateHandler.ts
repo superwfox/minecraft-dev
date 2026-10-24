@@ -1,16 +1,19 @@
+import JSZip from "jszip";
+import { renderTreeMarkdown, type ProjectTreeView, type TreeIssue } from "./projectTree";
+import type { GenFile } from "./generateState";
 import {
     genTask,
     resetGenTask,
     waitForClarifyAnswers,
     waitForExtraPrompt,
-    waitForPathChoice,
+    waitForTreeDecision,
     cancelPendingInput,
     persistGenTaskNow,
     superConcurrency,
     normalizeLearningDebugMeta,
     normalizeLearningProgress,
     normalizeClarifyRequestId,
-    normalizeGradeRequestId,
+    normalizeTreeRequestId,
     isUnconfirmedLearningProgress,
     shouldResumeLearningProgress,
     recordLearningDebugEvent,
@@ -36,7 +39,6 @@ import {
 } from "./byok";
 import type { DeepSeekAccessFailure } from "./byok";
 import { selected } from "./skills";
-import { parseResponse } from "../ide/composables/useIDEChat";
 import { readApiError as readBaseApiError, responseError } from "../api/apiError";
 import {actionMessageMetaForError} from "./actionMessages";
 import type {ActionMessageKind} from "./actionMessages";
@@ -47,7 +49,6 @@ import {
 } from "./learningContinuation";
 
 const MAX_FIX_ATTEMPTS = 3;
-const MAX_REPLAN_ATTEMPTS = 2;
 
 // ── 当前生成运行域：所有请求共享一个根 signal，离页/中断/重置可一次性终止 ──
 let generationAbort: AbortController | null = null;
@@ -124,9 +125,9 @@ function markInterrupted(from: GenPhase | "" = genTask.phase) {
     persistGenTaskNow();
 }
 
-// clarify / grade 保留独立 controller，供现有阶段代码清理引用。
+// clarify / tree 保留独立 controller，供现有阶段代码清理引用。
 let clarifyAbort: AbortController | null = null;
-let gradeAbort: AbortController | null = null;
+let treeAbort: AbortController | null = null;
 
 /** 判断错误是否来自 ESC 中断：fetch abort 抛 AbortError，等待 Promise 被拒抛 InterruptError */
 function isInterrupt(e: any): boolean {
@@ -140,7 +141,7 @@ export function interruptGenerate(options: { preserve?: boolean } = {}) {
     generationAbort?.abort(new DOMException("User interrupted", "AbortError"));
     generationRunId++;
     clarifyAbort?.abort(new DOMException("User interrupted", "AbortError"));
-    gradeAbort?.abort(new DOMException("User interrupted", "AbortError"));
+    treeAbort?.abort(new DOMException("User interrupted", "AbortError"));
     cancelPendingInput();
     if (options.preserve !== false) markInterrupted(from);
 }
@@ -333,8 +334,8 @@ function setPhase(phase: GenPhase, log?: string) {
     if (phase !== "interrupted") genTask.interruptedFrom = "";
     let preflightStage: PreflightStage | "" = "";
     if (phase === "clarifying" || phase === "awaiting_input") preflightStage = "clarify";
-    else if (phase === "grading" || phase === "confirming") preflightStage = "grade";
-    else if (phase === "planning" && genTask.taskId) preflightStage = "plan";
+    else if (phase === "tree_planning" || phase === "tree_confirming") preflightStage = "grade";
+    else if (phase === "tree_planning" && genTask.taskId) preflightStage = "plan";
     if (preflightStage) {
         if (genTask.preflightStage !== preflightStage) {
             genTask.preflightThinking = "";
@@ -346,7 +347,7 @@ function setPhase(phase: GenPhase, log?: string) {
 }
 
 function isGeneratingPhase(phase: GenPhase) {
-    return ["planning", "clarifying", "grading", "confirming", "awaiting_input", "generating", "verifying", "uploading", "building", "polling", "fixing"].includes(phase);
+    return ["planning", "clarifying", "grading", "confirming", "awaiting_input", "generating", "verifying", "uploading", "building", "building", "fixing"].includes(phase);
 }
 
 async function post(url: string, body: any, maxRetries = 3) {
@@ -394,270 +395,8 @@ async function post(url: string, body: any, maxRetries = 3) {
     }
 }
 
-function createPlannerRequestId(): string {
-    return `plan_${crypto.randomUUID().replace(/-/g, "")}`;
-}
-
-function createClarifyRequestId(): string {
-    return `clarify_${crypto.randomUUID().replace(/-/g, "")}`;
-}
-
-function createGradeRequestId(): string {
-    return `grade_${crypto.randomUUID().replace(/-/g, "")}`;
-}
-
-function createBuildRequestId(): string {
-    return `build_${crypto.randomUUID().replace(/-/g, "")}`;
-}
-
-// 初次 Planner 请求仅按 SSE 活动判断失活；Learning 续接另受共享的绝对时限约束。
-const PLANNER_TRANSPORT_IDLE_MS = 5_000;
-const PLANNER_CONNECTION_RETRIES = 3;
-
-class PlannerTransportTimeoutError extends Error {
-    readonly code = "PLANNER_TRANSPORT_TIMEOUT";
-    readonly retryable = true;
-
-    constructor() {
-        super("Planner SSE 连接 5 秒未收到任何数据");
-        this.name = "PlannerTransportTimeoutError";
-    }
-}
-
-function plannerAttemptAbortError(controller: AbortController): Error | null {
-    if (!controller.signal.aborted) return null;
-    return controller.signal.reason instanceof Error
-        ? controller.signal.reason
-        : null;
-}
-
-function isPlannerTimeout(code: string, status: number): boolean {
-    return code === "PLANNER_TIMEOUT"
-        || code === "CLOUDFLARE_TIMEOUT"
-        || status === 524;
-}
-
-async function postPlanner(
-    body: any,
-    learningContinuation?: LearningContinuationDeadline,
-): Promise<any> {
-    const signal = generationSignal();
-    const runId = generationRunId;
-    let announcedWait = false;
-    let failures = 0;
-    let timeoutRetries = 0;
-    const waitForPlannerRetry = async (delayMs: number) => {
-        learningContinuation?.assertActive();
-        const remainingMs = learningContinuation
-            ? Math.max(1, learningContinuation.deadlineAt - Date.now())
-            : delayMs;
-        await waitWithAbort(Math.min(delayMs, remainingMs), signal);
-        learningContinuation?.assertActive();
-    };
-    while (true) {
-        learningContinuation?.assertActive();
-        const attemptController = new AbortController();
-        const unlinkGenerationAbort = linkGenerationAbort(attemptController);
-        const unlinkLearningContinuation = learningContinuation
-            ? linkAbortSignal(attemptController, learningContinuation.signal)
-            : () => {};
-        let transportIdleTimer: ReturnType<typeof setTimeout> | undefined;
-        let lastTransportActivity = 0;
-
-        const clearTransportIdleTimer = () => {
-            if (transportIdleTimer) clearTimeout(transportIdleTimer);
-            transportIdleTimer = undefined;
-        };
-        const scheduleTransportIdleCheck = () => {
-            clearTransportIdleTimer();
-            const elapsed = Date.now() - lastTransportActivity;
-            const remaining = Math.max(1, PLANNER_TRANSPORT_IDLE_MS - elapsed);
-            transportIdleTimer = setTimeout(() => {
-                if (attemptController.signal.aborted) return;
-                if (Date.now() - lastTransportActivity < PLANNER_TRANSPORT_IDLE_MS) {
-                    scheduleTransportIdleCheck();
-                    return;
-                }
-                attemptController.abort(new PlannerTransportTimeoutError());
-            }, remaining);
-        };
-        const recordTransportActivity = () => {
-            if (attemptController.signal.aborted) return;
-            lastTransportActivity = Date.now();
-            scheduleTransportIdleCheck();
-        };
-
-        try {
-            let resp: Response;
-            try {
-                resp = await fetchWithByokFallback("/api/generate/plan", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
-                    signal: attemptController.signal,
-                });
-            } catch (error) {
-                if (signal.aborted || runId !== generationRunId) throw generationAbortError();
-                learningContinuation?.assertActive();
-                const attemptError = plannerAttemptAbortError(attemptController) || error;
-                if (isInterrupt(attemptError)) throw generationAbortError();
-                if (failures++ >= PLANNER_CONNECTION_RETRIES) throw attemptError;
-                await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
-                continue;
-            }
-
-            assertGenerationRun(runId);
-            learningContinuation?.assertActive();
-
-            await rejectAccessResponse(resp);
-            if (resp.status === 429) {
-                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-                throw noRetry(payload?.error || "请求过于频繁", {
-                    code: payload?.code || "RATE_LIMITED",
-                    status: resp.status,
-                });
-            }
-            if (resp.status === 409) {
-                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-                if (payload?.code !== "PLANNER_IN_PROGRESS") {
-                    const error = new Error(payload?.error || "Planner 状态冲突");
-                    (error as any).code = payload?.code || "PLANNER_CONFLICT";
-                    (error as any).status = resp.status;
-                    (error as any).noRetry = true;
-                    throw error;
-                }
-                if (!announcedWait) {
-                    appendGenLog("· Planner 已在服务端执行，等待现有结果...");
-                    announcedWait = true;
-                }
-                const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 2);
-                await waitForPlannerRetry(retrySeconds * 1000);
-                continue;
-            }
-            if (resp.status === 400) {
-                const payload = await resp.json().catch(() => ({})) as { code?: string; error?: string };
-                throw noRetry(payload?.error || "Planner 请求无效", {
-                    code: payload?.code || "PLANNER_REQUEST_INVALID",
-                    status: resp.status,
-                });
-            }
-            if (!resp.ok) {
-                const apiError = await readApiError(resp, `Planner 请求失败（HTTP ${resp.status}）`);
-                if (resp.status === 404 || apiError.code === "TASK_NOT_FOUND") {
-                    throw noRetry(apiError.message || TASK_UNAVAILABLE_MESSAGE, {
-                        code: apiError.code || "TASK_NOT_FOUND",
-                        status: resp.status,
-                    });
-                }
-                if (isPlannerTimeout(apiError.code, resp.status)) {
-                    if (timeoutRetries++ >= 1) {
-                        const error = new Error(apiError.message);
-                        (error as any).code = apiError.code;
-                        (error as any).status = resp.status;
-                        throw error;
-                    }
-                    const retrySeconds = Math.max(1, Number(resp.headers.get("Retry-After")) || 1);
-                    appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
-                    await waitForPlannerRetry(retrySeconds * 1000);
-                    continue;
-                }
-                if (failures++ >= PLANNER_CONNECTION_RETRIES) {
-                    throw new Error(apiError.message);
-                }
-                await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
-                continue;
-            }
-            const contentType = resp.headers.get("Content-Type") || "";
-            if (contentType.includes("text/event-stream")) {
-                let streamed: any;
-                recordTransportActivity();
-                try {
-                    streamed = await readSSE(resp, {
-                        preflightStage: "plan",
-                        requireDone: true,
-                        runId,
-                        onActivity: recordTransportActivity,
-                    });
-                } catch (error: any) {
-                    if (signal.aborted || runId !== generationRunId) throw generationAbortError();
-                    learningContinuation?.assertActive();
-                    const attemptError = plannerAttemptAbortError(attemptController) || error;
-                    if (isInterrupt(attemptError)) throw generationAbortError();
-                    if (attemptError?.noRetry || attemptError?.terminal) throw attemptError;
-                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
-                        throw attemptError;
-                    }
-                    const delay = 2000 * Math.pow(2, failures - 1);
-                    const reason = attemptError instanceof PlannerTransportTimeoutError
-                        ? "链路静默，正在刷新连接"
-                        : "连接中断";
-                    appendGenLog(`! Planner ${reason}，${delay / 1000}s 后继续等待 (${failures}/${PLANNER_CONNECTION_RETRIES})...`);
-                    await waitForPlannerRetry(delay);
-                    continue;
-                } finally {
-                    clearTransportIdleTimer();
-                }
-                if (!streamed) {
-                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
-                        throw new Error("Planner 流已结束，但未返回结果");
-                    }
-                    await waitForPlannerRetry(2000 * Math.pow(2, failures - 1));
-                    continue;
-                }
-                if (streamed.error) {
-                    const status = Number(streamed.status) || 0;
-                    const code = typeof streamed.code === "string" ? streamed.code : "";
-                    if (code === "PLANNER_IN_PROGRESS") {
-                        if (!announcedWait) {
-                            appendGenLog("· Planner 已在服务端执行，等待现有结果...");
-                            announcedWait = true;
-                        }
-                        const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 2);
-                        await waitForPlannerRetry(retrySeconds * 1000);
-                        continue;
-                    }
-
-                    const plannerError = new Error(String(streamed.error));
-                    (plannerError as any).code = code;
-                    (plannerError as any).status = status;
-                    if (isPlannerTimeout(code, status)) {
-                        if (timeoutRetries++ >= 1) throw plannerError;
-                        const retrySeconds = Math.max(1, Number(streamed.retryAfter) || 1);
-                        appendGenLog("! Planner 响应超时，使用同一请求 ID 重试一次...");
-                        await waitForPlannerRetry(retrySeconds * 1000);
-                        continue;
-                    }
-                    if (status >= 400 && status < 500) {
-                        (plannerError as any).noRetry = true;
-                        throw plannerError;
-                    }
-                    if (failures++ >= PLANNER_CONNECTION_RETRIES) {
-                        throw plannerError;
-                    }
-                    const delay = 2000 * Math.pow(2, failures - 1);
-                    appendGenLog(`! Planner 请求失败，${delay / 1000}s 后重试 (${failures}/${PLANNER_CONNECTION_RETRIES})...`);
-                    await waitForPlannerRetry(delay);
-                    continue;
-                }
-                assertGenerationRun(runId);
-                learningContinuation?.assertActive();
-                return streamed;
-            }
-            const result = await resp.json();
-            assertGenerationRun(runId);
-            learningContinuation?.assertActive();
-            return result;
-        } catch (error) {
-            if (signal.aborted || runId !== generationRunId) throw generationAbortError();
-            learningContinuation?.assertActive();
-            throw error;
-        } finally {
-            clearTransportIdleTimer();
-            unlinkLearningContinuation();
-            unlinkGenerationAbort();
-        }
-    }
-}
+function createClarifyRequestId(): string { return `clarify_${crypto.randomUUID().replace(/-/g, "")}`; }
+function createBuildRequestId(): string { return `build_${crypto.randomUUID().replace(/-/g, "")}`; }
 
 async function get(url: string) {
     const signal = generationSignal();
@@ -1535,12 +1274,11 @@ function syncCurrentIndex() {
     genTask.currentIndex = genTask.files.filter(f => f.status === "done").length;
 }
 
-type PreflightStage = "clarify" | "grade" | "plan";
+type PreflightStage = "clarify" | "tree";
 
 function normalizePreflightStage(value: unknown): PreflightStage | "" {
     if (value === "clarify" || value === "clarifying") return "clarify";
-    if (value === "grade" || value === "grading") return "grade";
-    if (value === "plan" || value === "planning") return "plan";
+    if (value === "tree" || value === "tree_planning" || value === "tree_confirming") return "tree";
     return "";
 }
 
@@ -1615,6 +1353,22 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
 
                 try {
                     switch (evt.type) {
+                        case "tool_call":
+                            genTask.treeToolCallCount++;
+                            break;
+                        case "tree_ops":
+                            genTask.treeOpsLog.push(...(evt.results ?? []).map((result: { ok: boolean; summary: string; error?: string }) => result.ok ? result.summary : result.error || result.summary));
+                            genTask.treeOpsLog = genTask.treeOpsLog.slice(-100);
+                            break;
+                        case "tree_patch":
+                            if (genTask.tree && evt.node) {
+                                const index = genTask.tree.nodes.findIndex(node => node.id === evt.node.id);
+                                if (index >= 0) genTask.tree.nodes[index] = evt.node; else genTask.tree.nodes.push(evt.node);
+                                if (evt.module && !genTask.tree.modules.some(module => module.id === evt.module.id)) genTask.tree.modules.push(evt.module);
+                                genTask.tree.revision++;
+                                if (!findFile(evt.node.path)) genTask.files.push({ path: evt.node.path, nodeId: evt.node.id, moduleId: evt.node.moduleId, origin: evt.node.origin, role: evt.node.responsibility, generatorType: evt.node.kind, status: "pending" });
+                            }
+                            break;
                         case "learning_snapshot":
                             applyLearningSnapshot(evt.snapshot);
                             break;
@@ -1682,6 +1436,7 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                             appendGenLog(`× ${evt.error || evt.message || "流式阶段出错"}`);
                             break;
                         case "file_done": {
+                            if (evt.contractCheck) genTask.nodeChecks[evt.contractCheck.nodeId] = evt.contractCheck;
                             const f = findFile(evt.path);
                             if (f) {
                                 f.content = evt.content;
@@ -1703,8 +1458,10 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                         case "new_file":
                             // 动态生成的缺失类：插入或更新
                             {
+                                if (evt.contractCheck) genTask.nodeChecks[evt.contractCheck.nodeId] = evt.contractCheck;
                                 const existing = findFile(evt.path);
                                 if (existing) {
+                                    existing.nodeId = evt.nodeId || existing.nodeId;
                                     existing.role = evt.role || existing.role;
                                     existing.content = evt.content;
                                     existing.status = "done";
@@ -1712,7 +1469,7 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                                     existing.streamingContent = "";
                                 } else {
                                     genTask.files.push({
-                                        path: evt.path, role: evt.role,
+                                        path: evt.path, role: evt.role, nodeId: evt.nodeId,
                                         content: evt.content, status: "done",
                                     });
                                 }
@@ -1726,6 +1483,7 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                             }
                             break;
                         case "result":
+                            if (evt.nodeChecks) Object.assign(genTask.nodeChecks, evt.nodeChecks);
                             result = evt;
                             break;
                         case "heartbeat":
@@ -1784,32 +1542,6 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
     return result;
 }
 
-/** SSE streaming file generation (legacy single-file flow，仅供补缺/重新规划使用) */
-async function streamFileGeneration(taskId: string): Promise<any> {
-    const signal = generationSignal();
-    const runId = generationRunId;
-    const resp = await fetchWithByokFallback("/api/generate/file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId }),
-        signal,
-    });
-    assertGenerationRun(runId);
-    await rejectAccessResponse(resp);
-    if (!resp.ok) throw await responseError(resp);
-
-    const contentType = resp.headers.get("Content-Type") || "";
-    if (contentType.includes("application/json")) {
-        const result = await resp.json();
-        assertGenerationRun(runId);
-        return result;
-    }
-
-    return readSSE(resp, { runId });
-}
-
-/** SSE streaming bucket generation — 一次推进一批文件的单个持久化阶段。
- *  服务端通过 heartbeat 保持连接，客户端不再因静默时长主动中止。 */
 async function streamBucketGeneration(
     taskId: string,
     bucketIndex: number,
@@ -1857,14 +1589,14 @@ function preflightAbortError(controller: AbortController): Error | null {
 
 type PreflightRequestConfig = {
     endpoint: string;
-    stage: "clarify" | "grade";
+    stage: "clarify" | "tree";
     label: string;
-    requestIdField: "clarifyRequestId" | "gradeRequestId";
+    requestIdField: "clarifyRequestId" | "treeRequestId";
     requestId: string;
     taskId: string;
     payload: Record<string, unknown>;
-    inProgressCode: "CLARIFY_IN_PROGRESS" | "GRADE_IN_PROGRESS";
-    recoveryCode: "CLARIFY_RECOVERY_REQUIRED" | "GRADE_RECOVERY_REQUIRED";
+    inProgressCode: "CLARIFY_IN_PROGRESS" | "TREE_IN_PROGRESS";
+    recoveryCode: "CLARIFY_RECOVERY_REQUIRED" | "TREE_RECOVERY_REQUIRED";
     normalizeRequestId: (value: unknown) => string;
     onRecoverRequestId: (requestId: string) => void;
     setController: (controller: AbortController) => void;
@@ -1917,7 +1649,7 @@ function attachApiError(
 async function streamPreflightRequest(config: PreflightRequestConfig): Promise<any> {
     const rootSignal = generationSignal();
     const runId = generationRunId;
-    const leaseLostCode = config.stage === "clarify" ? "CLARIFY_LEASE_LOST" : "GRADE_LEASE_LOST";
+    const leaseLostCode = config.stage === "clarify" ? "CLARIFY_LEASE_LOST" : "TREE_LEASE_LOST";
     let failures = 0;
     let announcedWait = false;
     let requestId = config.requestId;
@@ -2152,31 +1884,6 @@ async function streamClarify(
         setController: controller => { clarifyAbort = controller; },
         clearController: controller => {
             if (clarifyAbort === controller) clarifyAbort = null;
-        },
-    });
-}
-
-/** SSE streaming complexity grading. Correction redraws use a new semantic request ID. */
-async function streamGrade(taskId: string, gradeRequestId: string, correction?: string): Promise<any> {
-    return streamPreflightRequest({
-        endpoint: "/api/generate/grade",
-        stage: "grade",
-        label: "分级",
-        requestIdField: "gradeRequestId",
-        requestId: gradeRequestId,
-        taskId,
-        payload: { correction },
-        inProgressCode: "GRADE_IN_PROGRESS",
-        recoveryCode: "GRADE_RECOVERY_REQUIRED",
-        normalizeRequestId: normalizeGradeRequestId,
-        onRecoverRequestId: requestId => {
-            genTask.gradeRequestId = requestId;
-            genTask.gradeRequestCorrection = "";
-            persistGenTaskNow();
-        },
-        setController: controller => { gradeAbort = controller; },
-        clearController: controller => {
-            if (gradeAbort === controller) gradeAbort = null;
         },
     });
 }
@@ -2478,693 +2185,208 @@ async function runClarifyStage(resumePhase: GenPhase | "" = ""): Promise<void> {
     }
 }
 
-async function runGradeStage(resumePhase: GenPhase | "" = ""): Promise<string | undefined> {
-    generationSignal();
-    const stageRunId = generationRunId;
-    let correction: string | undefined = resumePhase === "grading"
-        ? genTask.gradeRequestCorrection || undefined
-        : undefined;
-
-    if (resumePhase === "confirming") {
-        if (!genTask.grade) throw new Error("实现路径确认状态已失效，请重试分级");
-        const choice = await waitForPathChoice();
-        if (choice.correction) {
-            correction = choice.correction;
-            genTask.grade = null;
-        } else {
-            genTask.chosenPathId = choice.pathId || "";
-            genTask.grade = null;
-            setPhase("planning");
-            persistGenTaskNow();
-            return choice.pathId;
-        }
+interface TreeRoundResult {
+    status: "continue" | "learning" | "ready" | "failed";
+    round: number; tree: ProjectTreeView; issues: TreeIssue[];
+    results: { ok: boolean; summary: string; error?: string }[];
+    learningToolRequests?: unknown[];
+}
+function applyTreeView(tree: ProjectTreeView | null) {
+    if (!tree) return;
+    genTask.tree = { ...tree, project: { ...tree.project, coreType: genTask.coreType, version: genTask.version } };
+    genTask.projectName = tree.project.projectName; genTask.packageName = tree.project.packageName; genTask.javaVersion = tree.project.javaVersion;
+}
+async function refreshTree() {
+    const result = await get(`/api/generate/tree?taskId=${encodeURIComponent(genTask.taskId)}`);
+    applyTreeView(result.tree);
+    Object.assign(genTask.nodeChecks, result.nodeChecks ?? {});
+    if (result.session) {
+        genTask.treeSessionStatus = result.session.status;
+        genTask.treeRound = result.session.round;
+        genTask.treeIssues = result.session.issues ?? [];
     }
-
+    return result;
+}
+async function streamTreeRound(action: "build" | "refine" | "continue", learningToolJobs: Record<string, string>): Promise<TreeRoundResult> {
+    if (!genTask.treeRequestId) {
+        genTask.treeRequestId = `tree_${crypto.randomUUID().replace(/-/g, "")}`;
+        genTask.treeMode = action;
+    }
+    genTask.treeToolCallCount = 0;
+    persistGenTaskNow();
+    return streamPreflightRequest({
+        endpoint: "/api/generate/tree", stage: "tree", label: "结构树规划", requestIdField: "treeRequestId",
+        requestId: genTask.treeRequestId, taskId: genTask.taskId,
+        payload: { action: genTask.treeMode, correction: genTask.treeCorrection, focusIds: genTask.treeFocusIds, skillIds: [...selected], learningToolJobs },
+        inProgressCode: "TREE_IN_PROGRESS", recoveryCode: "TREE_RECOVERY_REQUIRED", normalizeRequestId: normalizeTreeRequestId,
+        onRecoverRequestId: requestId => { genTask.treeRequestId = requestId; persistGenTaskNow(); },
+        setController: controller => { treeAbort = controller; }, clearController: controller => { if (treeAbort === controller) treeAbort = null; },
+    });
+}
+export async function confirmTree(): Promise<void> {
+    if (!genTask.tree) throw new Error("结构树尚未就绪");
+    const result = await post("/api/generate/tree", { taskId: genTask.taskId, action: "confirm", revision: genTask.tree.revision });
+    applyTreeView(result.tree);
+    genTask.files = result.plan.map((file: GenFile) => ({ ...file, status: "pending", origin: genTask.tree?.nodes.find(node => node.id === file.nodeId)?.origin }));
+    genTask.currentBucket = 0; syncCurrentIndex(); setPhase("generating"); persistGenTaskNow();
+}
+export async function runTreeStage(initialAction: "build" | "refine" | "continue" | "gate"): Promise<void> {
+    let action = initialAction;
+    const learningToolJobs: Record<string, string> = {};
     while (true) {
-        genTask.reasoningContent = "";
-        setPhase("grading", "正在分析需求复杂度...");
-
-        const gradeRequestId = genTask.gradeRequestId || createGradeRequestId();
-        genTask.gradeRequestId = gradeRequestId;
-        genTask.gradeRequestCorrection = correction || "";
-        persistGenTaskNow();
-
-        let gradeResult: any;
-        try {
-            gradeResult = await streamGrade(genTask.taskId, gradeRequestId, correction);
-        } catch (error: any) {
-            if (isInterrupt(error)) throw error;
-            assertGenerationRun(stageRunId);
-            if (error?.code === "CLARIFY_RECOVERY_REQUIRED") {
-                const activeClarifyRequestId = normalizeClarifyRequestId(error.activeRequestId);
-                if (!activeClarifyRequestId) {
-                    throw new Error("服务端要求恢复需求确认，但未返回有效的 requestId");
-                }
-                genTask.clarifyRequestId = activeClarifyRequestId;
-                genTask.clarifyRequestAnswers = null;
-                genTask.clarifyRequestExtraPrompt = "";
-                genTask.gradeRequestId = "";
-                genTask.gradeRequestCorrection = "";
-                genTask.grade = null;
-                setPhase("clarifying", "↻ 分级前先恢复尚未结算的需求确认请求");
-                persistGenTaskNow();
-                await runClarifyStage("clarifying");
-                correction = undefined;
-                continue;
-            }
-            if (error?.code === "GRADE_CANCELLED") {
-                genTask.gradeRequestId = "";
-                persistGenTaskNow();
-                continue;
-            }
-            if (error?.terminal) {
-                genTask.gradeRequestId = "";
-                persistGenTaskNow();
-            }
-            throw error;
+        if (action === "gate") {
+            setPhase("tree_confirming", genTask.treeSessionStatus === "failed" ? "结构规划未完成，可提交修正意见继续" : "请确认项目结构树");
+            const decision = await waitForTreeDecision();
+            if (decision.action === "confirm") { await confirmTree(); return; }
+            genTask.treeCorrection = decision.correction; genTask.treeFocusIds = decision.focusIds; action = "refine";
         }
-
-        genTask.plannerLearningRequired = gradeResult.learningRequired === true;
-        genTask.plannerLearningNeedCount = genTask.plannerLearningRequired
-            ? Math.max(0, Number(gradeResult.learningNeedCount) || 0)
-            : 0;
-        correction = undefined;
-
-        if (gradeResult.direct) {
-            genTask.grade = null;
-            setPhase("planning");
-            genTask.gradeRequestId = "";
-            genTask.gradeRequestCorrection = "";
-            persistGenTaskNow();
-            return undefined;
-        }
-
-        genTask.grade = { level: gradeResult.level, paths: gradeResult.paths || [] };
-        setPhase("confirming", "请确认实现路径");
-        genTask.gradeRequestId = "";
-        genTask.gradeRequestCorrection = "";
-        persistGenTaskNow();
-        const choice = await waitForPathChoice();
-        if (choice.correction) {
-            correction = choice.correction;
-            genTask.grade = null;
-            continue;
-        }
-        genTask.chosenPathId = choice.pathId || "";
-        genTask.grade = null;
-        setPhase("planning");
-        persistGenTaskNow();
-        return choice.pathId;
+        setPhase("tree_planning", "正在规划项目结构树…");
+        const result = await streamTreeRound(action, learningToolJobs);
+        applyTreeView(result.tree);
+        genTask.treeSessionStatus = result.status; genTask.treeRound = result.round; genTask.treeIssues = result.issues ?? [];
+        genTask.treeRequestId = ""; persistGenTaskNow();
+        if (result.status === "learning") {
+            await runModelLearningToolRequests(result.learningToolRequests, learningToolJobs);
+            action = "continue";
+        } else action = result.status === "continue" ? "continue" : "gate";
     }
 }
-
-// 记住上次生成的入参，供失败后「重试」手动重跑。刷新后内存丢失时，改用 genTask 上还原的入参。
+async function createTask(userPrompt: string, coreType: string, version: string, runId: number) {
+    setPhase("creating", "正在创建任务…");
+    const result = await post("/api/generate/task", { userPrompt, coreType, version, skillIds: [...selected] });
+    genTask.taskId = result.taskId; applyTaskExpiration(result.taskId, result.expiresAt);
+    scheduleTaskKeepalive(result.taskId, runId); fetchMe(); persistGenTaskNow();
+}
+async function runBucket(bucketIndex: number): Promise<void> {
+    const learningToolJobs: Record<string, string> = {};
+    let noProgress = 0;
+    for (let guard = 0; guard < 1000; guard++) {
+        let result: Awaited<ReturnType<typeof streamBucketGeneration>>;
+        try { result = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs); }
+        catch (error) {
+            if (isInterrupt(error) || (error as { noRetry?: boolean; terminal?: boolean }).noRetry || (error as { terminal?: boolean }).terminal) throw error;
+            if (++noProgress >= 5) throw error;
+            await waitWithAbort(1500, generationSignal()); continue;
+        }
+        if (!result) { if (++noProgress >= 5) throw new Error("生成服务连续未返回进度，请稍后继续"); continue; }
+        for (const completed of [...(result.completed ?? []), ...(result.newFiles ?? [])]) {
+            const file = findFile(completed.path);
+            if (file) { file.status = "done"; if (typeof completed.content === "string") file.content = completed.content; }
+            if (completed.contractCheck) genTask.nodeChecks[completed.contractCheck.nodeId] = completed.contractCheck;
+        }
+        syncCurrentIndex();
+        if (await runModelLearningToolRequests(result.learningToolRequests, learningToolJobs)) { noProgress = 0; continue; }
+        if (result.bucketDone) return;
+        if (result.progressed) noProgress = 0;
+        else {
+            if (++noProgress >= 5) throw new Error("生成服务连续未推进，已保留阶段进度");
+            await waitWithAbort(Math.max(500, Math.min(5000, Number(result.retryAfterMs) || 1500)), generationSignal());
+        }
+    }
+    throw new Error("单桶推进次数超出上限，已保留当前进度");
+}
+export async function runBucketsVerifyBuild(): Promise<void> {
+    const bucketIds = [...new Set(genTask.files.map(file => file.bucket ?? 0))].sort((a, b) => a - b);
+    setPhase("generating");
+    for (const bucket of bucketIds.filter(bucket => bucket >= genTask.currentBucket)) {
+        await runBucket(bucket); genTask.currentBucket = bucket + 1; persistGenTaskNow();
+    }
+    setPhase("verifying", "正在校验树节点完整性…");
+    let result = await post("/api/generate/verify", { taskId: genTask.taskId });
+    for (let retry = 0; retry < 2 && !result.verified; retry++) {
+        const repair = await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
+        if (!Number.isInteger(repair.repairBucketIndex)) throw new Error("服务端未返回修补桶");
+        genTask.currentBucket = repair.repairBucketIndex;
+        for (const file of genTask.files) if (repair.missing.includes(file.path)) file.status = "pending";
+        setPhase("generating", "正在补齐缺失的树节点…");
+        await runBucket(repair.repairBucketIndex); genTask.currentBucket = repair.repairBucketIndex + 1;
+        setPhase("verifying"); result = await post("/api/generate/verify", { taskId: genTask.taskId });
+    }
+    if (!result.verified) throw new Error(`文件校验失败，仍缺失 ${result.missing.length} 个节点`);
+    await buildWithRetry();
+}
 let lastGenParams: { userPrompt: string; coreType: string; version: string } | null = null;
 export function canRetryGenerate(): boolean {
-    const has = !!lastGenParams || !!genTask.userPrompt || !!genTask.taskId;
-    return has && (genTask.phase === "error" || genTask.phase === "idle" || genTask.phase === "interrupted");
+    return (!!genTask.taskId || !!genTask.userPrompt || !!lastGenParams) && ["error", "idle", "interrupted"].includes(genTask.phase);
 }
-
 function getPreFileResumePhase(): GenPhase | "" {
-    if (genTask.clarifyRequestId) return "clarifying";
-    if (genTask.gradeRequestId) return "grading";
-    if (genTask.plannerRequestId
-        || genTask.preflightStage === "plan"
-        || (genTask.learningProgress.stage === "planner" && genTask.learningProgress.status !== "idle")) {
-        return "planning";
-    }
-    if (genTask.grade) return "confirming";
-    if (genTask.preflightStage === "clarify") {
-        return genTask.moreInputHint ? "awaiting_input" : "clarifying";
-    }
-    if (genTask.preflightStage === "grade") return "grading";
-    return "";
+    if (genTask.tree?.status === "locked") return "generating";
+    if (genTask.tree || genTask.treeRequestId || genTask.preflightStage === "tree") return genTask.treeSessionStatus === "ready" || genTask.treeSessionStatus === "failed" ? "tree_confirming" : "tree_planning";
+    return genTask.moreInputHint ? "awaiting_input" : genTask.taskId ? "clarifying" : "creating";
 }
-
-/** 手动重试：FileGen 前优先用原 taskId + stage requestId 对账，不重复执行 mode1。 */
 export function retryGenerate() {
-    const params = lastGenParams
-        || (genTask.userPrompt ? { userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version } : null);
-    if (genTask.phase === "interrupted" && genTask.taskId) {
-        resumeGenerate().catch(() => { });
-        return;
+    if (genTask.taskId) {
+        if (genTask.phase !== "interrupted") { genTask.interruptedFrom = genTask.files.length ? "generating" : getPreFileResumePhase(); genTask.phase = "interrupted"; }
+        resumeGenerate().catch(() => {}); return;
     }
-    const interruptedResume = genTask.phase === "interrupted" ? genTask.interruptedFrom : "";
-    const resumePhase = genTask.taskId && genTask.files.length === 0
-        ? (interruptedResume || getPreFileResumePhase())
-        : "";
-    if (params && genTask.taskId && genTask.files.length === 0) {
-        if (resumePhase) {
-            genTask.phase = resumePhase;
-            clearGenerateError();
-            appendGenLog("↻ 使用现有任务恢复 FileGen 前置阶段，不重复创建任务");
-            persistGenTaskNow();
-            startGenerate(params.userPrompt, params.coreType, params.version, { resumePrepared: true }).catch(() => { });
-        } else {
-            setGenerateError(
-                new Error("当前任务缺少可恢复的 requestId；为避免重复计费，未自动新建任务。"),
-                "warning",
-            );
-            persistGenTaskNow();
-        }
-        return;
-    }
-    if (params) {
-        startGenerate(params.userPrompt, params.coreType, params.version).catch(() => { });
-    } else if (genTask.taskId) {
-        resumeGenerate().catch(() => { });
-    }
+    const params = lastGenParams ?? genTask;
+    if (params.userPrompt) startGenerate(params.userPrompt, params.coreType, params.version).catch(() => {});
 }
-
-/** 刷新恢复：genTask 已由 restoreGenTask 还原，据当前阶段续跑，避免刷新即失败。 */
-export async function resumeGenerate() {
-    if (genTask.phase === "interrupted" && !genTask.taskId) {
-        const params = lastGenParams
-            || (genTask.userPrompt
-                ? {userPrompt: genTask.userPrompt, coreType: genTask.coreType, version: genTask.version}
-                : null);
-        if (!params?.userPrompt || !params.coreType || !params.version) {
-            setGenerateError(
-                new Error("当前任务缺少重新创建所需的需求信息，请重新提交需求。"),
-                "warning",
-            );
-            persistGenTaskNow();
-            return;
-        }
-        await startGenerate(params.userPrompt, params.coreType, params.version);
+export async function resumeGenerate(): Promise<void> {
+    if (!genTask.taskId) {
+        if (genTask.userPrompt) await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version);
         return;
     }
-    if (genTask.phase === "interrupted") {
-        if (!genTask.interruptedFrom) return;
-        genTask.phase = genTask.interruptedFrom;
-        genTask.interruptedFrom = "";
-    }
-    const p = genTask.phase;
-    if (!genTask.taskId || ["idle", "done", "error", "interrupted"].includes(p)) return;
-
-    if (!genTask.files.length
-        && ["clarifying", "awaiting_input", "grading", "confirming", "planning"].includes(p)
-        && genTask.userPrompt) {
-        appendGenLog(p === "planning"
-            ? "↻ 页面恢复：继续联网查证与项目规划"
-            : "↻ 页面恢复：使用原 taskId 与前置 requestId 继续对账");
-        await startGenerate(genTask.userPrompt, genTask.coreType, genTask.version, { resumePrepared: true });
-        return;
-    }
-
-    beginGenerationRun();
-    const resumeRunId = generationRunId;
-    const recordResumeFailure = (error: any) => {
-        if (!isGenerationRunCurrent(resumeRunId)) return;
-        if (isInterrupt(error)) {
-            markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : genTask.phase);
-            return;
-        }
-        setGenerateError(error);
-        appendGenLog("× " + genTask.error);
-        persistGenTaskNow();
-    };
-
+    const from = genTask.phase === "interrupted" ? genTask.interruptedFrom || getPreFileResumePhase() : genTask.phase;
+    if (["idle", "done", "error"].includes(from)) return;
+    beginGenerationRun(); const runId = generationRunId;
+    genTask.phase = from as GenPhase; genTask.interruptedFrom = ""; clearGenerateError();
     try {
-        await ensureTaskAlive(genTask.taskId, resumeRunId);
-    } catch (error: any) {
-        recordResumeFailure(error);
-        return;
-    }
-
-    // 已触发构建的阶段只恢复轮询，避免刷新后重复建分支、重复触发 workflow。
-    if (["building", "polling"].includes(p)) {
-        try { await buildWithRetry(undefined, undefined, true); }
-        catch (e: any) { recordResumeFailure(e); }
-        return;
-    }
-    const hasRecoverableFixLearning = genTask.learningProgress.stage === "fix"
-        && !!genTask.learningProgress.jobId
-        && (!LEARNING_TERMINAL.has(genTask.learningProgress.status)
-            || isUnconfirmedLearningProgress(genTask.learningProgress));
-    const restoringFixStage: FixResumeStage = p === "fixing"
-        ? genTask.fixResumeStage || (hasRecoverableFixLearning ? "learning" : "")
-        : "";
-    if (restoringFixStage) {
-        try {
-            genTask.fixResumeStage = restoringFixStage;
-            persistGenTaskNow();
-            await resumeFixingStage(genTask.taskId, restoringFixStage);
-        } catch (e: any) {
-            if (isGenerationRunCurrent(resumeRunId)) genTask.fixResumeStage = "";
-            recordResumeFailure(e);
+        await ensureTaskAlive(genTask.taskId, runId);
+        if (["uploading", "building"].includes(from)) { await buildWithRetry(true); return; }
+        if (from === "fixing") { await resumeFixingStage(genTask.taskId, genTask.fixResumeStage); return; }
+        if (["clarifying", "awaiting_input", "creating"].includes(from)) { await runClarifyStage(from === "awaiting_input" ? "awaiting_input" : "clarifying"); await runTreeStage("build"); }
+        else {
+            const restored = await refreshTree();
+            if (genTask.tree?.status !== "locked") {
+                const status = restored.session?.status;
+                await runTreeStage(status === "ready" || status === "failed" ? "gate" : genTask.treeRequestId ? genTask.treeMode : status ? "continue" : "build");
+            }
         }
-        return;
+        await runBucketsVerifyBuild();
+    } catch (error) {
+        if (!isGenerationRunCurrent(runId)) return;
+        if (isInterrupt(error)) markInterrupted(genTask.phase);
+        else { setGenerateError(error); appendGenLog(`× ${genTask.error}`); persistGenTaskNow(); }
     }
-
-    // uploading 阶段优先复用已持久化的请求 ID，继续同一次服务端启动流程。
-    if (p === "uploading") {
-        try { await buildWithRetry(undefined, undefined, !!genTask.buildRequestId); }
-        catch (e: any) { recordResumeFailure(e); }
-        return;
-    }
-    if (p === "fixing") {
-        try { await buildWithRetry(); }
-        catch (e: any) { recordResumeFailure(e); }
-        return;
-    }
-
-    // 无法识别的旧快照不自动重跑 mode1，避免重复创建并计费。
-    if (!genTask.files.length) {
-        setGenerateError(
-            new Error("当前任务缺少可恢复的前置阶段信息，请重新开始生成。"),
-            "warning",
-        );
-        return;
-    }
-
-    // 生成/校验阶段（plan 已完成、有 files）：续跑桶循环（后端 fileStatuses 天然可续）→ 校验 → 构建
+}
+export async function startGenerate(userPrompt: string, coreType: string, version: string, options?: { resumePrepared?: boolean }): Promise<void> {
+    if (options?.resumePrepared) { await resumeGenerate(); return; }
+    if (isGeneratingPhase(genTask.phase)) throw new Error("当前已有构建任务正在进行");
+    beginGenerationRun(); const runId = generationRunId;
+    lastGenParams = { userPrompt, coreType, version };
+    recordPromptHistory({ prompt: userPrompt, coreType, version, skillIds: [...selected] });
+    resetGenTask(); Object.assign(genTask, { userPrompt, coreType, version });
     try {
-        appendGenLog("↻ 从刷新中断处继续生成…");
-        setPhase("generating", "从中断处继续生成…");
-
-        const bucketMap = new Map<number, number>();
-        for (const f of genTask.files) { const b = f.bucket ?? 0; bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1); }
-        const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
-        const learningToolJobs: Record<string, string> = {};
-
-        for (const bucketIndex of sortedBucketIds) {
-            let bucketDone = false, guard = 0, noProgress = 0;
-            const guardLimit = Math.max(80, (bucketMap.get(bucketIndex) ?? 1) * 16 + 20);
-            const doneCount = () => genTask.files.filter(f => f.status === "done").length;
-            while (!bucketDone) {
-                if (guard++ > guardLimit) throw new Error("续跑阶段过多，请重试");
-                const doneBefore = doneCount();
-                let bucketResult: any = null;
-                for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
-                    try {
-                        bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
-                    }
-                    catch (error: any) {
-                        if (isInterrupt(error)) throw error;
-                        if (error?.noRetry || error?.terminal) throw error;
-                        bucketResult = null;
-                    }
-                }
-                if (!bucketResult) {
-                    if (doneCount() > doneBefore) { noProgress = 0; continue; }
-                    if (++noProgress >= 5) throw new Error("续跑连续零进度，请重试");
-                    await waitWithAbort(1_500, generationSignal());
-                    continue;
-                }
-                if (bucketResult.replan) throw new Error("续跑仍未通过审查，请重试");
-                if (await runModelLearningToolRequests(bucketResult.learningToolRequests, learningToolJobs)) {
-                    noProgress = 0;
-                    continue;
-                }
-                for (const c of bucketResult.completed || []) {
-                    const f = genTask.files.find(x => x.path === c.path);
-                    if (f) { f.content = c.content; f.status = "done"; }
-                }
-                syncCurrentIndex();
-                bucketDone = !!bucketResult.bucketDone;
-                const progressed = bucketResult.progressed === true
-                    || doneCount() > doneBefore
-                    || bucketDone;
-                if (!progressed) {
-                    if (++noProgress >= 5) {
-                        throw new Error("生成服务连续未推进，阶段进度已保存，请稍后重试");
-                    }
-                    const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
-                    await waitWithAbort(retryAfterMs, generationSignal());
-                    continue;
-                }
-                noProgress = 0;
-                if (bucketResult.done) break;
-            }
-        }
-
-        setPhase("verifying", "正在校验文件完整性…");
-        let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-        for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
-            const missingList = verifyResult.missing as string[];
-            await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
-            setPhase("generating");
-            for (const mp of missingList) {
-                appendGenLog(`↻ 补生成 ${mp}`);
-                const fileResult = await streamFileGeneration(genTask.taskId);
-                if (!fileResult || fileResult.done) break;
-            }
-            verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-        }
-        if (!verifyResult.verified) throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件`);
-
-        await buildWithRetry();
-    } catch (e: any) {
-        recordResumeFailure(e);
+        await createTask(userPrompt, coreType, version, runId);
+        await runClarifyStage(); await runTreeStage("build"); await runBucketsVerifyBuild();
+    } catch (error) {
+        if (!isGenerationRunCurrent(runId)) return;
+        if (isInterrupt(error)) markInterrupted(genTask.phase);
+        else { setGenerateError(error); appendGenLog(`× ${genTask.error}`); persistGenTaskNow(); }
     }
 }
-
-export async function startGenerate(
-    userPrompt: string,
-    coreType: string,
-    version: string,
-    options?: { resumePrepared?: boolean },
-) {
-    const resumePrepared = options?.resumePrepared === true;
-    const resumePhase: GenPhase | "" = resumePrepared ? genTask.phase : "";
-    if (!resumePrepared && isGeneratingPhase(genTask.phase)) {
-        throw new Error("当前已有构建任务正在进行");
-    }
-    beginGenerationRun();
-    const runId = generationRunId;
-    let chosenPathId: string | undefined = resumePrepared ? genTask.chosenPathId || undefined : undefined;
-
-    if (resumePrepared && genTask.taskId) {
-        try {
-            await ensureTaskAlive(genTask.taskId, runId);
-        } catch (error: any) {
-            if (!isGenerationRunCurrent(runId)) return;
-            if (isInterrupt(error)) {
-                markInterrupted(resumePhase || genTask.phase);
-                return;
-            }
-            setGenerateError(error);
-            appendGenLog(`× ${genTask.error}`);
-            persistGenTaskNow();
-            return;
-        }
-    }
-
-    if (!resumePrepared) {
-        lastGenParams = { userPrompt, coreType, version };
-        const skillIds = [...selected];
-        recordPromptHistory({prompt: userPrompt, coreType, version, skillIds});
-
-        resetGenTask();
-        genTask.userPrompt = userPrompt;
-        genTask.coreType = coreType;
-        genTask.version = version;
-
-        // ── Phase 1: create taskId (mode1, only for a genuinely new task) ──
-        try {
-            setPhase("planning", "正在创建任务...");
-            const initResult = await post("/api/generate/plan", { userPrompt, coreType, version, skillIds });
-            genTask.taskId = initResult.taskId;
-            applyTaskExpiration(genTask.taskId, initResult.expiresAt);
-            scheduleTaskKeepalive(genTask.taskId, runId);
-            fetchMe(); // 扣费后刷新顶栏剩余额度
-        } catch (e: any) {
-            if (!isGenerationRunCurrent(runId)) return;
-            if (isInterrupt(e)) {
-                markInterrupted("planning");
-                return;
-            }
-            setGenerateError(e);
-            appendGenLog("× " + genTask.error);
-            return;
-        }
-    }
-
-    const resumeFromClarify = resumePhase === "clarifying" || resumePhase === "awaiting_input";
-    if (!resumePrepared || resumeFromClarify) {
-        try {
-            if (!resumePrepared) setPhase("clarifying", "进入澄清阶段，请回答问题...");
-            await runClarifyStage(resumeFromClarify ? resumePhase : "");
-        } catch (e: any) {
-            if (!isGenerationRunCurrent(runId)) {
-                if (isInterrupt(e)) fetchMe();
-                return;
-            }
-            if (isInterrupt(e)) {
-                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : "clarifying");
-                fetchMe();
-                return;
-            }
-            setGenerateError(e);
-            appendGenLog("× " + genTask.error);
-            persistGenTaskNow();
-            return;
-        }
-    }
-
-    const resumeFromGrade = resumePhase === "grading" || resumePhase === "confirming";
-    if (!resumePrepared || resumeFromClarify || resumeFromGrade) {
-        try {
-            const selectedPathId = await runGradeStage(resumeFromGrade ? resumePhase : "");
-            if (selectedPathId !== undefined) chosenPathId = selectedPathId;
-        } catch (e: any) {
-            if (!isGenerationRunCurrent(runId)) {
-                if (isInterrupt(e)) fetchMe();
-                return;
-            }
-            if (isInterrupt(e)) {
-                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : "grading");
-                fetchMe();
-                return;
-            }
-            // 未收到明确 terminal result 时禁止静默跳过分级进入 Planner。
-            setGenerateError(e);
-            appendGenLog("× " + genTask.error);
-            persistGenTaskNow();
-            return;
-        }
-    }
-
-    chosenPathId = genTask.chosenPathId || chosenPathId;
-
-    // Learning 的触发权交给后续 DS coding agent；这里仅进入规划，不再根据 Grader 结果抢跑。
-    setPhase("planning", "开始规划；DS 可在需要精确外部 API 证据时主动调用 Learning...");
-
-    // ── Phase 3: planning + generating + build (with replan loop) ──
-    const firstPlannerAttempt = resumePrepared && genTask.plannerRequestId
-        ? Math.min(
-            MAX_REPLAN_ATTEMPTS,
-            genTask.plannerReplan ? Math.max(1, genTask.plannerAttempt) : 0,
-        )
-        : 0;
-    for (let replanAttempt = firstPlannerAttempt; replanAttempt <= MAX_REPLAN_ATTEMPTS; replanAttempt++) {
-        try {
-            if (replanAttempt > 0) {
-                appendGenLog(`↻ 第 ${replanAttempt} 次重新规划，从头开始生成...`);
-                genTask.files = [];
-                genTask.currentIndex = 0;
-                clearGenerateError();
-            }
-
-            setPhase("planning", replanAttempt === 0
-                ? "正在根据澄清结果生成项目规划..."
-                : `正在重新规划 (第${replanAttempt}次)...`);
-
-            const plannerReplan = replanAttempt > 0;
-            const reusePendingRequest = genTask.plannerRequestId
-                && genTask.plannerReplan === plannerReplan
-                && genTask.plannerAttempt === replanAttempt;
-            const plannerRequestId = reusePendingRequest
-                ? genTask.plannerRequestId
-                : createPlannerRequestId();
-            genTask.plannerRequestId = plannerRequestId;
-            genTask.plannerReplan = plannerReplan;
-            genTask.plannerAttempt = replanAttempt;
-            // 必须在请求发出前同步落盘；刷新后才能复用同一 replan 意图与幂等 ID。
-            persistGenTaskNow();
-
-            const plannerLearningToolJobs: Record<string, string> = {};
-            let planResult: any;
-            let learningContinuation: LearningContinuationDeadline | undefined;
-            try {
-                while (true) {
-                    learningContinuation?.assertActive();
-                    planResult = await postPlanner({
-                        taskId: genTask.taskId,
-                        chosenPathId,
-                        skillIds: [...selected],
-                        replan: plannerReplan,
-                        plannerRequestId,
-                        learningToolJobs: plannerLearningToolJobs,
-                    }, learningContinuation);
-                    if (!modelLearningToolRequests(planResult?.learningToolRequests).length) break;
-                    learningContinuation ??= createLearningContinuationDeadline(
-                        GEN_TASK_TTL_MS,
-                        "Planner 的 Learning 对话超过任务时限，已停止继续调用工具",
-                        generationSignal(),
-                    );
-                    await runModelLearningToolRequests(
-                        planResult?.learningToolRequests,
-                        plannerLearningToolJobs,
-                        learningContinuation,
-                    );
-                    setPhase("planning", "Learning 已返回，Planner 继续规划...");
-                }
-            } finally {
-                learningContinuation?.dispose();
-            }
-            genTask.projectName = planResult.projectName;
-            genTask.packageName = planResult.packageName;
-            genTask.javaVersion = planResult.javaVersion;
-            genTask.files = planResult.plan.map((f: any) => ({
-                path: f.path,
-                role: f.role,
-                status: "pending",
-                generatorType: f.generatorType,
-                tag: f.tag ?? null,
-                pairPath: f.pairPath,
-                bucket: f.bucket,
-            }));
-            syncCurrentIndex();
-            genTask.plannerRequestId = "";
-            genTask.plannerReplan = false;
-            genTask.plannerAttempt = 0;
-            appendGenLog(`● 项目规划完成，共 ${genTask.files.length} 个文件`);
-            persistGenTaskNow();
-
-            setPhase("generating");
-            // 收集 buckets：每个 file 自带 bucket 索引；按桶号升序并发
-            const bucketMap = new Map<number, number>();
-            for (const f of genTask.files) {
-                const b = f.bucket ?? 0;
-                bucketMap.set(b, (bucketMap.get(b) ?? 0) + 1);
-            }
-            const sortedBucketIds = [...bucketMap.keys()].sort((a, b) => a - b);
-            const learningToolJobs: Record<string, string> = {};
-            let needReplan = false;
-
-            let allBucketsDone = false;
-            outer: for (const bucketIndex of sortedBucketIds) {
-                if (needReplan) break;
-                // 桶按持久化阶段推进：每次请求每个目标最多一次模型调用，阶段完成后立即落盘。
-                // 流中断时重试同一桶，服务端从 checkpoint 继续。
-                let bucketDone = false;
-                let guard = 0;
-                let noProgress = 0;
-                const guardLimit = Math.max(80, (bucketMap.get(bucketIndex) ?? 1) * 16 + 20);
-                const doneCount = () => genTask.files.filter(f => f.status === "done").length;
-                while (!bucketDone) {
-                    if (guard++ > guardLimit) { // 安全阀，防意外死循环
-                        throw new Error(`桶 #${bucketIndex} 阶段推进次数异常，已保留当前进度`);
-                    }
-                    // 单阶段重试一次；服务端会从已持久化检查点继续。
-                    const doneBefore = doneCount();
-                    let bucketResult: any = null;
-                    for (let bAttempt = 0; bAttempt < 2 && !bucketResult; bAttempt++) {
-                        try {
-                            bucketResult = await streamBucketGeneration(genTask.taskId, bucketIndex, learningToolJobs);
-                        } catch (be: any) {
-                            if (isInterrupt(be)) throw be;
-                            if (be?.noRetry || be?.terminal) throw be;
-                            const m = be?.name === "AbortError" ? "超时" : (be?.message || String(be));
-                            appendGenLog(`× 桶 #${bucketIndex} 批次中断（${m}）${bAttempt === 0 ? "，重试一次..." : ""}`);
-                            bucketResult = null;
-                        }
-                    }
-                    if (!bucketResult) {
-                        // 流被切断不等于生成失败；直接重试同一阶段，禁止用重新规划覆盖已有进度。
-                        if (doneCount() > doneBefore) {
-                            noProgress = 0;
-                            appendGenLog(`· 桶 #${bucketIndex} 连接中断但已落地文件，继续恢复...`);
-                            continue;
-                        }
-                        if (++noProgress >= 5) {
-                            throw new Error(`桶 #${bucketIndex} 连续连接中断，阶段进度已保存，请稍后重试`);
-                        }
-                        appendGenLog(`· 桶 #${bucketIndex} 当前阶段无返回（${noProgress}/5），继续恢复...`);
-                        await waitWithAbort(1_500, generationSignal());
-                        continue;
-                    }
-                    if (bucketResult.replan) { needReplan = true; break; }
-                    if (await runModelLearningToolRequests(bucketResult.learningToolRequests, learningToolJobs)) {
-                        noProgress = 0;
-                        continue;
-                    }
-                    // 服务端每次返回该桶已落盘的完成文件，可修复“落盘后断流”造成的前端状态缺口。
-                    for (const c of bucketResult.completed || []) {
-                        const f = genTask.files.find(x => x.path === c.path);
-                        if (f) { f.content = c.content; f.status = "done"; }
-                    }
-                    syncCurrentIndex();
-                    bucketDone = !!bucketResult.bucketDone;
-                    const progressed = bucketResult.progressed === true
-                        || doneCount() > doneBefore
-                        || bucketDone;
-                    if (!progressed) {
-                        if (++noProgress >= 5) {
-                            throw new Error(`桶 #${bucketIndex} 连续未推进，阶段进度已保存，请稍后重试`);
-                        }
-                        const retryAfterMs = Math.max(500, Math.min(5_000, Number(bucketResult.retryAfterMs) || 1_500));
-                        appendGenLog(`· 桶 #${bucketIndex} 当前阶段暂未推进（${noProgress}/5），稍后重试...`);
-                        await waitWithAbort(retryAfterMs, generationSignal());
-                        continue;
-                    }
-                    noProgress = 0;
-                    if (bucketResult.done) { allBucketsDone = true; break outer; }
-                }
-                if (needReplan) break;
-            }
-            void allBucketsDone;
-
-            if (needReplan) {
-                if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
-                    throw new Error("多次重新规划后仍无法通过审查，生成失败");
-                }
-                continue; // restart from planning
-            }
-
-            setPhase("verifying", "正在校验文件完整性...");
-            let verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-
-            for (let retry = 0; retry < 2 && !verifyResult.verified; retry++) {
-                const missingList = verifyResult.missing as string[];
-                appendGenLog(`! 缺失 ${missingList.length} 个文件，正在补齐 (第${retry + 1}次)...`);
-                await post("/api/generate/verify", { taskId: genTask.taskId, fixMissing: true });
-
-                setPhase("generating");
-                for (const mp of missingList) {
-                    appendGenLog(`↻ 补生成 ${mp}`);
-                    const fileResult = await streamFileGeneration(genTask.taskId);
-                    if (!fileResult || fileResult.done) break;
-                }
-
-                setPhase("verifying", "正在重新校验...");
-                verifyResult = await post("/api/generate/verify", { taskId: genTask.taskId });
-            }
-
-            if (!verifyResult.verified) {
-                throw new Error(`文件校验失败，缺失 ${verifyResult.missing.length} 个文件: ${verifyResult.missing.join(", ")}`);
-            }
-            appendGenLog(`● 文件校验通过 (${verifyResult.generated}/${verifyResult.total})`);
-
-            // Build with fix-retry loop
-            await buildWithRetry();
-            return; // success — exit replan loop
-        } catch (e: any) {
-            if (!isGenerationRunCurrent(runId)) return;
-            if (isInterrupt(e)) {
-                markInterrupted(genTask.phase === "interrupted" ? genTask.interruptedFrom : genTask.phase);
-                return;
-            }
-            if (replanAttempt >= MAX_REPLAN_ATTEMPTS) {
-                setGenerateError(e);
-                appendGenLog("× " + genTask.error);
-                return;
-            }
-            // If error is not from replan, don't retry
-            if (!e.message?.includes("重新规划")) {
-                setGenerateError(e);
-                appendGenLog("× " + genTask.error);
-                return;
-            }
-        }
-    }
+export async function loadNodeContent(path: string): Promise<string> {
+    const file = findFile(path); if (file?.content !== undefined) return file.content;
+    const result = await get(`/api/generate/source?taskId=${encodeURIComponent(genTask.taskId)}&path=${encodeURIComponent(path)}`);
+    if (file) file.content = result.content;
+    return result.content;
+}
+export async function downloadSourceZip(): Promise<void> {
+    const taskId = genTask.taskId;
+    const response = await fetchWithByokFallback(`/api/generate/source?taskId=${encodeURIComponent(taskId)}`);
+    if (!response.ok) throw await responseError(response, "源码下载失败");
+    const result = await response.json() as { projectName: string; tree: ProjectTreeView; files: { path: string; content: string }[] };
+    const zip = new JSZip(), root = zip.folder(result.projectName)!;
+    for (const file of result.files) root.file(file.path, file.content);
+    result.tree.project.coreType = genTask.coreType; result.tree.project.version = genTask.version;
+    root.file("PROJECT_TREE.md", renderTreeMarkdown(result.tree, genTask.nodeChecks));
+    const blob = await zip.generateAsync({ type: "blob" }), url = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = url; link.download = `${result.projectName}-source.zip`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-type BuildMeta = {
-    javaVersion?: string;
-    projectName?: string;
-    packageName?: string;
-    coreType?: string;
-    version?: string;
-};
-
-async function buildWithRetry(
-    initialFiles?: { path: string; content: string }[],
-    meta?: BuildMeta,
-    resumeExistingBuild = false,
-) {
+async function buildWithRetry(resumeExistingBuild = false) {
     for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
         const reuseExisting = resumeExistingBuild && attempt === 0;
         let buildResult: any = null;
@@ -3187,12 +2409,6 @@ async function buildWithRetry(
                 taskId: genTask.taskId,
                 buildRequestId,
             };
-            // 首次构建带上 IDE 的最新内容 + 元数据（供 KV 任务过期后重建）；
-            // 后续 fix 后重建用 KV 里已被 fix 改过的版本
-            if (attempt === 0 && initialFiles) {
-                payload.files = initialFiles;
-                if (meta) payload.meta = meta;
-            }
             buildResult = await post("/api/generate/build", payload);
         }
 
@@ -3201,7 +2417,7 @@ async function buildWithRetry(
                 genTask.fixResumeStage = "";
                 persistGenTaskNow();
             }
-            // 从 IDE 进来的场景：填上 GenerateProgress 头部要展示的 meta
+            // 恢复构建时补齐进度面板需要的项目信息
             if (!genTask.projectName && buildResult.projectName) genTask.projectName = buildResult.projectName;
             if (!genTask.packageName && buildResult.packageName) genTask.packageName = buildResult.packageName;
             if (!genTask.javaVersion && buildResult.javaVersion) genTask.javaVersion = buildResult.javaVersion;
@@ -3287,188 +2503,4 @@ async function pollBuildStatus(): Promise<boolean> {
 
 export function getDownloadUrl(): string {
     return `/api/generate/download?taskId=${genTask.taskId}`;
-}
-
-/**
- * 从 IDE 直接触发构建（跳过 chat/plan/clarify/file gen 阶段）。
- * 调用者负责先 hydrate genTask（taskId/files/phase），然后此函数走 build + fix 重试链路。
- */
-export async function startBuildFromIDE(
-    files: { path: string; content: string }[],
-    meta?: BuildMeta,
-) {
-    beginGenerationRun();
-    const runId = generationRunId;
-    if (genTask.taskId) {
-        applyTaskExpiration(genTask.taskId, Date.now() + GEN_TASK_TTL_MS);
-        scheduleTaskKeepalive(genTask.taskId, runId);
-    }
-    try {
-        await buildWithRetry(files, meta);
-    } catch (e: any) {
-        if (!isGenerationRunCurrent(runId)) return;
-        if (isInterrupt(e)) {
-            markInterrupted(genTask.phase);
-            return;
-        }
-        setGenerateError(e);
-        appendGenLog("× " + genTask.error);
-    }
-}
-
-// ── 增量补充：生成完成后，在现有项目上加功能 / 改需求（单次 LLM + 编译兜底）──
-const APPEND_SYSTEM = `你是在【现有 Minecraft Paper/Bukkit 插件项目】上做【增量加功能 / 改需求】的助手。
-用户会给出当前项目的全部文件内容与一条追加需求。你只输出需要【新建或修改】的文件，不要输出无关文件。
-
-【输出格式】严格遵守，不要任何解释/标题，直接输出文件块：
-FILE create src/main/java/包名/Xxx.java
-\`\`\`java
-完整文件内容
-\`\`\`
-（已存在的文件用 FILE edit <原路径> + 代码块）
-- content 永远是完整文件，绝不输出 diff 或片段。
-- 可同时改多个文件（如：新增命令类 + 编辑 Main 注册 + 编辑 plugin.yml + 必要时编辑 pom.xml）。
-
-【规则】
-- 严格沿用现有包名、代码风格、命名；不要顺手重构与追加需求无关的文件。
-- 新命令必须在 plugin.yml 的 commands 节点声明，并在 Main.onEnable 注册 Executor/TabCompleter；新监听在 Main 注册 registerEvents。
-- 颜色码：yml 用 §，Java 用 ChatColor；不强转主类（用 Bukkit.getPluginManager().getPlugin(名称)）。
-- 持久化只用 YAML / PDC，禁止 SQL/数据库；最简实现。
-- 若需引入第三方库，必须同时 edit pom.xml 加依赖（compile + maven-shade）。`;
-
-export async function appendFeature(appendText: string) {
-    const text = appendText.trim();
-    if (!text) return;
-    if (genTask.phase !== "done" || !genTask.files.length) return;
-
-    beginGenerationRun();
-    const appendRunId = generationRunId;
-    try {
-        const signal = generationSignal();
-        const runId = generationRunId;
-        clearGenerateError();
-        setPhase("generating", `▸ 增量需求：${text.slice(0, 50)}`);
-        genTask.streamingPhase = "generating";
-        genTask.streamingFile = "增量分析中";
-        genTask.streamingContent = "";
-
-        // 拼现有项目上下文（清单 + 各文件全文）
-        const fileList = genTask.files.map(f => `- ${f.path}${f.role ? `  // ${f.role}` : ""}`).join("\n");
-        const fileBodies = genTask.files
-            .filter(f => f.content)
-            .map(f => {
-                const ext = f.path.split(".").pop() || "";
-                return `FILE ${f.path}\n\`\`\`${ext}\n${f.content}\n\`\`\``;
-            }).join("\n\n");
-        const user = `【当前项目文件清单】\n${fileList}\n\n【当前所有文件内容】\n${fileBodies}\n\n【追加需求】\n${text}`;
-
-        const resp = await fetchWithByokFallback("/api/stream", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: "deepseek-flash",
-                reasoning_effort: "high",
-                taskId: genTask.taskId || undefined,
-                purpose: "append",
-                projectContext: {
-                    coreType: genTask.coreType,
-                    version: genTask.version,
-                    pomContent: genTask.files.find(f => /(^|\/)pom\.xml$/i.test(f.path))?.content || "",
-                },
-                messages: [
-                    { role: "system", content: APPEND_SYSTEM },
-                    { role: "user", content: user },
-                ],
-                stream: true,
-            }),
-            signal,
-        });
-        assertGenerationRun(runId);
-        await rejectAccessResponse(resp);
-        if (!resp.ok) throw await responseError(resp);
-        if (!resp.body) throw new Error("无响应流");
-
-        // 读 DeepSeek 原生 SSE（透传），收集 content
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let full = "";
-        outer: while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) {
-                const t = line.trim();
-                if (!t.startsWith("data:")) continue;
-                const payload = t.slice(5).trim();
-                if (payload === "[DONE]") break outer;
-                let event: any;
-                try {
-                    event = JSON.parse(payload);
-                } catch { continue; }
-                assertGenerationRun(runId);
-                if (event?.type === "error" || (event?.type === "result" && event?.error)) {
-                    rejectAccessEvent(event);
-                    const message = typeof event?.error === "string"
-                        ? event.error
-                        : (event?.error?.message || event?.message || "流式请求失败");
-                    throw new Error(message);
-                }
-                const chunk = event?.choices?.[0]?.delta?.content ?? "";
-                if (chunk) { full += chunk; genTask.streamingContent = full; }
-            }
-        }
-        genTask.streamingPhase = "";
-        genTask.streamingContent = "";
-        fetchMe(); // 刷新顶栏额度
-
-        // 解析 FILE 块，应用到 genTask.files
-        const existing = new Set(genTask.files.map(f => f.path));
-        const parsed = parseResponse(full, existing);
-        if (!parsed.files.length) {
-            appendGenLog("! 追加需求未产出文件改动" + (parsed.reply ? `：${parsed.reply.slice(0, 80)}` : ""));
-            setPhase("done", "● 无改动");
-            return;
-        }
-        for (const fa of parsed.files) {
-            const exist = genTask.files.find(f => f.path === fa.path);
-            if (exist) {
-                exist.content = fa.content;
-                exist.status = "done";
-                appendGenLog(`✎ 修改 ${fa.path}`);
-            } else {
-                genTask.files.push({
-                    path: fa.path,
-                    role: "追加：" + text.slice(0, 16),
-                    content: fa.content,
-                    status: "done",
-                });
-                appendGenLog(`＋ 新增 ${fa.path}`);
-            }
-        }
-
-        // 重新编译（startBuildFromIDE 内部驱动 uploading/building/done/error）
-        await startBuildFromIDE(
-            genTask.files.filter(f => f.content).map(f => ({ path: f.path, content: f.content! })),
-            {
-                javaVersion: genTask.javaVersion,
-                projectName: genTask.projectName,
-                packageName: genTask.packageName,
-                coreType: genTask.coreType,
-                version: genTask.version,
-            },
-        );
-    } catch (e: any) {
-        if (!isGenerationRunCurrent(appendRunId)) return;
-        if (isInterrupt(e)) {
-            markInterrupted(genTask.phase);
-            return;
-        }
-        genTask.streamingPhase = "";
-        genTask.streamingContent = "";
-        setGenerateError(e);
-        appendGenLog("× 追加失败：" + genTask.error);
-    }
 }

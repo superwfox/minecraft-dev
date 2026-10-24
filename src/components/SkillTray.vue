@@ -3,13 +3,13 @@
     <div v-if="trayOpen" class="tray-scrim" @click="closeTray"></div>
 
     <transition name="tray-pop">
-      <aside v-if="trayOpen" class="tray" role="dialog" aria-modal="true" aria-label="选择技能">
+      <aside v-if="trayOpen" v-lattice:card class="tray" role="dialog" aria-modal="true" aria-label="选择技能">
         <div class="tray-head">
           <div>
             <div class="tray-title">select skills</div>
             <div class="tray-summary">按顺序注入生成上下文 · {{ chosen.length }} 已选</div>
           </div>
-          <button type="button" class="tray-x" aria-label="关闭技能选择" @click="closeTray">✕</button>
+          <button v-lattice:icon type="button" class="tray-x" aria-label="关闭技能选择" @click="closeTray">✕</button>
         </div>
 
         <!-- 已选区（可拖拽排序） -->
@@ -26,7 +26,7 @@
                 @drop="onDrop(i)">
               <span class="tray-grip">⠿</span>
               <span class="tray-order">{{ String(i + 1).padStart(2, '0') }}</span>
-              <span class="tray-chip-name">{{ b.name || b.id }}</span>
+              <span data-font="dynamic" class="tray-chip-name">{{ b.name || b.id }}</span>
               <button type="button" class="tray-move" :disabled="i === 0" aria-label="提高优先级" @click="moveSkill(i, i - 1)">↑</button>
               <button type="button" class="tray-move" :disabled="i === chosen.length - 1" aria-label="降低优先级" @click="moveSkill(i, i + 1)">↓</button>
               <button type="button" class="tray-rm" @click="removeSkill(b.id)" title="移出">✕</button>
@@ -46,7 +46,7 @@
           </label>
           <div v-if="skillsState.error" class="tray-error">
             <span>加载失败：{{ skillsState.error }}</span>
-            <button type="button" @click="fetchSkills(true)">重试</button>
+            <button v-lattice type="button" @click="fetchSkills(true)">重试</button>
           </div>
           <div v-else-if="!skillsState.loading && filteredSkills.length === 0" class="tray-empty">
             {{ query ? '没有匹配的技能' : '仓库暂无技能' }}
@@ -57,8 +57,8 @@
                       :aria-pressed="isSelected(b.id)" @click="toggleSkill(b.id)">
                 <span class="tray-check">{{ isSelected(b.id) ? '✓' : '' }}</span>
                 <span class="tray-item-body">
-                  <span class="tray-item-name">{{ b.name || b.id }}</span>
-                  <span class="tray-item-cap">{{ b.capability || b.description || '暂无能力说明' }}</span>
+                  <span data-font="dynamic" class="tray-item-name">{{ b.name || b.id }}</span>
+                  <span data-font="dynamic" class="tray-item-cap">{{ b.capability || b.description || '暂无能力说明' }}</span>
                 </span>
               </button>
             </li>
@@ -66,8 +66,8 @@
         </div>
 
         <div class="tray-foot">
-          <router-link to="/skills" class="tray-link" @click="closeTray">打开完整技能库 ↗</router-link>
-          <button type="button" class="tray-done" @click="closeTray">完成</button>
+          <router-link v-lattice to="/skills" class="tray-link" @click="closeTray">打开完整技能库 ↗</router-link>
+          <button v-lattice type="button" class="tray-done" @click="closeTray">完成</button>
         </div>
       </aside>
     </transition>
@@ -115,6 +115,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 </script>
 
 <style scoped>
+@layer legacy {
 .tray-scrim {
     position: fixed;
     inset: 0;
@@ -159,7 +160,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
     flex-shrink: 0;
 }
 .tray-title {
-    font-family: "MinecrafterAlt", sans-serif;
+    font-family: var(--font-ui);
     font-size: 16px;
     color: #eee9df;
 }
@@ -217,7 +218,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
     width: 22px;
     flex-shrink: 0;
     color: rgba(232, 227, 217, 0.5);
-    font-family: "Monaco", monospace;
+    font-family: var(--font-content);
     font-size: 10px;
 }
 .tray-chip-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -252,7 +253,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
     outline: 0;
     background: rgba(0, 0, 0, 0.28);
     color: #f4f1ec;
-    font: 12px/1 system-ui, "Noto Sans SC", sans-serif;
+    font: 12px/1 var(--font-ui);
 }
 .tray-search::placeholder { color: rgba(232, 227, 217, 0.32); }
 .tray-search:focus { border-color: rgba(238, 233, 223, 0.46); }
@@ -347,5 +348,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 @media (prefers-reduced-motion: reduce) {
     .tray-pop-enter-active,
     .tray-pop-leave-active { transition: opacity 0.15s linear; }
+}
+
 }
 </style>
