@@ -39,6 +39,8 @@ import {
 } from "./byok";
 import type { DeepSeekAccessFailure } from "./byok";
 import { selected } from "./skills";
+import { beginToolActivity, cancelToolActivities, withToolActivity, type ToolActivityHandle } from "./toolActivity";
+import { createToolActivityStream } from "./toolActivityStream";
 import { readApiError as readBaseApiError, responseError } from "../api/apiError";
 import {actionMessageMetaForError} from "./actionMessages";
 import type {ActionMessageKind} from "./actionMessages";
@@ -67,6 +69,7 @@ function stopTaskKeepalive() {
 function beginGenerationRun(): AbortSignal {
     stopTaskKeepalive();
     generationAbort?.abort(new DOMException("Superseded", "AbortError"));
+    cancelToolActivities(true);
     generationAbort = new AbortController();
     generationRunId++;
     return generationAbort.signal;
@@ -352,6 +355,24 @@ function isGeneratingPhase(phase: GenPhase) {
 
 async function post(url: string, body: any, maxRetries = 3) {
     const signal = generationSignal();
+    if (url === "/api/generate/build") return withToolActivity({ kind: "build", title: "启动编译", detail: "提交构建请求，等待服务端确认", context: genTask.projectName, signal },
+        () => postRequest(url, body, maxRetries), result => `构建请求已确认 · ${result?.runId ? `Run #${result.runId}` : "等待构建结果"}`);
+    if (url === "/api/generate/tree" && body.action === "confirm") return withToolActivity({ kind: "tree", title: "确认项目结构", detail: "锁定结构版本，准备生成实现文件", context: genTask.projectName, signal },
+        () => postRequest(url, body, maxRetries), () => "结构已锁定，进入文件生成");
+    if (url === "/api/generate/task" && body.skillIds?.length) {
+        const activity = beginToolActivity({ kind: "skill", title: "装载 Skill 上下文", detail: "为任务载入所选 Skill 的能力说明", context: `${body.skillIds.length} 个 Skill`, signal });
+        try {
+            const result = await postRequest(url, body, maxRetries);
+            const count = Number(result?.skillsLoaded) || 0;
+            activity.finish(count === body.skillIds.length ? "success" : "notice", `已装载 ${count}/${body.skillIds.length} 个 Skill`);
+            return result;
+        } catch (error) { activity.fail(error); throw error; }
+    }
+    return postRequest(url, body, maxRetries);
+}
+
+async function postRequest(url: string, body: any, maxRetries = 3) {
+    const signal = generationSignal();
     const runId = generationRunId;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -399,6 +420,20 @@ function createClarifyRequestId(): string { return `clarify_${crypto.randomUUID(
 function createBuildRequestId(): string { return `build_${crypto.randomUUID().replace(/-/g, "")}`; }
 
 async function get(url: string) {
+    if (!/^\/api\/generate\/(status|tree)\?/.test(url)) return getRequest(url);
+    const activity = beginToolActivity({ kind: "refresh", title: "刷新任务状态", detail: "同步服务端的最新进度", context: genTask.projectName,
+        signal: generationSignal(), refreshKey: url.split("?")[0] });
+    try {
+        const result = await getRequest(url);
+        const failed = result.status === "error";
+        activity.finish(failed ? "error" : "success", failed ? "状态已同步 · 构建未通过"
+            : result.status === "done" ? "构建已通过，产物已就绪"
+            : result.tree ? "项目结构状态已同步" : `状态已同步 · ${result.runStatus || result.status || "等待更新"}`);
+        return result;
+    } catch (error) { activity.fail(error); throw error; }
+}
+
+async function getRequest(url: string) {
     const signal = generationSignal();
     const runId = generationRunId;
     const resp = await fetchWithByokFallback(url, { signal });
@@ -436,6 +471,7 @@ type LearningCallResult = {
     retryAfterMs?: number;
 };
 
+let learningActivity: ToolActivityHandle | undefined;
 function applyLearningSnapshot(snapshot: any) {
     if (snapshot?.learningProgress) {
         const receivedAt = Date.now();
@@ -448,6 +484,7 @@ function applyLearningSnapshot(snapshot: any) {
             progress.startedAt = progress.deadlineAt - serverBudgetMs;
         }
         genTask.learningProgress = progress;
+        learningActivity?.update(progress.currentNeed || progress.message || "检索并验证公共 API", `${progress.completedNeeds}/${progress.totalNeeds} 项查证 · ${progress.sourceCount} 条证据`);
     }
     if (Array.isArray(snapshot?.knowledgeUsed)) {
         for (const item of snapshot.knowledgeUsed) {
@@ -780,6 +817,23 @@ function normalizeFixRepairAuthorization(value: any): FixRepairAuthorization | n
 }
 
 async function runLearning(
+    toolRequestId: string,
+    options?: { resumeExisting?: boolean; continuation?: LearningContinuationDeadline },
+): Promise<void> {
+    const activity = beginToolActivity({ kind: "learning", title: "Learning 公共 API 查证", detail: "检索来源并验证当前技术缺口", signal: generationSignal() });
+    const previous = learningActivity;
+    learningActivity = activity;
+    try {
+        await runLearningRequest(toolRequestId, options);
+        const progress = genTask.learningProgress;
+        activity.finish(progress.status === "ready" ? "success" : progress.status === "failed" ? "error" : progress.status === "cancelled" ? "cancelled" : "notice",
+            progress.status === "ready" ? `查证完成 · ${progress.sourceCount} 条证据`
+            : progress.message || (progress.status === "needs_review" ? "查证结果等待审核" : "查证已降级，继续生成"));
+    } catch (error) { activity.fail(error); throw error; }
+    finally { learningActivity = previous; }
+}
+
+async function runLearningRequest(
     toolRequestId: string,
     options?: {
         resumeExisting?: boolean;
@@ -1287,10 +1341,21 @@ type SSEReadOptions = {
     requireDone?: boolean;
     runId?: number;
     onActivity?: () => void;
+    treeActivity?: ToolActivityHandle;
+    onToolEvent?: (event: any) => void;
 };
 
 /** Read an SSE stream, dispatch events to genTask, return the result event. */
 async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
+    const tracker = createToolActivityStream(generationSignal(), opts?.treeActivity);
+    try {
+        const result = await readSSEEvents(resp, { ...opts, onToolEvent: event => tracker.event(event) });
+        tracker.finish();
+        return result;
+    } catch (error) { tracker.fail(error); throw error; }
+}
+
+async function readSSEEvents(resp: Response, opts?: SSEReadOptions): Promise<any> {
     const runId = opts?.runId ?? generationRunId;
     assertGenerationRun(runId);
     const reader = resp.body!.getReader();
@@ -1346,6 +1411,8 @@ async function readSSE(resp: Response, opts?: SSEReadOptions): Promise<any> {
                     continue;
                 }
                 assertGenerationRun(runId);
+
+                opts?.onToolEvent?.(evt);
 
                 if (evt?.type === "error" || (evt?.type === "result" && evt?.error)) {
                     rejectAccessEvent(evt);
@@ -1591,6 +1658,7 @@ type PreflightRequestConfig = {
     endpoint: string;
     stage: "clarify" | "tree";
     label: string;
+    treeActivity?: ToolActivityHandle;
     requestIdField: "clarifyRequestId" | "treeRequestId";
     requestId: string;
     taskId: string;
@@ -1786,6 +1854,7 @@ async function streamPreflightRequest(config: PreflightRequestConfig): Promise<a
                     requireDone: true,
                     runId,
                     onActivity: recordTransportActivity,
+                    treeActivity: config.treeActivity,
                 });
             } catch (error: any) {
                 if (rootSignal.aborted || runId !== generationRunId) throw generationAbortError();
@@ -2214,14 +2283,22 @@ async function streamTreeRound(action: "build" | "refine" | "continue", learning
     }
     genTask.treeToolCallCount = 0;
     persistGenTaskNow();
-    return streamPreflightRequest({
-        endpoint: "/api/generate/tree", stage: "tree", label: "结构树规划", requestIdField: "treeRequestId",
-        requestId: genTask.treeRequestId, taskId: genTask.taskId,
-        payload: { action: genTask.treeMode, correction: genTask.treeCorrection, focusIds: genTask.treeFocusIds, skillIds: [...selected], learningToolJobs },
-        inProgressCode: "TREE_IN_PROGRESS", recoveryCode: "TREE_RECOVERY_REQUIRED", normalizeRequestId: normalizeTreeRequestId,
-        onRecoverRequestId: requestId => { genTask.treeRequestId = requestId; persistGenTaskNow(); },
-        setController: controller => { treeAbort = controller; }, clearController: controller => { if (treeAbort === controller) treeAbort = null; },
-    });
+    const activity = beginToolActivity({ kind: "tree", title: action === "refine" ? "修正结构树" : "规划项目结构", detail: action === "refine" ? genTask.treeCorrection : "组织行为路径，绑定实现文件", context: genTask.projectName, signal: generationSignal() });
+    try {
+        const result = await streamPreflightRequest({
+            endpoint: "/api/generate/tree", stage: "tree", label: "结构树规划", requestIdField: "treeRequestId",
+            treeActivity: activity,
+            requestId: genTask.treeRequestId, taskId: genTask.taskId,
+            payload: { action: genTask.treeMode, correction: genTask.treeCorrection, focusIds: genTask.treeFocusIds, skillIds: [...selected], learningToolJobs },
+            inProgressCode: "TREE_IN_PROGRESS", recoveryCode: "TREE_RECOVERY_REQUIRED", normalizeRequestId: normalizeTreeRequestId,
+            onRecoverRequestId: requestId => { genTask.treeRequestId = requestId; persistGenTaskNow(); },
+            setController: controller => { treeAbort = controller; }, clearController: controller => { if (treeAbort === controller) treeAbort = null; },
+        });
+        activity.finish(result.status === "failed" ? "error" : result.status === "learning" ? "notice" : "success",
+            result.status === "failed" ? "本轮结构校验未通过，可继续修正" : result.status === "learning" ? "本轮暂停，转入 Learning 查证"
+            : result.status === "ready" ? "结构已就绪，等待确认" : `本轮规划完成 · ${genTask.treeToolCallCount} 项工具调用`);
+        return result;
+    } catch (error) { activity.fail(error); throw error; }
 }
 export async function confirmTree(): Promise<void> {
     if (!genTask.tree) throw new Error("结构树尚未就绪");

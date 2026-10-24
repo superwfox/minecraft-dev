@@ -22,6 +22,7 @@
       <div class="gen-card-head">
         <div class="gen-card-title">▪ 项目规划</div>
         <ThinkingMarquee v-if="marqueeOn" variant="compact"/>
+        <ProjectTreeStatusCard :label="activityStatusLabel" :detail="genTask.projectName || '等待项目信息'" :busy="activityBusy"/>
       </div>
       <div class="gen-phases">
         <span v-for="p in phases" :key="p.key" class="gen-phase"
@@ -222,6 +223,10 @@ import {buildSafeDebugExport} from "../logic/safeDebug";
 import {Check, Copy, Play} from "lucide-vue-next";
 import ThinkingMarquee from "./ThinkingMarquee.vue";
 import LearningEvidence from "./LearningEvidence.vue";
+import ProjectTreeStatusCard from "./ProjectTreeStatusCard.vue";
+
+const activityBusy = computed(() => !["idle", "done", "error", "interrupted", "tree_confirming", "awaiting_input"].includes(genTask.phase));
+const activityStatusLabel = computed(() => ({ idle: "等待开始", creating: "创建任务", clarifying: "确认需求", awaiting_input: "等待补充需求", tree_planning: "规划结构", tree_confirming: "等待确认结构", generating: "生成实现文件", verifying: "校验文件完整性", uploading: "提交构建", building: "等待编译结果", fixing: "修复编译问题", interrupted: "任务已中断", done: "构建完成", error: "任务未完成" }[genTask.phase]));
 
 // 后台活跃阶段（无逐字流）显示跑马灯
 const marqueeOn = computed(() =>

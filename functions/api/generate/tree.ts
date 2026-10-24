@@ -661,8 +661,14 @@ async function handleTreeRequest(
                 let tree = state.tree as ProjectTree;
                 const round = session.round + 1;
                 const externalDeps = tree.project.externalDeps;
-                if (Array.isArray(body.skillIds)) state.skills = body.skillIds.length
-                    ? await getSkillBundles(context.env, body.skillIds, { signal: operationDeadline.signal }) : [];
+                if (Array.isArray(body.skillIds)) {
+                    if (body.skillIds.length) await writeSSE(writer, encoder,
+                        { type: "skill_context", status: "started", requested: body.skillIds.length }, operationAbort, operationDeadline.signal);
+                    state.skills = body.skillIds.length
+                        ? await getSkillBundles(context.env, body.skillIds, { signal: operationDeadline.signal }) : [];
+                    if (body.skillIds.length) await writeSSE(writer, encoder,
+                        { type: "skill_context", status: "completed", requested: body.skillIds.length, loaded: state.skills.length }, operationAbort, operationDeadline.signal);
+                }
                 if (learningResolution?.status === "resolved" && session.learningRequestId === learningResolution.request.requestId) {
                     tree.knowledgeNeeds = deduplicateKnowledgeNeeds([...tree.knowledgeNeeds, ...learningResolution.request.needs]).slice(0, 8);
                     state.knowledgeUsed = mergeKnowledgeUsed(state.knowledgeUsed, learningResolution.knowledgeUsed);

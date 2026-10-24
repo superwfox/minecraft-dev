@@ -148,7 +148,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
             const expiresAt = Math.floor(Date.now() / 1000) * 1000
                 + TASK_STATE_TTL_SECONDS * 1000;
-            return new Response(JSON.stringify({ taskId, expiresAt }), {
+            return new Response(JSON.stringify({ taskId, expiresAt, skillsLoaded: skills.length }), {
                 headers: { "Content-Type": "application/json" },
             });
         } catch (error) {

@@ -1,6 +1,7 @@
 <template>
   <main class="preview-page">
     <header class="preview-header"><div><h1 data-font="dynamic">HomePlus</h1><p>Paper 1.21.4 <span>Java 21</span></p></div><ProjectTreeStatusCard :label="demoPath ? '验证动效演示' : mode === 'confirm' ? '等待确认结构' : '生成进度 · 示例'" :detail="demoPath ? '仅演示动画，不代表实际测试结果' : previewPaths.length + ' 条路径 · ' + (steps.length - 1) + ' 个步骤 · ' + boundFileCount + ' 个文件'" :busy="mode === 'progress'"/></header>
+    <ToolActivityPreview v-if="toolPreview"/>
     <div class="path-viewport">
     <div ref="pathViewport" class="path-map" tabindex="0" aria-label="纵向行为路径，可横向滚动">
       <div class="path-canvas">
@@ -27,9 +28,11 @@ import PathSparks from "./.tree-path-sparks.vue";
 import EdgePortal from "./.tree-edge-portal.vue";
 import TreeGate from "./src/components/TreeGate.vue";
 import ProjectTreeStatusCard from "./src/components/ProjectTreeStatusCard.vue";
+import ToolActivityPreview from "./.tool-activity-preview.vue";
 import { genTask, treeGateWaiting } from "./src/logic/generateState";
 import { previewPaths as pathFixtures, previewTree, rootStep } from "./.tree-preview-model";
 const previewPaths = reactive(pathFixtures.map(path => ({ ...path })));
+const toolPreview = new URLSearchParams(window.location.search).has("tool-preview");
 const demoId = new URLSearchParams(window.location.search).get("verification-preview");
 const demoPath = previewPaths.find(path => path.id === demoId);
 const completedPaths = ref(previewPaths.filter(path => path.testStatus === "passed").map(path => path.id));
