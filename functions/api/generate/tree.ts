@@ -513,7 +513,7 @@ async function handleTreeRequest(
             } else if (body.action === "refine") {
                 const correction = String(suppliedInput.correction);
                 if (!correction || correction.length > 1000) invalid = "修正意见须为 1–1000 字";
-                else if (currentTree?.status !== "ready" && !(session?.status === "failed" && currentTree?.nodes.some(n => n.origin !== "system"))) invalid = "当前结构树不能修正";
+                else if (currentTree?.status !== "ready" && !(session?.status === "failed" && currentTree)) invalid = "当前结构树不能修正";
             } else if (!session || !["continue", "learning"].includes(session.status)) invalid = "当前没有可续接的规划会话";
             if (invalid) { scheduleLeaseRelease(); return preflightJsonError(invalid, "INVALID_TREE_ACTION", 400); }
             if (body.action !== "continue") {
@@ -723,12 +723,20 @@ async function handleTreeRequest(
                     state.tree = tree;
                     session.lastResults = applied.results;
                     session.status = "continue";
-                    if (!calls.length) session.emptyRounds++;
+                    session.emptyRounds = applied.results.some(result => result.changed) ? 0 : session.emptyRounds + 1;
+                    session.issues = [
+                        ...validateProjectTree(tree),
+                        ...applied.results.filter(result => !result.ok).map(result => ({ code: result.errorCode ?? "TREE_TOOL_FAILED", message: `${result.tool}：${result.error ?? "操作失败"}` })),
+                    ];
                     if (applied.finishRequested || !calls.length) {
-                        session.issues = validateProjectTree(tree);
                         if (!session.issues.length) { tree.status = "ready"; session.status = "ready"; }
                     }
-                    if (session.status !== "ready" && (session.emptyRounds >= 2 || round >= MAX_TREE_ROUNDS)) session.status = "failed";
+                    if (session.status !== "ready" && (session.emptyRounds >= 2 || round >= MAX_TREE_ROUNDS)) {
+                        session.status = "failed";
+                        session.issues.push(session.emptyRounds >= 2
+                            ? { code: "TREE_NO_PROGRESS", message: "连续两轮未产生有效结构变更，已停止继续调用；请查看工具错误后重试修正" }
+                            : { code: "TREE_ROUND_LIMIT", message: "本次规划已达到轮数上限，尚未通过的结构和工具问题已保留" });
+                    }
                 }
                 session.round = round;
                 if (session.status === "learning" && round >= MAX_TREE_ROUNDS) session.status = "failed";

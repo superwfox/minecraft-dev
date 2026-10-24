@@ -811,7 +811,7 @@ ${treeContext ?? ""}`,
 export interface TreeBuilderInput {
     userPrompt: string; coreType: string; version: string; clarifyRounds?: ClarifyRound[];
     treeSnapshot: string; issues: { code: string; message: string }[];
-    lastResults: { ok: boolean; error?: string }[]; mode: "build" | "refine";
+    lastResults: { ok: boolean; error?: string; tool?: string; field?: string; errorCode?: string }[]; mode: "build" | "refine";
     correction: string; focusIds: string[]; round: number; maxRounds: number;
     apiContractContext?: string; knowledgeContext?: string; skillContext?: string;
 }
@@ -829,6 +829,8 @@ ListenerGen：events 非空，实现 Listener；GUI 持有类可以无事件，�
 TaskGen：schedule 非空，继承 BukkitRunnable，由 Main 启动。
 ManagerGen：集中服务状态；ConfigClassGen：YAML 配置包装；ModelGen：POJO；EnumGen：枚举；UtilGen：无状态工具。
 ConfigGen 只能放 _resources，声明 configKeys 时必须添加 config.yml。所有 methods、constructors、events、commands、schedule、configKeys、lifecycle 都是必须遵守的契约。
+contract.events 填事件类名，如 AsyncChatEvent（接受完整包名并规范为简类名），不要填处理方法或方法签名。contract.configKeys 填 YAML 配置路径，如 rewardAmount 或 reward.item，保留大小写；命令名与 aliases 使用不含 / 的小写名称。
+每轮先查看当前树快照和上一轮工具结果：已存在且内容不变的项目或模块无需再次写入；优先修正失败工具所指出的字段，再补齐缺失文件、路径及步骤。重复提交相同模块不算规划进展。
 一轮可以批量调用多个树工具。认为完成时调用 finish_tree。learn_public_api 不能与树工具在同一轮混用。
 系统模块 _build、_resources、_root 不可删除改名；pom.xml、plugin.yml、Main 由系统维护，不能改动；MainGen 和 FileRelatedGen 不可由模型创建。
 不使用的 schedule.mode、lifecycle、tag 填 none，其余可选语义用空字符串或空数组。
@@ -863,6 +865,6 @@ Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
 ${input.apiContractContext ?? ""}
 ${input.knowledgeContext ?? ""}
 ${input.skillContext ?? ""}`,
-        user: `原始需求：${input.userPrompt}\n\n用户已确认的决策（必须严格遵守）：\n${decisions}\n\n当前树快照：\n${input.treeSnapshot}\n\n上一轮失败操作：\n${input.lastResults.filter(r => !r.ok).map(r => r.error).join("\n")}\n\n校验问题：\n${input.issues.map(i => `${i.code}: ${i.message}`).join("\n")}\n\n第 ${input.round}/${input.maxRounds} 轮\n${input.mode === "refine" ? `用户修正原文：${input.correction}\n选中对象（id 与标题见快照）：${input.focusIds.join(", ")}` : ""}`,
+        user: `原始需求：${input.userPrompt}\n\n用户已确认的决策（必须严格遵守）：\n${decisions}\n\n当前树快照：\n${input.treeSnapshot}\n\n上一轮失败操作：\n${input.lastResults.filter(r => !r.ok).map(r => `${r.tool ?? "工具"}${r.field ? ` / ${r.field}` : ""} [${r.errorCode ?? "TREE_TOOL_FAILED"}]：${r.error ?? "操作失败"}`).join("\n")}\n\n校验问题：\n${input.issues.map(i => `${i.code}: ${i.message}`).join("\n")}\n\n第 ${input.round}/${input.maxRounds} 轮\n${input.mode === "refine" ? `用户修正原文：${input.correction}\n选中对象（id 与标题见快照）：${input.focusIds.join(", ")}` : ""}`,
     };
 }

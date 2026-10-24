@@ -19,3 +19,9 @@
 本地预览：`http://127.0.0.1:5178/.tree-preview.html?tool-preview=1`。模拟入口不执行模型、Learning 或远端构建请求。
 
 结构预览与正式页面共用 `ProjectTree.vue`、`ProjectTreePathNode.vue`、`ProjectTreePathSparks.vue` 和 `ProjectTreeEdgePortal.vue`。`?business-preview=1` 用示例数据展示正式进度页组合；预览快照使用独立键，不覆盖正式任务。真实路径验证采用模型静态审查与对应代码编译，游戏内行为由用户实测。
+
+`?business-preview=1&planning-error-preview=1` 使用系统文件空树及较长的字段错误展示规划失败、禁用确认和自然语言修正入口，不会调用模型。
+
+## 真实业务链路验证
+
+- [结构规划与 DeepSeek 真实调用记录](project-tree-real-validation.md)：旧版故障复现、修复版规划和源码生成结果、逐路径静态审查结论；明确区分真实模型调用、模拟预览和未执行的 Java 编译。

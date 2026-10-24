@@ -66,6 +66,7 @@ describe("tree planning rounds", () => {
     it("refines with correction and selected object titles", async () => {
         await invoke({ action: "build", treeRequestId: requestId() });
         const revision = JSON.parse(store.raw).tree.revision;
+        vi.mocked(fetch).mockResolvedValueOnce(modelResponse([call("upsert_node", { id: "HomeData", moduleId: "home", kind: "ModelGen", title: "家园状态", responsibility: "合并后统一保存家园数据", depends: [], contract: emptyNodeContract(), tag: "none", pairId: "" }), call("finish_tree", { summary: "完成修正" })]));
         await invoke({ action: "refine", correction: "合并家园数据", focusIds: ["HomeData", "missing"], treeRequestId: requestId(2) });
         expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]!.body)).messages[1].content).toContain("合并家园数据");
         expect(JSON.parse(store.raw).treeSession.focusIds).toEqual(["HomeData"]); expect(JSON.parse(store.raw).tree.revision).toBeGreaterThan(revision);
@@ -74,6 +75,33 @@ describe("tree planning rounds", () => {
         vi.mocked(fetch).mockImplementation(async () => modelResponse([]));
         await invoke({ action: "build", treeRequestId: requestId() });
         expect((await invoke({ action: "continue", treeRequestId: requestId(2) })).events.at(-1).status).toBe("failed");
+    });
+    it("stops repeated invalid lists and unchanged modules before exhausting eight rounds", async () => {
+        const repeated = [call("upsert_module", { id: "home", title: "家园", responsibility: "家园管理" }), call("upsert_node", { id: "ChatListener", moduleId: "home", kind: "ListenerGen", title: "聊天奖励", responsibility: "聊天后发放奖励", depends: [], contract: { ...emptyNodeContract(), events: ["onChat(AsyncChatEvent event)"] }, tag: "none", pairId: "" })];
+        vi.mocked(fetch).mockResolvedValueOnce(modelResponse([calls()[0], ...repeated]));
+        await invoke({ action: "build", treeRequestId: requestId() });
+        const revision = JSON.parse(store.raw).tree.revision;
+        vi.mocked(fetch).mockImplementation(async () => modelResponse(repeated));
+        await invoke({ action: "continue", treeRequestId: requestId(2) });
+        const stopped = (await invoke({ action: "continue", treeRequestId: requestId(3) })).events.at(-1);
+        expect(stopped).toMatchObject({ status: "failed", round: 3 });
+        expect(stopped.issues.map((issue: any) => issue.code)).toEqual(expect.arrayContaining(["NO_BUSINESS_NODE", "NO_BEHAVIOR_PATH", "TREE_TOOL_ARGUMENT_INVALID", "TREE_NO_PROGRESS"]));
+        expect(stopped.results[1]).toMatchObject({ field: "contract.events", errorCode: "TREE_TOOL_ARGUMENT_INVALID" });
+        expect(JSON.parse(store.raw).tree.revision).toBe(revision);
+        const nextPrompt = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]!.body)).messages[1].content;
+        expect(nextPrompt).toContain("upsert_node / contract.events");
+        expect(nextPrompt).toContain("NO_BEHAVIOR_PATH");
+        expect(fetch).toHaveBeenCalledTimes(3);
+    });
+    it("can refine a failed tree containing only system files", async () => {
+        vi.mocked(fetch).mockImplementation(async () => modelResponse([]));
+        await invoke({ action: "build", treeRequestId: requestId() });
+        await invoke({ action: "continue", treeRequestId: requestId(2) });
+        vi.mocked(fetch).mockResolvedValueOnce(modelResponse(calls()));
+        const result = await invoke({ action: "refine", correction: "补齐业务文件和行为路径", treeRequestId: requestId(3) });
+        expect(result.response.status).toBe(200);
+        expect(result.events.at(-1)).toMatchObject({ status: "ready", round: 1 });
+        expect(JSON.parse(store.raw).tree.nodes).toHaveLength(5);
     });
     it("confirms with revision checks and a single final Main bucket, idempotently", async () => {
         await invoke({ action: "build", treeRequestId: requestId() });

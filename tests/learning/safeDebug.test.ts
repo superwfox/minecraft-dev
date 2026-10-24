@@ -78,6 +78,17 @@ function telemetry() {
 }
 
 describe("safe Debug export", () => {
+    it("keeps planning tool error codes and fields without exporting arguments or error text", () => {
+        const payload = buildSafeDebugExport(makeSource({ debugLog: [{ type: "debug", scope: "tree", msg: "tree:operations", round: 3,
+            tools: [{ index: 0, name: "upsert_module", ok: true, changed: false, arguments: "private-arguments-sentinel" },
+                { index: 1, name: "upsert_node", ok: false, changed: false, code: "TREE_TOOL_ARGUMENT_INVALID", field: "contract.events", error: "private-error-sentinel", nodeId: "private-node-sentinel" },
+                { index: 2, name: "private-tool-sentinel", ok: false, code: "private-code-sentinel", field: "private-field-sentinel" }] }] }));
+        expect(payload.generation.debug.events).toEqual([{ scope: "tree", msg: "tree:operations", round: 3,
+            tools: [{ index: 0, name: "upsert_module", ok: true, changed: false },
+                { index: 1, name: "upsert_node", ok: false, changed: false, code: "TREE_TOOL_ARGUMENT_INVALID", field: "contract.events" },
+                { index: 2, name: "unknown", ok: false, changed: false }] }]);
+        expect(JSON.stringify(payload)).not.toContain("private-");
+    });
     it("exports only allowlisted diagnostic fields", () => {
         const source = makeSource({
             files: [{

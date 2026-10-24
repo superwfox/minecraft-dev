@@ -48,6 +48,9 @@ const GENERATION_DEBUG_STAGES = new Set([
 const BUILD_FIX_DEBUG_MESSAGES = new Set([
     "fix:diagnostics", "fix:no-target", "fix:contract-rejected", "fix:unchanged", "fix:result",
 ]);
+const TREE_TOOL_NAMES = new Set(["set_project", "upsert_module", "upsert_node", "upsert_path", "remove_path", "remove_items", "merge_nodes", "finish_tree"]);
+const TREE_TOOL_ERROR_CODES = new Set(["TREE_TOOL_INVALID_JSON", "TREE_TOOL_ARGUMENT_INVALID", "TREE_TOOL_FAILED"]);
+const TREE_TOOL_FIELDS = new Set(["list", "externalDeps", "depends", "contract.events", "contract.configKeys", "contract.commands.aliases", "nodes.fileIds", "moduleIds", "nodeIds", "sourceIds"]);
 const TELEMETRY_COUNT_KEYS = [
     "discoveryAttempts", "discoveryElapsedMs", "discoveryTimeouts", "discoveryRetryableFailures",
     "discoveryLastHttpStatus", "candidateNeedCount", "candidateUrlCount", "sourceAttempts",
@@ -161,7 +164,7 @@ export type SafeDebugExport = {
             rejectedEvents: number;
             droppedEvents: number;
             events: Array<{
-                scope: "bucket" | "build-fix";
+                scope: "bucket" | "build-fix" | "tree";
                 msg: string;
                 request?: string;
                 bucket?: number;
@@ -173,9 +176,10 @@ export type SafeDebugExport = {
                 waitMs?: number;
                 round?: number;
                 done?: boolean;
+                tools?: Array<{ index: number; name: string; ok: boolean; changed: boolean; code?: string; field?: string }>;
             }>;
             summaries: Array<{
-                scope: "bucket" | "build-fix";
+                scope: "bucket" | "build-fix" | "tree";
                 msg: string;
                 count: number;
             }>;
@@ -369,7 +373,7 @@ function normalizeLearningEvent(value: unknown): NormalizedLearningEvent | null 
 }
 
 function summarizeGenerationDebug(values: unknown[]): SafeDebugExport["generation"]["debug"] {
-    const counts = new Map<string, { scope: "bucket" | "build-fix"; msg: string; count: number }>();
+    const counts = new Map<string, { scope: "bucket" | "build-fix" | "tree"; msg: string; count: number }>();
     const events: SafeDebugExport["generation"]["debug"]["events"] = [];
     let acceptedEvents = 0;
     let timelineEvents = 0;
@@ -377,10 +381,10 @@ function summarizeGenerationDebug(values: unknown[]): SafeDebugExport["generatio
         if (!value || typeof value !== "object") continue;
         const raw = value as Record<string, unknown>;
         const msg = typeof raw.msg === "string" ? raw.msg : "";
-        const scope = raw.scope === "build-fix"
+        const scope = raw.scope === "tree" ? "tree" : raw.scope === "build-fix"
             ? "build-fix"
             : Number.isInteger(Number(raw.bucket)) ? "bucket" : undefined;
-        const accepted = scope === "build-fix"
+        const accepted = scope === "tree" ? msg === "tree:operations" : scope === "build-fix"
             ? BUILD_FIX_DEBUG_MESSAGES.has(msg)
             : scope === "bucket" && BUCKET_DEBUG_MESSAGES.has(msg);
         if (!scope || !accepted) continue;
@@ -410,6 +414,13 @@ function summarizeGenerationDebug(values: unknown[]): SafeDebugExport["generatio
             if (waitMs !== undefined) event.waitMs = waitMs;
             if (round !== undefined) event.round = round;
             if (typeof raw.done === "boolean") event.done = raw.done;
+            if (scope === "tree" && Array.isArray(raw.tools)) event.tools = raw.tools.slice(0, 60).map(value => {
+                const tool = value && typeof value === "object" ? value as Record<string, unknown> : {};
+                return { index: safeCount(tool.index, 60), name: TREE_TOOL_NAMES.has(String(tool.name)) ? String(tool.name) : "unknown",
+                    ok: tool.ok === true, changed: tool.changed === true,
+                    ...(TREE_TOOL_ERROR_CODES.has(String(tool.code)) ? { code: String(tool.code) } : {}),
+                    ...(TREE_TOOL_FIELDS.has(String(tool.field)) ? { field: String(tool.field) } : {}) };
+            });
             events.push(event);
         }
     }

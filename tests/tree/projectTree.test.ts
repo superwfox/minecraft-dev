@@ -34,6 +34,32 @@ describe("project tree tools and identity", () => {
         expect(tree).toEqual(before);
         expect(result.tree.revision).toBe(tree.revision + 1);
     });
+    it("accepts qualified event names and case-sensitive configuration paths", () => {
+        const result = applyTreeToolCalls(fixture(), [call("upsert_node", node("ChatListener", { kind: "ListenerGen", contract: { ...emptyNodeContract(), events: ["io.papermc.paper.event.player.AsyncChatEvent", "AsyncChatEvent"], configKeys: ["rewardAmount", "messages.rewardText"] } }))]);
+        expect(result.results[0]).toMatchObject({ ok: true, changed: true });
+        expect(result.tree.nodes.find(node => node.id === "ChatListener")?.contract).toMatchObject({ events: ["AsyncChatEvent"], configKeys: ["rewardAmount", "messages.rewardText"] });
+        const schema = treeToolDefinitions().find(tool => tool.function.name === "upsert_node")!.function.parameters as any;
+        expect(new RegExp(schema.properties.contract.properties.events.items.pattern).test("io.papermc.paper.event.player.AsyncChatEvent")).toBe(true);
+        expect(new RegExp(schema.properties.contract.properties.configKeys.items.pattern).test("messages.rewardText")).toBe(true);
+    });
+    it.each([
+        ["contract.events", { events: ["onChat(AsyncChatEvent event)"] }],
+        ["contract.configKeys", { configKeys: ["reward..amount"] }],
+        ["contract.commands.aliases", { commands: [{ name: "reward", aliases: ["/reward"], permission: "", usage: "", description: "" }] }],
+    ])("reports the offending %s field without mutating the tree", (field, contract) => {
+        const tree = fixture();
+        const result = applyTreeToolCalls(tree, [call("upsert_node", node("ChatListener", { contract: { ...emptyNodeContract(), ...contract } }))]);
+        expect(result.results[0]).toMatchObject({ ok: false, changed: false, errorCode: "TREE_TOOL_ARGUMENT_INVALID", field });
+        expect(result.results[0].error).toContain(field);
+        expect(result.tree).toEqual(tree);
+    });
+    it("does not count identical module writes as a structure change", () => {
+        const tree = fixture();
+        const result = applyTreeToolCalls(tree, [call("upsert_module", tree.modules.find(module => module.id === "home"))]);
+        expect(result.results[0]).toMatchObject({ ok: true, changed: false });
+        expect(result.tree.revision).toBe(tree.revision);
+        expect(result.tree).toEqual(tree);
+    });
     it("limits each batch and rejects every locked edit", () => {
         const calls = Array.from({ length: 62 }, () => call("finish_tree", { summary: "完成" }));
         const result = applyTreeToolCalls(fixture(), calls);
@@ -80,6 +106,18 @@ describe("tree validation and derivation", () => {
         expect(plan.findIndex(f => f.nodeId === "HomeData")).toBeLessThan(plan.findIndex(f => f.nodeId === "HomeCommand"));
         expect(mainBlueprint.commands[0].name).toBe("home"); expect(mainBlueprint.events[0].event).toBe("PlayerJoinEvent"); expect(mainBlueprint.tasks[0].periodTicks).toBe(1200);
         expect(mainBlueprint.fqcn?.HomeCommand).toBe("com.tahai.homeplus.home.HomeCommand");
+    });
+    it("keeps a listener's plugin reference without inventing a Main registration cycle", () => {
+        const tree = fixture();
+        tree.nodes.push({ ...tree.nodes[3], id: "ChatRewardListener", kind: "ListenerGen", depends: ["Main"], contract: { ...emptyNodeContract(), constructors: [{ params: "JavaPlugin plugin" }], events: ["AsyncChatEvent"] } });
+        const before = structuredClone(tree);
+        expect(validateProjectTree(tree)).toEqual([]);
+        const { plan, buckets, mainBlueprint } = deriveGenerationPlan(tree);
+        expect(tree).toEqual(before);
+        expect(buckets.at(-1)?.map(file => file.nodeId)).toEqual(["Main"]);
+        expect(plan.filter(file => file.nodeId === "Main")).toHaveLength(1);
+        expect(plan.find(file => file.nodeId === "ChatRewardListener")?.depends).toEqual(["Main"]);
+        expect(mainBlueprint.events).toContainEqual({ event: "AsyncChatEvent", listenerClass: "ChatRewardListener", priority: "NORMAL" });
     });
     it("appends review nodes in the referencing module or common, with stable duplicates and a cap", () => {
         const tree = fixture(); tree.status = "locked";

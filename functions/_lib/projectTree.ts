@@ -27,7 +27,7 @@ export interface ProjectTree {
     modules: TreeModule[]; nodes: TreeNode[]; paths?: TreePath[]; knowledgeNeeds: KnowledgeNeed[];
 }
 export interface TreeIssue { code: string; message: string; targetId?: string }
-export interface TreeOpResult { index: number; tool: string; ok: boolean; summary: string; error?: string }
+export interface TreeOpResult { index: number; tool: string; ok: boolean; summary: string; changed?: boolean; error?: string; errorCode?: string; field?: string }
 export interface NodeContractCheck {
     nodeId: string; revision: number; items: { key: string; label: string; ok: boolean }[]; passed: number; total: number;
 }
@@ -46,6 +46,10 @@ export const JAVA_KEYWORDS = new Set("abstract assert boolean break byte case ca
 const JAVA_KINDS: GeneratorType[] = ["CommandGen", "ListenerGen", "TaskGen", "ManagerGen", "ConfigClassGen", "ModelGen", "EnumGen", "UtilGen"];
 const lower = (value: string) => value.toLowerCase();
 const unique = (values: string[]) => [...new Set(values)];
+const EVENT_NAME = /^(?:[A-Za-z_$][\w$]*\.)*[A-Z][\w$]*Event$/;
+const COMMAND_NAME = /^[a-z][a-z0-9_-]*$/;
+const CONFIG_KEY = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+const PLUGIN_NAME = /^[A-Za-z][A-Za-z0-9_-]{1,40}$/;
 export const emptyNodeContract = (): NodeContract => ({ methods: [], constructors: [], events: [], commands: [], schedule: null, configKeys: [], lifecycle: null });
 export function packageNameFor(name: string): string { return `com.tahai.${name.toLowerCase()}`; }
 export function javaVersionFor(version: string): string {
@@ -82,20 +86,21 @@ export function findNodeByPath(tree: ProjectTree, path: string): TreeNode | unde
 
 type JsonSchema = Record<string, unknown>;
 const str = (maxLength = 600): JsonSchema => ({ type: "string", maxLength });
+const formatted = (maxLength: number, pattern: RegExp, description: string): JsonSchema => ({ ...str(maxLength), pattern: pattern.source, description });
 const list = (items: JsonSchema, maxItems: number): JsonSchema => ({ type: "array", items, maxItems });
 const obj = (properties: Record<string, JsonSchema>): JsonSchema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
 const choice = (values: readonly string[]): JsonSchema => ({ type: "string", enum: [...values] });
 export function treeToolDefinitions() {
     const contract = obj({
         methods: list(obj({ name: str(48), params: str(400), returns: str(160), isStatic: { type: "boolean" } }), 12),
-        constructors: list(obj({ params: str(400) }), 3), events: list(str(80), 8),
-        commands: list(obj({ name: str(48), aliases: list(str(48), 12), permission: str(120), usage: str(200), description: str(300) }), 6),
+        constructors: list(obj({ params: str(400) }), 3), events: list(formatted(80, EVENT_NAME, "事件类名，如 AsyncChatEvent；也接受完整包名，并保存为简类名。不要填写处理方法名或方法签名。"), 8),
+        commands: list(obj({ name: formatted(48, COMMAND_NAME, "小写命令名，不含 /"), aliases: list(formatted(48, COMMAND_NAME, "小写命令别名，不含 /；没有别名时传空数组"), 12), permission: str(120), usage: str(200), description: str(300) }), 6),
         schedule: obj({ mode: choice(["timer", "once", "async", "none"]), periodTicks: { type: "integer", minimum: 0 }, delayTicks: { type: "integer", minimum: 0 } }),
-        configKeys: list(str(120), 20), lifecycle: choice(["onEnable", "lazy", "none"]),
+        configKeys: list(formatted(120, CONFIG_KEY, "YAML 配置路径，保留大小写，如 rewardAmount、reward.item；各段只含英文字母、数字、下划线或连字符，以点分隔"), 20), lifecycle: choice(["onEnable", "lazy", "none"]),
     });
     const node = obj({ id: str(48), moduleId: str(24), kind: choice([...JAVA_KINDS, "ConfigGen"]), title: str(24), responsibility: str(600), depends: list(str(48), 12), contract, tag: choice(["gui", "none"]), pairId: str(48) });
     const definitions: [string, string, JsonSchema][] = [
-        ["set_project", "设置项目名、摘要和外部插件依赖", obj({ projectName: str(40), summary: str(1000), externalDeps: list(str(41), 4) })],
+        ["set_project", "设置项目名、摘要和外部插件依赖", obj({ projectName: str(40), summary: str(1000), externalDeps: list(formatted(41, PLUGIN_NAME, "外部插件名称，如 Vault；不是 Maven 坐标、包名或依赖版本"), 4) })],
         ["upsert_module", "新增或更新业务模块（Java 子包）", obj({ id: str(24), title: str(20), responsibility: str(300) })],
         ["upsert_node", "新增、移动或整体替换文件节点及其成员契约", node],
         ["upsert_path", "新增或整体替换一条需求行为路径；nodes 按执行顺序排列，每步绑定已有文件 id，跨路径可以共享文件", obj({ id: str(48), title: str(40), nodes: { ...list(obj({ id: str(64), title: str(40), kind: str(16), summary: str(600), fileIds: { ...list(str(48), 8), minItems: 1 } }), 12), minItems: 1 } })],
@@ -106,15 +111,18 @@ export function treeToolDefinitions() {
     ];
     return definitions.map(([name, description, parameters]) => ({ type: "function" as const, function: { name, description, parameters } }));
 }
-function requireValue(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message); }
-function text(value: unknown, max: number, allowEmpty = false): string {
-    requireValue(typeof value === "string" && value.trim().length <= max && (allowEmpty || value.trim().length > 0), `文字长度必须为 ${allowEmpty ? 0 : 1}–${max}`);
+class TreeToolArgumentError extends Error {
+    constructor(message: string, readonly field?: string) { super(message); this.name = "TreeToolArgumentError"; }
+}
+function requireValue(condition: unknown, message: string, field?: string): asserts condition { if (!condition) throw new TreeToolArgumentError(message, field); }
+function text(value: unknown, max: number, allowEmpty = false, field?: string): string {
+    requireValue(typeof value === "string" && value.trim().length <= max && (allowEmpty || value.trim().length > 0), `${field ? field + "：" : ""}文字长度必须为 ${allowEmpty ? 0 : 1}–${max}`, field);
     return value.trim();
 }
-function strings(value: unknown, max: number, pattern?: RegExp): string[] {
-    requireValue(Array.isArray(value) && value.length <= max, `列表最多 ${max} 项`);
-    const values = value.map(item => text(item, 200));
-    requireValue(!pattern || values.every(item => pattern.test(item)), "列表中存在非法值");
+function strings(value: unknown, max: number, pattern?: RegExp, field = "list", format = "请使用工具声明的格式"): string[] {
+    requireValue(Array.isArray(value) && value.length <= max, `${field}：必须为最多 ${max} 项的数组`, field);
+    const values = value.map(item => text(item, 200, false, field));
+    requireValue(!pattern || values.every(item => pattern.test(item)), `${field}：${format}`, field);
     return unique(values);
 }
 function record(value: unknown): Record<string, unknown> {
@@ -139,13 +147,13 @@ function normalizeContract(value: unknown): NodeContract {
             return { name, params: text(m.params, 400, true), returns: text(m.returns, 160), isStatic: m.isStatic };
         }),
         constructors: boundedRecords(c.constructors, 3).map(c => ({ params: text(c.params, 400, true) })),
-        events: strings(c.events, 8, /^[A-Z]\w*Event$/),
+        events: unique(strings(c.events, 8, EVENT_NAME, "contract.events", "填写事件类名，如 AsyncChatEvent 或 io.papermc.paper.event.player.AsyncChatEvent，不要填写处理方法名或签名").map(event => event.split(".").pop()!)),
         commands: boundedRecords(c.commands, 6).map(c => {
             const name = text(c.name, 48); requireValue(/^[a-z][a-z0-9_-]*$/.test(name), "非法命令名");
-            return { name, aliases: strings(c.aliases, 12, /^[a-z][a-z0-9_-]*$/), permission: text(c.permission, 120, true), usage: text(c.usage, 200, true), description: text(c.description, 300, true) };
+            return { name, aliases: strings(c.aliases, 12, COMMAND_NAME, "contract.commands.aliases", "别名必须为小写命令名，不含 /；没有别名时传 []"), permission: text(c.permission, 120, true), usage: text(c.usage, 200, true), description: text(c.description, 300, true) };
         }),
         schedule: !schedule || schedule.mode === "none" ? null : { mode: schedule.mode as "timer" | "once" | "async", periodTicks: Number(schedule.periodTicks), delayTicks: Number(schedule.delayTicks) },
-        configKeys: strings(c.configKeys, 20, /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/),
+        configKeys: strings(c.configKeys, 20, CONFIG_KEY, "contract.configKeys", "使用 YAML 配置路径，如 rewardAmount 或 reward.item；各段仅含英文字母、数字、下划线或连字符"),
         lifecycle: !c.lifecycle || c.lifecycle === "none" ? null : c.lifecycle as "onEnable" | "lazy",
     };
 }
@@ -161,7 +169,7 @@ function upsertNode(tree: ProjectTree, input: Record<string, unknown>): TreeNode
     requireValue(!!existing || count < MAX_TREE_NODES, "超出节点数上限");
     const tag = input.tag === "gui" ? "gui" as const : null;
     requireValue(["gui", "none", null].includes(input.tag as string | null), "非法节点标签");
-    const node: TreeNode = { id, moduleId, kind: input.kind as GeneratorType, title: text(input.title, 24), responsibility: text(input.responsibility, 600), depends: strings(input.depends, 12), contract: normalizeContract(input.contract), tag, pairId: tag ? text(input.pairId, 48, true) : "", origin: "planner" };
+    const node: TreeNode = { id, moduleId, kind: input.kind as GeneratorType, title: text(input.title, 24), responsibility: text(input.responsibility, 600), depends: strings(input.depends, 12, undefined, "depends"), contract: normalizeContract(input.contract), tag, pairId: tag ? text(input.pairId, 48, true) : "", origin: "planner" };
     if (existing) tree.nodes.splice(tree.nodes.indexOf(existing), 1, node); else tree.nodes.push(node);
     return node;
 }
@@ -181,7 +189,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
             if (tool === "set_project") {
                 const name = text(args.projectName, 40);
                 requireValue(/^[A-Z][A-Za-z0-9]{2,39}$/.test(name), "项目名必须为 PascalCase");
-                next.project = { ...next.project, projectName: name, packageName: packageNameFor(name), summary: text(args.summary, 1000, true), externalDeps: strings(args.externalDeps, 4, /^[A-Za-z][A-Za-z0-9_-]{1,40}$/) };
+                next.project = { ...next.project, projectName: name, packageName: packageNameFor(name), summary: text(args.summary, 1000, true), externalDeps: strings(args.externalDeps, 4, PLUGIN_NAME, "externalDeps", "填写插件名，如 Vault，不要填写 Maven 坐标、包名或版本") };
                 summary = `✎ 项目 ${name}`;
             } else if (tool === "upsert_module") {
                 const id = text(args.id, 24);
@@ -202,7 +210,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                 next.paths ??= [];
                 const existing = next.paths.find(path => path.id === id);
                 requireValue(!!existing || next.paths.length < 10, "最多 10 条行为路径");
-                const nodes = boundedRecords(args.nodes, 12).map(step => ({ id: text(step.id, 64), title: text(step.title, 40), kind: text(step.kind, 16), summary: text(step.summary, 600), fileIds: strings(step.fileIds, 8) }));
+                const nodes = boundedRecords(args.nodes, 12).map(step => ({ id: text(step.id, 64), title: text(step.title, 40), kind: text(step.kind, 16), summary: text(step.summary, 600), fileIds: strings(step.fileIds, 8, undefined, "nodes.fileIds") }));
                 requireValue(nodes.length > 0 && nodes.every(step => /^[a-z][a-z0-9-]{1,63}$/.test(step.id) && step.fileIds.length > 0), "步骤 id 不合法或未绑定实现文件");
                 requireValue(nodes.every(step => step.fileIds.every(fileId => next.nodes.some(node => node.id === fileId))), "步骤绑定了不存在的文件");
                 const allStepIds = [...next.paths.filter(path => path.id !== id).flatMap(path => path.nodes.map(step => step.id)), ...nodes.map(step => step.id)];
@@ -217,7 +225,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                 next.paths = next.paths.filter(path => path.id !== id);
                 summary = `－ 路径 ${id}`;
             } else if (tool === "remove_items") {
-                const moduleIds = strings(args.moduleIds, 10), nodeIds = strings(args.nodeIds, 40);
+                const moduleIds = strings(args.moduleIds, 10, undefined, "moduleIds"), nodeIds = strings(args.nodeIds, 40, undefined, "nodeIds");
                 requireValue(!moduleIds.some(id => id.startsWith("_")) && !next.nodes.some(n => n.origin === "system" && nodeIds.includes(n.id)), "系统模块和节点不可删除");
                 const removed = new Set(next.nodes.filter(n => nodeIds.includes(n.id) || moduleIds.includes(n.moduleId)).map(n => n.id));
                 next.modules = next.modules.filter(m => !moduleIds.includes(m.id));
@@ -225,7 +233,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                 for (const path of next.paths ?? []) for (const step of path.nodes) step.fileIds = step.fileIds.filter(id => !removed.has(id));
                 summary = `－ 节点 ${[...removed].join("、")}`;
             } else if (tool === "merge_nodes") {
-                const sourceIds = strings(args.sourceIds, 6);
+                const sourceIds = strings(args.sourceIds, 6, undefined, "sourceIds");
                 requireValue(sourceIds.length >= 2 && sourceIds.every(id => next.nodes.some(n => n.id === id && n.origin !== "system")), "合并必须包含 2–6 个非系统节点");
                 const targetArgs = record(args.target);
                 requireValue(!next.nodes.some(n => n.id === targetArgs.id && !sourceIds.includes(n.id)), "合并目标不能覆盖其他节点");
@@ -240,11 +248,10 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
                 summary = `⇄ 合并 ${sourceIds.join("、")} → ${target.id}`;
             } else if (tool === "finish_tree") { summary = "✓ 提交结构树"; finishRequested = true; }
             else throw new Error("未知结构树工具");
-            next.revision++;
-            next.status = "drafting";
-            tree = next;
-            results.push({ index, tool, ok: true, summary });
-        } catch (error) { results.push({ index, tool, ok: false, summary: "操作失败", error: error instanceof Error ? error.message : String(error) }); }
+            const changed = JSON.stringify(next) !== JSON.stringify(tree);
+            if (changed) { next.revision++; next.status = "drafting"; tree = next; }
+            results.push({ index, tool, ok: true, changed, summary: changed || tool === "finish_tree" ? summary : `无需变更：${summary}` });
+        } catch (error) { results.push({ index, tool, ok: false, changed: false, summary: "操作失败", error: error instanceof Error ? error.message : String(error), errorCode: error instanceof SyntaxError ? "TREE_TOOL_INVALID_JSON" : error instanceof TreeToolArgumentError ? "TREE_TOOL_ARGUMENT_INVALID" : "TREE_TOOL_FAILED", ...(error instanceof TreeToolArgumentError && error.field ? { field: error.field } : {}) }); }
     });
     return { tree, results, finishRequested };
 }
@@ -306,12 +313,13 @@ export function planItemForNode(tree: ProjectTree, node: TreeNode, bucket = 0, o
 }
 export function deriveGenerationPlan(tree: ProjectTree): { plan: PlanFileItem[]; buckets: PlanFileItem[][]; mainBlueprint: MainBlueprint } {
     const main = tree.nodes.find(n => n.id === "Main")!;
-    main.depends = tree.nodes.filter(n => ["ListenerGen", "CommandGen", "TaskGen", "ManagerGen", "ConfigClassGen"].includes(n.kind)).map(n => n.id);
     const ordered: TreeNode[] = [], depths = new Map<string, number>(), active = new Set<string>();
     const visit = (node: TreeNode): number => {
         if (depths.has(node.id)) return depths.get(node.id)!;
         requireValue(!active.has(node.id), "依赖成环，无法派生生成计划"); active.add(node.id);
-        const depth = ["_build", "_resources"].includes(node.moduleId) ? 0 : node.depends.reduce((max, id) => { const dep = tree.nodes.find(n => n.id === id); return dep ? Math.max(max, visit(dep) + 1) : max; }, 0);
+        // Main is generated last from the registration blueprint. A plugin reference
+        // in a listener is a source dependency, not a prerequisite generation step.
+        const depth = ["_build", "_resources"].includes(node.moduleId) ? 0 : node.depends.reduce((max, id) => { const dep = id === "Main" ? undefined : tree.nodes.find(n => n.id === id); return dep ? Math.max(max, visit(dep) + 1) : max; }, 0);
         active.delete(node.id); depths.set(node.id, depth); ordered.push(node); return depth;
     };
     for (const node of tree.nodes.filter(n => n.id !== "Main")) visit(node);

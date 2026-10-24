@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { renderTreeMarkdown, type ProjectTreeView, type TreeIssue } from "./projectTree";
+import { renderTreeMarkdown, type ProjectTreeView, type TreeIssue, type TreeOpResult } from "./projectTree";
 import type { GenFile } from "./generateState";
 import {
     genTask,
@@ -1427,8 +1427,9 @@ async function readSSEEvents(resp: Response, opts?: SSEReadOptions): Promise<any
                             genTask.treeToolCallCount++;
                             break;
                         case "tree_ops":
-                            genTask.treeOpsLog.push(...(evt.results ?? []).map((result: { ok: boolean; summary: string; error?: string }) => result.ok ? result.summary : result.error || result.summary));
+                            genTask.treeOpsLog.push(...(evt.results ?? []).map((result: TreeOpResult) => result.ok ? result.summary : `${result.tool}：${result.error || result.summary}`));
                             genTask.treeOpsLog = genTask.treeOpsLog.slice(-100);
+                            recordTreeDiagnostics(evt.round, evt.results ?? []);
                             break;
                         case "tree_patch":
                             if (genTask.tree && evt.node) {
@@ -2269,6 +2270,15 @@ interface TreeRoundResult {
     learningToolRequests?: unknown[];
 }
 let treeRecoveryInput: Record<string, unknown> | null = null;
+function recordTreeDiagnostics(round: number, results: TreeOpResult[]) {
+    if (!Array.isArray(results) || !results.length) return;
+    const event = { type: "debug", scope: "tree", msg: "tree:operations", request: genTask.treeRequestId, round,
+        tools: results.map(result => ({ index: result.index, name: result.tool, ok: result.ok, changed: result.changed === true, code: result.errorCode, field: result.field })) };
+    const previous = genTask.debugLog.at(-1);
+    if (previous?.scope === "tree" && previous.round === round && JSON.stringify(previous.tools) === JSON.stringify(event.tools)) return;
+    genTask.debugLog.push(event);
+    if (genTask.debugLog.length > 5000) genTask.debugLog.shift();
+}
 function applyTreeView(tree: ProjectTreeView | null) {
     if (!tree) return;
     genTask.tree = { ...tree, project: { ...tree.project, coreType: genTask.coreType, version: genTask.version } };
@@ -2293,6 +2303,7 @@ async function refreshTree() {
         genTask.treeSessionStatus = result.session.status;
         genTask.treeRound = result.session.round;
         genTask.treeIssues = result.session.issues ?? [];
+        recordTreeDiagnostics(result.session.round, result.session.lastResults ?? []);
     }
     return result;
 }
