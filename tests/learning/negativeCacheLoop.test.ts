@@ -17,7 +17,7 @@ vi.mock("../../functions/_lib/taskStore", async original => ({ ...await original
     putTaskState: async (_env: any, taskId: string, state: any) => memory.states.set(taskId, JSON.parse(JSON.stringify(state))),
 }));
 vi.mock("../../functions/_lib/llm", async original => ({ ...await original<Record<string, unknown>>(), resolveTaskLLM: async () => null }));
-vi.mock("../../functions/_lib/deepseekResponses", async original => ({ ...await original<Record<string, unknown>>(), discoverLearningSources: discover }));
+vi.mock("../../functions/_lib/deepseekSearch", async original => ({ ...await original<Record<string, unknown>>(), discoverLearningSources: discover }));
 vi.mock("../../functions/_lib/learning/verification", async original => ({ ...await original<Record<string, unknown>>(), verifyKnowledgeNeed: verifier }));
 
 import { onRequestPost as start } from "../../functions/api/learning/start";

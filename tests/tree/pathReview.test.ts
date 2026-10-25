@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyTreeToolCalls, createInitialTree, nodePath } from "../../functions/_lib/projectTree";
 import { emptyNodeContract } from "../../functions/_lib/projectTree";
-import { parsePathReview, publicPathChecks, queuePathReview, sourceFingerprint, type PathReviewState } from "../../functions/_lib/projectPathReview";
+import { activePathRepair, parsePathReview, publicPathChecks, queuePathRepair, queuePathReview, sourceFingerprint, type PathReviewState } from "../../functions/_lib/projectPathReview";
 import type { PlanFileItem } from "../../functions/_lib/prompts";
 
 async function fixture() {
@@ -46,5 +46,22 @@ describe("path review evidence", () => {
         expect(state.buckets).toHaveLength(1);
         state.pathReviews["save-home"] = parsePathReview(JSON.stringify(report), state, state.tree.paths[0]);
         expect(queuePathReview(state)).toBeUndefined();
+    });
+    it("reworks the files of failed steps once and reuses the active repair bucket", async () => {
+        const state = await fixture();
+        const failed = { passed: false, summary: "保存后未落盘", steps: [{ id: "save-home-data", passed: false, detail: "HomeData 缺少保存逻辑" }] };
+        state.pathReviews["save-home"] = parsePathReview(JSON.stringify(failed), state, state.tree.paths[0]);
+        const repairState = state as typeof state & { pathRepair?: { bucketIndex: number; files: string[] } | null; pathRepairAttempts?: number };
+        const index = queuePathRepair(repairState);
+        expect(index).toBe(0);
+        const homeData = "src/main/java/com/tahai/homeplus/home/HomeData.java";
+        expect(repairState.buckets[0].map(file => file.nodeId)).toEqual(["HomeData"]);
+        expect(repairState.generationCheckpoints[homeData]).toMatchObject({ stage: "rework", lastReason: expect.stringContaining("HomeData 缺少保存逻辑") });
+        expect(queuePathRepair(repairState)).toBe(0);
+        expect(activePathRepair(repairState)).toBe(0);
+        repairState.fileStatuses[homeData] = "done";
+        expect(activePathRepair(repairState)).toBeUndefined();
+        expect(queuePathRepair(repairState)).toBeUndefined();
+        expect(repairState.pathRepairAttempts).toBe(1);
     });
 });

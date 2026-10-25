@@ -1,4 +1,4 @@
-import { reworkPrompt, dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
+import { dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor, type LLMProvider } from "../../_lib/llm";
@@ -579,17 +579,7 @@ async function processFileStage(
     const runRework = async (): Promise<FileStageOutcome> => {
         await writeSSE(writer, encoder, { type: "phase", path: filePath, phase: "reworking" }, operationAbort);
         dbg("file:rework-begin", { path: filePath, round: checkpoint.reworkCount });
-        const rw = reworkPrompt(
-            filePath,
-            target.role,
-            checkpoint.content,
-            checkpoint.lastReason,
-            ctx,
-            summaries,
-            apiContractCtx,
-            knowledgeContext,
-        );
-        rw.user += "\n\n" + treeContext;
+        const rw = dispatched.rework(checkpoint.content, checkpoint.lastReason);
         const call = await callWithLearningTool({
             llm,
             state,
@@ -1018,7 +1008,9 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             // 每次请求只推进每个目标的一个持久化阶段；中断后从该阶段继续。
             const pending = bucket.filter(f => state.fileStatuses?.[f.path] !== "done");
-            const targets = pending.slice(0, Math.max(1, concurrency));
+            // 修正与补缺可能把 Main 和业务文件放进同一桶；Main 必须读取修正后的接口摘要。
+            const businessPending = pending.filter(file => file.generatorType !== "MainGen");
+            const targets = (businessPending.length ? businessPending : pending).slice(0, Math.max(1, concurrency));
             state.generatedFiles ??= [];
             const plannedPaths = new Set((state.plan ?? []).map((file: any) => file.path));
             const completedBucketFiles = () => {

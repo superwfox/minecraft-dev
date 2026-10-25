@@ -48,6 +48,7 @@ interface TaskBillingState {
 
 interface Env {
     DEEPSEEK_API_KEY: string;
+    // Legacy flag name retained for deployed environments; now enables raw Search/Fetch.
     DEEPSEEK_RESPONSES_WEB_SEARCH?: string;
     TASKS: KVNamespace;
 }

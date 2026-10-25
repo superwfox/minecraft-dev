@@ -157,7 +157,7 @@ export function plannerClarifyPrompt(
     {
       "id": "persistence",
       "question": "数据持久化采用哪种方式？",
-      "options": ["文本存储", "二进制存储"],
+      "options": ["保存到插件数据文件（YAML）", "跟随玩家或物品保存（PDC）"],
       "allowCustom": true,
       "multiSelect": false,
       "chart": null
@@ -187,11 +187,12 @@ export function plannerClarifyPrompt(
 - id="ui-interaction" —— **仅当**需求涉及「需要可视化选择 / 列表 / 分页 / 图形界面」时才问；纯文本提示就够的简单命令不要问，默认文本反馈。
   options 固定为：["聊天命令 + SendMessage 文本反馈", "聊天命令 + Inventory GUI 反馈"]
 - id="persistence" —— **仅当**需求确实需要「跨服务器重启保留的数据」（如玩家记录 / 余额 / 积分 / 可增删的配置数据）时才问；无状态操作、或仅运行时内存状态，**绝不问** persistence，也不要因此引入任何存储类。
-  options 固定为 ["文本存储", "二进制存储"]
-- id="text-format" —— 仅当 persistence 已问且答「文本存储」时追问，options 固定为 ["CSV", "TXT", "YAML"]
+  options 固定为 ["保存到插件数据文件（YAML）", "跟随玩家或物品保存（PDC）"]；数据需要跨玩家汇总、排行或离线修改时只适合 YAML，此时不问，直接采用 YAML
+- id="growth-curve" —— **仅当**价格、经验、冷却等数值会随等级或次数增长，且用户没有给出增长方式或公式时才问；固定数值不问
+  options 固定为：["每级增加相同数值（线性）", "先慢后快（平方）", "先快后慢（平方根）", "后期趋于平缓（对数）", "成倍增长（指数）"]，chart=null
 
 行为语义消歧（满足条件才问；同上：历史已问过的不重复；这类优先在前几轮问，因为答案会决定后面要不要问持久化/作用域/数值）：
-- id="trigger-event" —— **仅当**用户的触发描述对应多个底层事件、且选不同事件会导致不同实现时才问。本 id 的 options **不固定**、且不受下方「3~5 项」下限约束（真实分叉几个就给几个，最少 2 个，不要凑数）：针对具体歧义生成用玩家能懂的「行为差别」选项，措辞要精确到实现侧能据此唯一确定用哪个事件；严禁出现事件类名，allowCustom=true，chart=null。典型参考：
+- id="trigger-event" —— **仅当**用户的触发描述对应多个底层事件、且选不同事件会导致不同实现时才问。本 id 的 options **不固定**（真实分叉几个就给几个，最少 2 个，不要凑数）：针对具体歧义生成用玩家能懂的「行为差别」选项，措辞要精确到实现侧能据此唯一确定用哪个事件；严禁出现事件类名，allowCustom=true，chart=null。典型参考：
     · 「右键/使用某物」 → 「右手一按就触发（哪怕没吃成/用成）」 vs 「真正吃完/用完那一下才触发」
     · 「打/攻击生物」 → 「左键碰一下就算」 vs 「真正造成伤害才算」 vs 「把目标打死才算」
     · 「挖/破坏方块」 → 「开始挖的瞬间」 vs 「方块真正被挖断」
@@ -203,21 +204,16 @@ export function plannerClarifyPrompt(
 - id="effect-duration" —— **仅当**需求授予持续性能力/状态（飞行/加速/无敌/发光等）、且生效时长不明时才问。
   options 固定为：["一次性永久获得", "限定时长后自动失效", "满足某条件时持续生效、条件消失即取消"]
 
-按需包含（根据用户需求语义判断是否需要）：
-- id="growth-curve" — 当需求涉及价格/经验/等级/冷却/数值成长时必须包含
-  options 必须从下列集合中选取 3-5 个：["linear", "power2", "power0.5", "log", "exp"]
-  chart 字段必须为 "multi"（特殊值，前端会对每个选项分别绘制曲线）；
-  或 chart 为 null 但 options 值对应函数类型字符串（推荐前者）
-  实际格式：chart 设为 "multi"，options 就是函数类型名
-- id="permission-prefix" — 涉及操作权限时
-- id="world-scope" — 涉及方块/区域时
-- id="external-plugin" — 涉及经济/占位符时（Vault/PlaceholderAPI/WorldGuard/无）
-- id="command-alias" — 声明了新命令时
-- id="message-config" — 声明玩家反馈文本时
-- id="reload-strategy" — 有可变运行时状态时
+可选问题（默认不问，直接采用括号中的默认值；只有用户原文明确要求自定义该项，或默认值会与需求冲突时才问）：
+- id="permission-prefix"（默认：插件名小写作为权限前缀）
+- id="world-scope"（默认：所有世界生效）
+- id="external-plugin"（默认：不接入外部插件；用户明确提到经济、占位符或领地时才问，选项为 Vault/PlaceholderAPI/WorldGuard/无，可多选）
+- id="command-alias"（默认：不设别名）
+- id="message-config"（默认：反馈文本直接写在代码中，不做配置化）
+- id="reload-strategy"（默认：不提供重载命令，重启生效）
 
 每个 todo：
-- options 数量 3~5 项
+- 上文写明固定 options 的问题按原样输出；trigger-event 按真实分叉数量给出；其他问题给 2~5 个互不重叠的选项
 - allowCustom 一律为 true（允许用户输入其他想法）
 - multiSelect 除非明确需要多选（如 external-plugin）否则为 false
 - 不要产出空 todos；若确认所有必要项已覆盖，返回 {"done": true, "todos": []}
@@ -229,7 +225,7 @@ export function plannerClarifyPrompt(
     };
 }
 
-// ─── Grader（结构规划 + 实现路径）────────────────────────────
+// ─── 结构树能力包上下文 ────────────────────────────
 
 export function skillTreeContext(bundles: SkillBundle[]): string {
     if (!bundles?.length) return "";
@@ -313,6 +309,20 @@ const FILEGEN_OUTPUT_STYLE_RULES = `
 - Java 源码中的 Bukkit / 游戏消息使用 ChatColor 枚举，禁止在 Java 字符串字面量中直接写 § 或 &。YAML / properties 中使用上表对应的 § 代码，禁止用 &；若必须兼容历史 & 配置，Java 读取后必须先调用 ChatColor.translateAlternateColorCodes('&', text)。
 - 用户若明确要求其他颜色或特定格式，以用户要求为准并灵活调整；这种例外不得扩散到未被指定的其他消息。`;
 
+function pluginAccessRules(projectName: string): string {
+    return `- 插件主类 Main 之外的类禁止 import、引用或强转 Main，也不要使用 XxxPlugin.getPlugin()、XxxPlugin.getInstance() 等静态取实例写法
+- 需要插件实例或项目服务时，通过 public 构造器参数接收，参数以结构树契约 constructors 为准；插件实例参数类型使用 org.bukkit.plugin.Plugin，由 Main 传入 this
+- 契约未声明构造器、但确实需要插件实例时，才使用 Bukkit.getPluginManager().getPlugin("${projectName}") 取得 Plugin 接口，不得强转为具体主类`;
+}
+
+function isJavaFile(filePath: string): boolean {
+    return filePath.toLowerCase().endsWith(".java");
+}
+
+function isPomFile(filePath: string): boolean {
+    return filePath.toLowerCase().endsWith("pom.xml");
+}
+
 
 export function fileGenPrompt(
     filePath: string,
@@ -337,8 +347,7 @@ ${apiBlock}
 - 确保 import 与已生成文件一致
 - 你只能使用上面「已生成文件的可用 API」中列出的类、构造器和方法，不要假设任何未列出的无参构造器、方法或类存在
 - 如果需要的功能在已生成文件中不存在，请在当前文件中自行实现，不要凭空调用不存在的方法
-- 禁止直接引用或转换插件主类类型。获取插件实例必须使用 Bukkit.getPluginManager().getPlugin("${projectContext.projectName}")，返回类型使用 org.bukkit.plugin.Plugin 接口，不要强转为具体主类
-- 不要使用 XxxPlugin.getPlugin()、XxxPlugin.getInstance() 或 (XxxPlugin) 强转等模式
+${pluginAccessRules(projectContext.projectName)}
 - 代码简洁实用，注释极少
 
 极简原则（严格遵守）：
@@ -349,18 +358,20 @@ ${apiBlock}
 
 Paper / Bukkit 配套实现规范（强制遵守，不能省略）：
 - **命令实现**：实现命令类时必须同时实现 CommandExecutor.onCommand 与 TabCompleter.onTabComplete。onTabComplete 至少根据 args.length 返回当前层级的合理候选（无候选则返回空 List），不要返回 null。一个类可同时 implements CommandExecutor, TabCompleter
-- **命令注册**：在 Main.onEnable 中：PluginCommand cmd = getCommand("xxx"); cmd.setExecutor(new XxxCommand()); cmd.setTabCompleter(new XxxCommand()); 同一个类做两件事时只 new 一个实例
-- **Listener 注册**：在 Main.onEnable 中调用 getServer().getPluginManager().registerEvents(new XxxListener(), this)。Listener 类必须 implements Listener，事件方法必须加 @EventHandler 注解
+- **命令注册**：在 Main.onEnable 中按命令类的 public 构造器创建一个实例（如 XxxCommand command = new XxxCommand(this, homeManager);），再 PluginCommand cmd = getCommand("xxx"); cmd.setExecutor(command); cmd.setTabCompleter(command); 同一个类只创建一个实例
+- **Listener 注册**：在 Main.onEnable 中按监听类的 public 构造器创建实例，再调用 getServer().getPluginManager().registerEvents(listener, this)。Listener 类必须 implements Listener，事件方法必须加 @EventHandler 注解
+- **事件优先级与取消状态**：需要取消事件或修改事件结果时使用默认优先级；只在事件最终未被取消时才执行的奖励、记录或提示，使用 @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)，MONITOR 中不得修改事件；处理可取消事件时默认加 ignoreCancelled = true，除非需求明确要求处理已取消的事件
+- **异步事件**：AsyncChatEvent、AsyncPlayerPreLoginEvent 等异步事件中不得直接操作世界、实体或背包，需通过 Bukkit.getScheduler().runTask(plugin, ...) 回到主线程后再调用这些 API
 - **物品发放**：向玩家物品栏添加物品时必须检查 Inventory.addItem(...) 返回的剩余物；无法放入的部分使用玩家世界的 dropItemNaturally 在玩家位置掉落，不得静默丢弃，也不得自行扩展为邮件或暂存系统
 - **Inventory GUI**：自定义 GUI 必须用 InventoryHolder 标识（推荐让 GUI 类 implements InventoryHolder 并由 Bukkit.createInventory(this, size, title) 创建）。监听 InventoryClickEvent 时先判断 event.getInventory().getHolder() instanceof YourGUI，再 event.setCancelled(true) 阻止取出物品，然后用 event.getRawSlot() 派发点击逻辑
 - **配置读取**：通过 getConfig().getXxx("path", default) 读取。Main.onEnable 必须先调用 saveDefaultConfig() 才能读到 resources/config.yml 的默认值
 - **YAML 数据持久化**：用 File dataFile = new File(getDataFolder(), "data.yml"); YamlConfiguration cfg = YamlConfiguration.loadConfiguration(dataFile); 读写后 cfg.save(dataFile) 落盘。getDataFolder() 不存在时先 mkdirs()。Main.onDisable 必须保存所有可变数据
-- **调度任务**：用 new BukkitRunnable() { @Override public void run() { ... } }.runTaskTimer(plugin, delay, period) 启动周期任务；一次性延迟用 runTaskLater；同步任务避免阻塞主线程，耗时操作用 runTaskAsynchronously
+- **调度任务**：结构树中的 TaskGen 类 extends BukkitRunnable，由 Main.onEnable 按契约 schedule 启动；其他类只需延迟或回到主线程执行少量逻辑时，直接使用 Bukkit.getScheduler().runTask / runTaskLater。同步任务避免阻塞主线程，耗时操作放到异步任务
 - **plugin.yml 完整性**：必须含 name、version、main（全限定主类名）、api-version。命令必须在 commands 节点声明（每条至少 description；可选 usage/aliases/permission）。声明的权限节点必须列在 permissions 节点（含 description、default）
 - **权限检查**：通过 sender.hasPermission("plugin.cmd.xxx") 判断，未通过时 sender.sendMessage 提示并 return true
+- **Main.onEnable 顺序（按需调用）**：saveDefaultConfig() → 创建服务 → 按构造器创建并注册命令与监听 → 启动调度任务；onDisable 负责数据落盘和 cancelTasks
 ${additionalContext ? `\n${additionalContext}` : ""}
-${FILEGEN_OUTPUT_STYLE_RULES}
-- **Main.onEnable 模板（按需调用）**：saveDefaultConfig() → 注册所有 PluginCommand 的 Executor/TabCompleter → 注册所有 Listener → 启动调度任务；onDisable 负责数据落盘和 cancelTasks`,
+${FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `请生成文件 ${filePath}\n职责：${fileRole}`,
     };
 }
@@ -375,23 +386,32 @@ export function reCheckerPrompt(
     fileRole?: string,
     additionalContext?: string,
 ): { system: string; user: string } {
-    const crossFileBlock = generatedSummaries?.length
+    const java = isJavaFile(filePath), pom = isPomFile(filePath);
+    const crossFileBlock = java && generatedSummaries?.length
         ? "\n\n项目中已生成文件的可用 API：" + formatSummaries(generatedSummaries) +
         "\n\n除上述 API 外，还需检查：当前文件调用的项目内方法和构造器是否在上述 API 列表中存在。如果调用了未列出的方法，或在没有 public 无参构造器时使用 new Xxx()，视为错误。"
         : "";
+    const reviewer = java
+        ? "你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。"
+        : pom
+            ? "你是 Maven pom.xml 审查器。审查 XML 结构、依赖坐标、仓库与构建插件配置是否存在明显错误；目标核心、版本与坐标以下方专项断言为准。"
+            : "你是 Minecraft 插件资源文件审查器。审查 YAML 结构是否合法，内容是否与文件职责及结构树契约一致。";
+    const mainClassRule = java
+        ? `\n插件主类 Main 之外的文件若 import、引用或强转 Main，或使用 Main.getInstance() 等静态取实例写法，视为错误。插件实例应来自构造器注入的 Plugin 参数，或通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 取得 Plugin 接口。`
+        : "";
+    const styleBlock = pom ? "" : `\n将违反下述输出配色规则的代码或配置视为错误；当前文件没有任何输出消息时忽略本项。\n${FILEGEN_OUTPUT_STYLE_RULES}`;
+    const missingRule = java
+        ? `missing_classes 只列出当前文件 import 或直接使用、但既不在结构树类名列表也不在已生成 API 中的项目内 Java 类名（不含包名，仅类名如 "WelcomeCommand"）。结构树已规划但尚未生成的类不算缺失。错误与缺失类无关时为空数组。`
+        : "missing_classes 固定为空数组。";
 
     return {
-        system: `missing_classes 只列出既不在结构树类名列表、也不在已生成摘要中的类。
-你是一个 Java 代码审查器。审查给定文件是否存在明显错误（语法错误、未关闭的括号、错误的 import、缺少 return、类型不匹配等）。${crossFileBlock}
-检查是否存在对插件主类的直接类型引用或强制转换（如 (MainClass) getPlugin(...)、MainClass.getInstance()）。代码应通过 Bukkit.getPluginManager().getPlugin("${projectName || "PluginName"}") 获取插件实例，类型为 Plugin 接口。发现此类模式视为错误。
+        system: `${reviewer}${crossFileBlock}${mainClassRule}
 文件职责：${fileRole || "未提供显式颜色例外"}
-${additionalContext ?? ""}
-将违反下述输出配色规则的代码或配置视为错误；当前文件没有任何输出消息时忽略本项。
-${FILEGEN_OUTPUT_STYLE_RULES}
+${additionalContext ?? ""}${styleBlock}
 只输出 JSON，格式如下：
 - 通过：{"is_ok":true,"reason":"","missing_classes":[]}
 - 不通过：{"is_ok":false,"reason":"具体错误描述","missing_classes":["ClassName"]}
-missing_classes 列出当前文件引用了但未在已生成 API 列表中存在的项目内 Java 类名（不含包名，仅类名如 "WelcomeCommand"）。只列出确实被当前文件 import 或直接使用、但不在已知 API 中的类。如果错误与缺失类无关则为空数组。
+${missingRule}
 不要输出其他内容。`,
         user: `文件：${filePath}\n\n${fileContent}`,
     };
@@ -408,19 +428,24 @@ export function reworkPrompt(
     generatedSummaries?: FileSummary[],
     apiContractContext?: string,
     knowledgeContext?: string,
+    specContext?: string,
 ): { system: string; user: string } {
-    const apiBlock = generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
+    const java = isJavaFile(filePath);
+    const apiBlock = java && generatedSummaries?.length ? formatSummaries(generatedSummaries) : "";
+    const javaRules = java
+        ? `\n你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。\n${pluginAccessRules(ctx.projectName)}`
+        : "";
 
     return {
-        system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件代码修正器。
+        system: `你是一个 Minecraft ${ctx.coreType} ${ctx.version} 插件文件修正器。
 项目名：${ctx.projectName}，包名：${ctx.packageName}，Java ${ctx.javaVersion}
 ${apiBlock}
 ${apiContractContext ?? ""}
 ${knowledgeContext ?? ""}
+${specContext ?? ""}
 只输出修正后的完整文件正文，不要包裹 markdown 代码块，不要解释。
-你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
-禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
-${FILEGEN_OUTPUT_STYLE_RULES}`,
+只修正指出的问题，保留其余已正确的实现；不得通过更换服务端核心、降低 MC 版本、Java 版本或依赖版本，或删减需求功能来绕过问题。${javaRules}
+${isPomFile(filePath) ? "" : FILEGEN_OUTPUT_STYLE_RULES}`,
         user: `文件 ${filePath}（职责：${fileRole}）存在错误：${reason}\n\n原始内容：\n${originalContent}`,
     };
 }
@@ -446,13 +471,14 @@ function formatBlueprintForMain(bp: MainBlueprint): string {
         ? bp.services.map(s => `  - ${s.managerClass}（lifecycle=${s.lifecycle}）`).join("\n")
         : "  - 无";
     const cfgFiles = bp.config.files.length ? bp.config.files.join(", ") : "无";
+    const classes = Object.values(bp.fqcn ?? {});
     return [
         "事件监听：", events,
         "命令：", commands,
         "调度任务：", tasks,
         "服务（Main 持有）：", services,
         `配置：defaultsCopied=${bp.config.defaultsCopied}, files=${cfgFiles}`,
-        ...Object.values(bp.fqcn ?? {}).map(fqcn => `import ${fqcn};`),
+        ...(classes.length ? ["项目类全限定名（只 import 实际用到的类）：", ...classes.map(fqcn => `  - ${fqcn}`)] : []),
     ].join("\n");
 }
 
@@ -507,7 +533,7 @@ function specializationBlock(
                 "- 实现 onCommand(...) 与 onTabComplete(...)；onTabComplete 至少根据 args.length 返回当前层级合理候选，没有候选时返回 Collections.emptyList()",
                 "- 不要在本文件中调用 getCommand(...).setExecutor / setTabCompleter；命令注册由 Main.onEnable 统一完成",
                 "- 权限校验：通过 sender.hasPermission(\"...\") 判断，未通过 sendMessage 后 return true",
-                "- 通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取插件实例（Plugin 接口），不要强转主类",
+                "- 所需插件实例与服务通过构造器接收（以契约 constructors 为准），不要 import 或强转主类",
             ].join("\n");
         }
         case "ListenerGen": {
@@ -539,6 +565,9 @@ function specializationBlock(
                 meta,
                 "- 必须 implements org.bukkit.event.Listener",
                 "- 事件处理方法必须加 @EventHandler 注解" + (e?.priority ? `，并设置 priority = EventPriority.${e.priority}` : ""),
+                ...(e?.priority ? [] : ["- 优先级按职责选择：只在事件未被取消时执行的奖励、记录或提示，使用 priority = EventPriority.MONITOR, ignoreCancelled = true，且不修改事件；需要取消事件或修改结果时使用默认优先级并加 ignoreCancelled = true"]),
+                "- 异步事件中先回到主线程，再操作世界、实体或背包",
+                "- 所需插件实例与服务通过构造器接收（以契约 constructors 为准），不要 import 或强转主类",
                 "- 不要在本文件中调用 registerEvents；监听器注册由 Main.onEnable 统一完成",
                 "- 不要包含与监听职责无关的方法",
             ].join("\n");
@@ -556,8 +585,8 @@ function specializationBlock(
                 meta,
                 "- 必须 extends org.bukkit.scheduler.BukkitRunnable，实现 run() 中的单次执行逻辑",
                 "- 不要在本文件中调用 runTaskTimer / runTaskLater / runTaskAsynchronously；调度由 Main.onEnable 统一启动",
-                "- 不要持有 Plugin 字段（除非业务必需）；通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取必要服务",
-                "- run() 内若有耗时操作且 schedule=async，可使用 async 调用；同步任务避免阻塞主线程",
+                "- 所需插件实例与服务通过构造器接收（以契约 constructors 为准），不要 import 或强转主类",
+                "- schedule=async 时 run() 中不得直接操作世界、实体或背包；同步任务避免阻塞主线程",
             ].join("\n");
         }
         case "ManagerGen": {
@@ -566,9 +595,10 @@ function specializationBlock(
             return [
                 "═══ ManagerGen 专项规则 ═══",
                 lifecycle,
-                "- 这是被 Main 持有的服务/数据单例。Main 在 onEnable 中 new 一次并保留引用，其它类通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 反查后调用",
+                "- 这是由 Main 持有的服务。Main 在 onEnable 中创建一次，并把同一个实例通过构造器传给需要它的命令、监听和任务",
+                "- 需要数据目录、配置或日志时，通过构造器接收 org.bukkit.plugin.Plugin 参数（以契约 constructors 为准），不要 import 主类",
                 "- 禁止使用 static getInstance() 单例模式；不要写 private static <ClassName> instance",
-                "- 构造时载入数据（YamlConfiguration 等），提供 save() / shutdown() 方法供 Main.onDisable 调用",
+                "- 有需要落盘的可变数据时，构造时载入数据（YamlConfiguration 等），并提供 save() 供 Main.onDisable 调用",
                 "- 公共方法应聚焦数据访问与变更；不要在 ManagerGen 内自行注册命令/监听/任务",
             ].join("\n");
         }
@@ -585,9 +615,9 @@ function specializationBlock(
         case "ConfigClassGen": {
             return [
                 "═══ ConfigClassGen 专项规则 ═══",
-                "- 本类包装 org.bukkit.configuration.file.YamlConfiguration / FileConfiguration",
-                "- 提供 reload() / save() / get*(key, default) 等公共方法",
-                "- 不要在类内硬编码默认值；默认值统一由 resources/config.yml 提供，通过 saveDefaultConfig() 释放后读取",
+                "- 本类包装 org.bukkit.configuration.file.YamlConfiguration / FileConfiguration，插件实例通过构造器接收",
+                "- 按契约提供读取方法；只有需求要求热重载或写回配置时才提供 reload() / save()",
+                "- 默认值以 resources/config.yml 为准，由 Main.onEnable 的 saveDefaultConfig() 释放；读取时的兜底值必须与 config.yml 一致，不要另造一套默认值",
                 "- 不要在本文件内注册命令/监听/任务",
             ].join("\n");
         }
@@ -654,18 +684,17 @@ function specializationBlock(
                 "",
                 "onEnable 顺序（必须按此顺序）：",
                 "  1) saveDefaultConfig()（仅当蓝图 defaultsCopied=true）",
-                "  2) 实例化所有服务（lifecycle=onEnable 的 ManagerGen），保存为字段",
-                "     - 实例化时必须严格使用上方 API 摘要列出的 public 构造器参数；没有无参构造器时禁止 new Xxx()",
-                "  3) 注册所有命令：getCommand(\"name\").setExecutor(executorInstance) 与 setTabCompleter(executorInstance)（同一类的同一实例）",
-                "  4) 注册所有监听：getServer().getPluginManager().registerEvents(listenerInstance, this)",
-                "  5) 启动调度任务：根据 schedule 字段调用 runTaskTimer / runTaskLater / runTaskAsynchronously",
+                "  2) 创建所有服务（ManagerGen / ConfigClassGen 等其他类构造器需要的项目类），保存为字段",
+                "     - 创建任何项目类时都严格使用上方 API 摘要列出的 public 构造器参数；需要 Plugin 参数时传入 this；没有无参构造器时禁止 new Xxx()",
+                "  3) 注册所有命令：按构造器创建命令实例（传入 this 与所需服务），getCommand(\"name\").setExecutor(instance) 与 setTabCompleter(instance) 使用同一实例",
+                "  4) 注册所有监听：按构造器创建监听实例，再 getServer().getPluginManager().registerEvents(listener, this)",
+                "  5) 启动调度任务：timer → runTaskTimer(this, delayTicks, periodTicks)；once → runTaskLater(this, delayTicks)；async → periodTicks>0 时 runTaskTimerAsynchronously(this, delayTicks, periodTicks)，否则 runTaskLaterAsynchronously(this, delayTicks)",
                 "",
                 "onDisable：",
-                "  - 调用所有服务的 save()/shutdown() 方法（如其暴露），确保数据落盘",
+                "  - 调用服务暴露的 save()/shutdown() 方法（如有），确保数据落盘",
                 "  - 取消调度任务（getServer().getScheduler().cancelTasks(this)）",
                 "",
-                "- Main 必须为以上每个 service 持有 getter（如 public DataManager getDataManager()），供其他类通过 Bukkit.getPluginManager().getPlugin(...) 反查后调用",
-                "- 禁止 static getInstance() 单例；插件实例通过 Bukkit.getPluginManager().getPlugin(\"" + ctx.projectName + "\") 获取",
+                "- 每个服务只创建一次，并通过构造器传给依赖它的类；除已挂载能力包的 Main 接线明确要求外，不要为服务提供 public getter，也不要 static getInstance() 单例",
             ].join("\n");
         }
     }
@@ -673,14 +702,18 @@ function specializationBlock(
 }
 
 /** 类型专项的 reChecker 增量断言 */
-function checkerSpecializationBlock(file: PlanFileItem, slice: BlueprintSlice): string {
+function checkerSpecializationBlock(
+    file: PlanFileItem,
+    slice: BlueprintSlice,
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+): string {
     switch (file.generatorType) {
         case "CommandGen":
             return "类型专项断言：本文件应同时 implements CommandExecutor 与 TabCompleter，并实现 onCommand 与 onTabComplete；不应包含 setExecutor / setTabCompleter / registerEvents 调用。";
         case "ListenerGen":
             return file.tag === "gui"
                 ? "类型专项断言：本文件应 implements Listener；若是 GUI 持有类还应 implements InventoryHolder；不应在文件内调用 registerEvents。"
-                : "类型专项断言：本文件应 implements Listener，事件方法必须加 @EventHandler；不应在文件内调用 registerEvents。";
+                : "类型专项断言：本文件应 implements Listener，事件方法必须加 @EventHandler；不应在文件内调用 registerEvents；EventPriority.MONITOR 的处理方法不应取消或修改事件；职责要求只处理未被取消的事件时，处理方法应设置 ignoreCancelled = true。";
         case "TaskGen":
             return "类型专项断言：本文件应 extends BukkitRunnable 并实现 run()；不应直接调用 runTaskTimer / runTaskLater / runTaskAsynchronously（启动由 Main 完成）。";
         case "ManagerGen":
@@ -693,6 +726,7 @@ function checkerSpecializationBlock(file: PlanFileItem, slice: BlueprintSlice): 
             for (const c of bp.commands) must.push(`onEnable 必须为 /${c.name} 设置 ${c.executorClass} 为 Executor 与 TabCompleter`);
             for (const t of bp.tasks) must.push(`onEnable 必须按 schedule=${t.schedule} 启动 ${t.taskClass}`);
             for (const s of bp.services) must.push(`onEnable 必须实例化 ${s.managerClass}`);
+            must.push("创建项目类时传入的参数必须与其 public 构造器一致");
             return "类型专项断言（MainGen 必须满足）：\n- " + must.join("\n- ");
         }
         case "ModelGen":
@@ -701,6 +735,17 @@ function checkerSpecializationBlock(file: PlanFileItem, slice: BlueprintSlice): 
             return "类型专项断言：本文件所有公共方法应 public static，不应持有实例字段或插件引用。";
         case "ConfigGen":
             return "类型专项断言：本文件应是 YAML，不应包含 Java 语法。";
+        case "FileRelatedGen": {
+            if (!isPomFile(file.path)) return "";
+            const { dependencyRule, repositoryRule } = pomCoreRules(ctx);
+            return [
+                `类型专项断言：本文件是 Maven pom.xml，目标为 ${ctx.coreType} ${ctx.version}、Java ${ctx.javaVersion}。`,
+                `- ${dependencyRule}；scope 为 provided`,
+                `- ${repositoryRule}`,
+                `- maven-compiler-plugin 的 source/target 应为 ${ctx.javaVersion}`,
+                "- 以上核心、版本、坐标与仓库是已核验的事实；不得因为记忆中没有该版本就判定为错误，也不得要求更换核心或降低 MC、Java、依赖版本。只有与上述规则不一致时才判定不通过。",
+            ].join("\n");
+        }
         default:
             return "";
     }
@@ -719,19 +764,26 @@ export function dispatchGen(
 ): {
     gen: { system: string; user: string };
     checker: (filePath: string, fileContent: string) => { system: string; user: string };
+    rework: (content: string, reason: string) => { system: string; user: string };
 } {
     const spec = specializationBlock(file, slice, ctx);
-    const additionalContext = [spec, apiContractContext, knowledgeContext, skillContext, treeContext].filter((v): v is string => !!v).join("\n\n");
+    const additionalContext = [spec, apiContractContext, knowledgeContext, skillContext].filter((v): v is string => !!v).join("\n\n");
     // 统一输出规范由 fileGenPrompt 放在最终尾部，确保专项规则与 skill 骨架不能覆盖它。
     const gen = fileGenPrompt(file.path, file.role, ctx, ancestorSummaries, additionalContext);
     if (treeContext) gen.user += "\n\n" + treeContext;
-    const checkerSpec = [checkerSpecializationBlock(file, slice), apiContractContext, knowledgeContext]
+    const checkerSpec = [checkerSpecializationBlock(file, slice, ctx), apiContractContext, knowledgeContext]
         .filter((v): v is string => !!v)
         .join("\n\n");
     const checker = (path: string, content: string) => {
         return reCheckerPrompt(path, content, ancestorSummaries, ctx.projectName, file.role, checkerSpec);
     };
-    return { gen, checker };
+    const reworkSpec = [spec, skillContext].filter((v): v is string => !!v).join("\n\n");
+    const rework = (content: string, reason: string) => {
+        const prompt = reworkPrompt(file.path, file.role, content, reason, ctx, ancestorSummaries, apiContractContext, knowledgeContext, reworkSpec);
+        if (treeContext) prompt.user += "\n\n" + treeContext;
+        return prompt;
+    };
+    return { gen, checker, rework };
 }
 
 /** 计算文件对应的 BlueprintSlice */
@@ -788,7 +840,7 @@ export function buildFixPrompt(
     const fileRules = isPom
         ? `这是 Maven pom.xml。只修正仓库、依赖、版本或构建插件配置，不得输出 Java。${pomRules.dependencyRule}；${pomRules.repositoryRule}。`
         : `你只能使用上面列出的已生成文件中的类、构造器和方法，不要凭空调用不存在的无参构造器或方法。
-禁止直接引用或转换插件主类类型，必须使用 Bukkit.getPluginManager().getPlugin("${ctx.projectName}") 获取实例。
+${pluginAccessRules(ctx.projectName)}
 文件职责：${fileRole || "未提供显式颜色例外"}
 ${FILEGEN_OUTPUT_STYLE_RULES}`;
 
@@ -816,16 +868,23 @@ export interface TreeBuilderInput {
     apiContractContext?: string; knowledgeContext?: string; skillContext?: string;
 }
 export function treeBuilderPrompt(input: TreeBuilderInput): { system: string; user: string } {
-    const decisions = input.clarifyRounds?.flatMap(round => round.todos.map(todo => `- ${todo.question} → ${JSON.stringify(round.answers[todo.id])}`)).join("\n") ?? "";
+    const decisions = input.clarifyRounds?.flatMap(round => round.todos.map(todo => `- ${todo.question} → ${JSON.stringify(round.answers[todo.id])}`)).join("\n") || "无";
+    const failures = input.lastResults.filter(r => !r.ok).map(r => `${r.tool ?? "工具"}${r.field ? ` / ${r.field}` : ""} [${r.errorCode ?? "TREE_TOOL_FAILED"}]：${r.error ?? "操作失败"}`).join("\n") || "无";
+    // 工具失败已在上一轮失败操作中列出，校验问题只保留结构树本身的问题。
+    const issues = input.issues.filter(i => !i.code.startsWith("TREE_TOOL_")).map(i => `${i.code}: ${i.message}`).join("\n") || "无";
+    const refine = input.mode === "refine"
+        ? `\n用户修正原文：${input.correction}${input.focusIds.length ? `\n选中对象（id 与标题见快照）：${input.focusIds.join(", ")}` : ""}`
+        : "";
     return {
         system: `你是 Minecraft ${input.coreType} ${input.version} 项目结构规划器。用工具构建结构树，不输出 JSON 正文。
 模块对应 Java 子包，模块数等于业务域数；只有一个业务域时只建一个模块。只有被两个以上模块共用的代码才放 common。
 节点对应单个文件并携带完整成员契约。项目名 PascalCase，模块 id 小写英文，Java 节点 id 为类名且全项目不区分大小写唯一。
-页面每列对应一条需求行为路径，每个可见节点是业务步骤，并绑定一个或多个实现文件。先用 upsert_module/upsert_node 建文件，再用 upsert_path 编排从触发到结果的步骤。不同触发方式分别建路径，共享逻辑绑定同一文件；不能把模块文件清单冒充行为路径，不新增需求之外的功能。
+跨文件协作使用构造器注入：需要插件实例或其他服务的节点，在 contract.constructors 声明参数（如 Plugin plugin, HomeManager homeManager），插件实例参数类型用 Plugin；用到的服务节点写入 depends。Main 负责创建实例并按构造器传入，业务节点的 depends 不要填写 Main。被其他节点调用的方法必须写进该节点的 contract.methods。
+行为路径描述一条需求从触发到结果的执行过程，每一步是一个业务步骤，并绑定一个或多个实现文件。先用 upsert_module/upsert_node 建文件，再用 upsert_path 编排从触发到结果的步骤。不同触发方式分别建路径，共享逻辑绑定同一文件；不能把模块文件清单冒充行为路径，不新增需求之外的功能。
 upsert_path 的 nodes 按执行顺序排列，kind 使用“触发”“条件”“动作”“结果”等简短标签；路径 id 为小写英文、数字、连字符，步骤 id 全项目唯一，建议路径 id 加步骤后缀。最多 10 条路径、每条 12 步、合计 80 步，每步必须绑定已有文件 id。删除业务时用 remove_path 删除对应路径，同时用文件工具同步清理不再需要的文件和契约。
 最多 10 个业务模块、40 个业务节点，每轮最多 60 次工具调用。
 CommandGen：commands 非空，同时实现 CommandExecutor 和 TabCompleter。
-ListenerGen：events 非空，实现 Listener；GUI 持有类可以无事件，但必须与监听类 tag=gui、pairId 互指，并包含 InventoryClickEvent。
+ListenerGen：events 非空，实现 Listener；GUI 持有类可以无事件，但必须与点击监听类都标 tag=gui、pairId 互指，且点击监听类的 events 包含 InventoryClickEvent。
 TaskGen：schedule 非空，继承 BukkitRunnable，由 Main 启动。
 ManagerGen：集中服务状态；ConfigClassGen：YAML 配置包装；ModelGen：POJO；EnumGen：枚举；UtilGen：无状态工具。
 ConfigGen 只能放 _resources，声明 configKeys 时必须添加 config.yml。所有 methods、constructors、events、commands、schedule、configKeys、lifecycle 都是必须遵守的契约。
@@ -834,37 +893,36 @@ contract.events 填事件类名，如 AsyncChatEvent（接受完整包名并规�
 一轮可以批量调用多个树工具。认为完成时调用 finish_tree。learn_public_api 不能与树工具在同一轮混用。
 系统模块 _build、_resources、_root 不可删除改名；pom.xml、plugin.yml、Main 由系统维护，不能改动；MainGen 和 FileRelatedGen 不可由模型创建。
 不使用的 schedule.mode、lifecycle、tag 填 none，其余可选语义用空字符串或空数组。
-refine 模式只改动修正意见和选中对象所涉及的部分，保持其余节点 id 不变。
+refine 模式只改动修正意见涉及的部分（给出选中对象时以选中对象为准），保持其余节点 id 不变。
 极简原则（严格遵守）：
 - 只规划用户需求中明确提到或逻辑上必需的文件，不要自行扩展功能范围
 - 对无状态的事件动作采用自然最小默认值：未要求反馈就不额外发消息，未要求权限就不增加权限节点，未要求首次奖励或防刷就不增加持久化记录；“进入服务器时”按每次成功加入后的事件处理，不追溯插件加载时已经在线的玩家
-- 规划向玩家物品栏发放物品的职责时，必须在相关 节点职责 中写明处理 Inventory.addItem 返回的剩余物，背包已满时在玩家位置自然掉落，避免静默丢失；这是技术完整性处理，不扩展为邮件、暂存或领取系统
-- 每个文件的 role 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
-- 用户原始需求若明确指定了某条输出的颜色或格式，必须把该要求原样写入每个相关 节点职责，供逐文件生成与审查识别例外；未明确指定时不得自行添加其他颜色
+- 规划向玩家物品栏发放物品的职责时，必须在相关节点的 responsibility 中写明处理 Inventory.addItem 返回的剩余物，背包已满时在玩家位置自然掉落，避免静默丢失；这是技术完整性处理，不扩展为邮件、暂存或领取系统
+- 每个节点的 responsibility 必须精确描述该文件需要实现的具体功能点，不要使用笼统描述如"管理器"、"工具类"
+- 用户原始需求若明确指定了某条输出的颜色或格式，必须把该要求原样写入每个相关节点的 responsibility，供逐文件生成与审查识别例外；未明确指定时不得自行添加其他颜色
 - 如果用户需求是"添加任务"，不要自行扩展出"删除任务"、"查询任务"、"任务列表"等未要求的功能
 - 能在一个文件中实现的逻辑不要拆分成多个文件
 - 不要规划与用户需求无关的辅助类、工具类、基类、接口
-- 功能类只实现 role 中描述的功能，不要预留扩展方法
+- 功能类只实现 responsibility 中描述的功能，不要预留扩展方法
 - 禁止把 Manager 标成 Util；禁止把 TabCompleter 与 Executor 拆成两个文件
 
 Paper / Bukkit 配套结构知识（规划必备文件时强制遵守）：
-- **命令类（CommandGen）**：onCommand + onTabComplete 必须在同一个类中，不要拆文件；无论需求是否明说，规划阶段都必须为命令准备完整实现并在 plugin.yml 的 commands 节点声明
-- **事件监听类（ListenerGen）**：由 Main.onEnable 通过 getServer().getPluginManager().registerEvents 注册；规划要为 Listener 与 Main 之间建立 depends 关系
+- **命令类（CommandGen）**：onCommand + onTabComplete 必须在同一个类中，不要拆文件；命令名、别名、权限、usage、description 写入 contract.commands，plugin.yml 由系统据此生成
+- **事件监听类（ListenerGen）**：由 Main 创建并注册，监听类不要依赖 Main；只在事件未被取消时才执行的奖励、记录或提示，要在 responsibility 中写明「只处理未被取消的事件」
 - **Inventory GUI**：若涉及自定义 GUI，必须列出两条 ListenerGen 文件——一条是 GUI 持有类（implements InventoryHolder，提供构造 Inventory 的方法），一条是 InventoryClickEvent 监听类。两条都标 tag="gui"，pairId 互相指向对方
-- **配置文件**：若涉及任何可配置参数或文本，必须规划 src/main/resources/config.yml（ConfigGen），并由 Main.onEnable 调用 saveDefaultConfig
+- **配置文件**：只有需求要求参数或文本可配置时，才规划 _resources 下的 config.yml（ConfigGen），并在使用者节点的 contract.configKeys 声明配置路径；Main 会自动调用 saveDefaultConfig
 - **数据持久化**：**仅当**需要集中管理「较多结构化数据」（多条记录 / 需增删查的集合）时，才规划独立 ManagerGen 类（管理 File + YamlConfiguration，Main.onDisable 落盘）；**少量数据（单玩家数据 / 几个值）优先用 PDC 或直接 getConfig()/saveConfig()，不要为此引入 ManagerGen 重类**——无谓的重类会抬高复杂度、易生成失败而功能收益极小
-- **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并通过 mainBlueprint.tasks 声明 schedule 与 periodTicks
-- **plugin.yml**：必须列出 name / version / main / api-version；所有命令需在 commands 节点声明（含 description / usage / aliases / permission）；若涉及权限节点，必须在 permissions 节点声明
-- **Main.java（MainGen）**：必须 extends JavaPlugin；onEnable 负责 saveDefaultConfig（如有）+ 注册所有 Executor/TabCompleter + 注册所有 Listener + 启动调度任务 + 实例化所有 services；onDisable 负责数据落盘
-按需求落实以下约束，不新增用户未要求的业务：
+- **调度任务（TaskGen）**：若涉及定时/重复任务，规划须明确该 TaskGen 类，并在 contract.schedule 声明 mode、periodTicks 与 delayTicks
+- **系统文件**：pom.xml、plugin.yml、Main 由系统根据结构树生成。命令与权限来自 contract.commands，外部插件依赖来自 set_project.externalDeps；Main 会按契约创建服务、注册命令和监听、启动任务，并在 onDisable 落盘和取消任务，不要为这些职责另建节点
+以下约束只在需求涉及对应内容时适用；不涉及时不要为此新增文件、契约或路径，也不新增用户未要求的业务：
 【持久化】只用 YAML 配置文件 或 PDC（PersistentDataContainer），禁止 SQL/JDBC/数据库；须写明：存什么、读写时机、由 Main.onDisable 落盘。**状态极少（单玩家数据 / 几个值）时优先用 PDC 或直接 getConfig()，不要为此新建独立 ManagerGen / DataManager 重类**。
 【调度任务】须写明：周期(periodTicks)或一次性、主线程约束、由 Main 启动并在 onDisable cancel。
 【共享状态】须写明：这份可变状态唯一写入方是谁、其他类只读、读取一致性如何保证（避免多处并发写）。
-【外部硬集成】须在 plugin.yml 声明 depend/softdepend，写明缺失该插件时的降级行为；只用 Vault/PlaceholderAPI/WorldGuard 这类。
+【外部硬集成】须在 set_project.externalDeps 声明插件名，并在相关节点的 responsibility 写明缺失该插件时的降级行为；只用 Vault/PlaceholderAPI/WorldGuard 这类。
 【GUI 会话】须写明：会话状态存哪、InventoryClickEvent 点击如何路由、InventoryCloseEvent 关闭时如何清理。
 ${input.apiContractContext ?? ""}
 ${input.knowledgeContext ?? ""}
 ${input.skillContext ?? ""}`,
-        user: `原始需求：${input.userPrompt}\n\n用户已确认的决策（必须严格遵守）：\n${decisions}\n\n当前树快照：\n${input.treeSnapshot}\n\n上一轮失败操作：\n${input.lastResults.filter(r => !r.ok).map(r => `${r.tool ?? "工具"}${r.field ? ` / ${r.field}` : ""} [${r.errorCode ?? "TREE_TOOL_FAILED"}]：${r.error ?? "操作失败"}`).join("\n")}\n\n校验问题：\n${input.issues.map(i => `${i.code}: ${i.message}`).join("\n")}\n\n第 ${input.round}/${input.maxRounds} 轮\n${input.mode === "refine" ? `用户修正原文：${input.correction}\n选中对象（id 与标题见快照）：${input.focusIds.join(", ")}` : ""}`,
+        user: `原始需求：${input.userPrompt}\n\n用户已确认的决策（必须严格遵守）：\n${decisions}\n\n当前树快照：\n${input.treeSnapshot || "（空）"}\n\n上一轮失败操作：\n${failures}\n\n校验问题：\n${issues}\n\n第 ${input.round}/${input.maxRounds} 轮${refine}`,
     };
 }

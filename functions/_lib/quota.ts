@@ -191,9 +191,17 @@ export interface UsageBreakdown {
     prompt_cache_miss_tokens?: number;
 }
 
-export interface UsageCostEntry {
-    model: string;
-    usage?: UsageBreakdown;
+export type UsageCostEntry = { model: string; usage?: UsageBreakdown } | {
+    service: "deepseek-search" | "deepseek-fetch";
+    requests: number;
+};
+
+export function usageEntryCost(entry: UsageCostEntry, at: Date | number = Date.now()): number {
+    if ("service" in entry) {
+        if (entry.service !== "deepseek-search" && entry.service !== "deepseek-fetch") return 0;
+        return Number.isSafeInteger(entry.requests) && entry.requests > 0 ? entry.requests * 0.005 : 0;
+    }
+    return entry.usage ? usageCost(entry.model, entry.usage, at) : 0;
 }
 
 export function isDeepSeekPeakTime(at: Date | number = Date.now()): boolean {
@@ -261,7 +269,7 @@ export async function settleTaskCostQuota(
 }
 
 /**
- * 累积单任务 LLM 成本；跨过 COST_PER_QUOTA 阈值时自动扣额度。
+ * 累积单任务模型与 Search/Fetch 成本；跨过 COST_PER_QUOTA 阈值时自动扣额度。
  * 共享 DeepSeek 的 mode-1（plan 新建任务）已预扣 1 件覆盖首个 0~0.8 元区间，
  * 所以从第 2 件起按差额追扣；BYOK 请求不会进入本函数。
  * 余额耗尽时返回 outOfQuota=true，调用方应在 state 上打标记，下次入口拒绝。
@@ -274,7 +282,7 @@ export async function accumulateCosts(
     if (!entries.length || !taskId || !uid) return { consumed: 0, total: 0, outOfQuota: false, delta: 0 };
     const pricedAt = Date.now();
     const cost = entries.reduce(
-        (sum, entry) => sum + (entry.usage ? usageCost(entry.model, entry.usage, pricedAt) : 0),
+        (sum, entry) => sum + usageEntryCost(entry, pricedAt),
         0,
     );
     if (cost <= 0) {

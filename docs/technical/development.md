@@ -35,6 +35,8 @@ GITHUB_PAT=ghp_...
 
 `DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后，模型工具提出未被静态契约或已有公共知识覆盖的原子技术缺口，或首次编译诊断确认了版本和依赖明确的公共 API 缺口时，可以联网查证。用户自带的 DeepSeek Key 通过统一服务端模型路由按同一开关参与联网学习。编译修复的资格、降级和负面事实规则见[编译学习闭环](./compile-learning.md)。
 
+此开关沿用历史变量名，目前启用的是 DeepSeek 原始 Search / Fetch API；不再发送 Responses `web_search`。Search 负责发现 URL，网页直读失败时 Fetch 补充 Markdown；原始 Maven／制品读取与后续证据验证保留。无需修改现有 Key 或新增依赖。请求费用、边界及真实验证记录见 [API 参考](./api-reference.md#learning-的-search--fetch) 与 [迁移记录](../../ref/deepseek-search-fetch.md)。
+
 **获取密钥**：
 
 | 密钥 | 获取方式 |

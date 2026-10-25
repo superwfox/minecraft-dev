@@ -49,19 +49,35 @@ export function checkNodeContract(tree: ProjectTree, node: TreeNode, content: st
     }
     return { nodeId: node.id, revision: tree.revision, items, passed: items.filter(i => i.ok).length, total: items.length };
 }
+function publicMethodRule(node: TreeNode): string {
+    if (node.kind === "MainGen") return "Main 只实现 onEnable、onDisable 与必要的 private 辅助方法；除已挂载能力包明确要求外，不为服务提供 public getter。";
+    const allowed = node.kind === "ModelGen" ? "字段 getter/setter 与 equals、hashCode、toString"
+        : node.kind === "ManagerGen" ? "供 Main.onDisable 调用的 save() 或 shutdown()"
+        : node.kind === "ConfigClassGen" ? "需求要求热重载或写回配置时的 reload()、save()"
+        : node.kind === "ListenerGen" && node.tag === "gui" && !node.contract.events.length ? "GUI 持有类的 open(Player) 与 getInventory()"
+        : "";
+    return `除接口或父类要求的方法${allowed ? `及${allowed}` : ""}外，不得新增 public 方法；其他节点需要调用的方法必须已在契约中声明。契约声明了构造器时必须提供签名一致的 public 构造器，未声明时不要自行增加带参构造器。`;
+}
+const MAIN_WIRED_KINDS = new Set(["CommandGen", "ListenerGen", "TaskGen", "ManagerGen", "ConfigClassGen"]);
 export function nodeGenerationContext(tree: ProjectTree, node: TreeNode): string {
     const module = tree.modules.find(m => m.id === node.moduleId);
     const lines = ["结构树成员契约（必须全部实现且签名一致）：", `所在模块 ${module?.title}（${node.moduleId}）：${module?.responsibility}`, `文件 ${nodePath(tree, node)}`, `职责：${node.responsibility}`, ...contractSignatureLines(node)];
-    if (nodeFqcn(tree, node)) lines.push(`FQCN: ${nodeFqcn(tree, node)}`, `强制包声明：package ${nodePackage(tree, node)};`, "除接口或父类要求的方法外，不得新增 public 方法。声明构造器时以契约为准，未声明时沿用专精规则。");
+    if (nodeFqcn(tree, node)) lines.push(`FQCN: ${nodeFqcn(tree, node)}`, `强制包声明：package ${nodePackage(tree, node)};`, publicMethodRule(node));
     for (const id of node.depends) {
         const dependency = tree.nodes.find(n => n.id === id);
-        if (dependency) lines.push(`依赖 ${nodeFqcn(tree, dependency) || dependency.id}`, ...contractSignatureLines(dependency).map(line => `  ${line}`));
+        if (dependency && dependency.kind !== "MainGen") lines.push(`依赖 ${nodeFqcn(tree, dependency) || dependency.id}`, ...contractSignatureLines(dependency).map(line => `  ${line}`));
     }
     lines.push("只能通过依赖契约调用；跨包引用必须 import 全限定名。");
     for (const path of tree.paths ?? []) if (path.nodes.some(step => step.fileIds.includes(node.id))) lines.push(`需求路径 ${path.title}：`, ...path.nodes.map((step, index) => `${index + 1}. ${step.title}：${step.summary}；实现文件 ${step.fileIds.join(", ")}`));
-    if (node.id === "plugin.yml") lines.push("全部命令（含权限、usage、别名和 description）：", ...tree.nodes.flatMap(n => contractSignatureLines(n).filter(s => s.startsWith("命令"))), `外部依赖 ${tree.project.externalDeps.join(", ")}，根据硬依赖/可降级语义声明 depend/softdepend。`);
+    if (node.id === "plugin.yml") {
+        const deps = tree.project.externalDeps;
+        lines.push("全部命令（含权限、usage、别名和 description）：", ...tree.nodes.flatMap(n => contractSignatureLines(n).filter(s => s.startsWith("命令"))), deps.length ? `外部依赖 ${deps.join(", ")}，缺失后插件无法工作的写入 depend，可降级运行的写入 softdepend。` : "外部依赖：无，不要声明 depend 或 softdepend。");
+    }
     if (node.id === "config.yml") for (const key of new Set(tree.nodes.flatMap(n => n.contract.configKeys))) lines.push(`配置 ${key}，使用者：${tree.nodes.filter(n => n.contract.configKeys.includes(key)).map(n => n.id).join(", ")}`);
-    if (node.kind === "MainGen") lines.push("Main 必须导入全部依赖：", ...tree.nodes.filter(n => node.depends.includes(n.id) && nodeFqcn(tree, n)).map(n => `import ${nodeFqcn(tree, n)};`));
+    if (node.kind === "MainGen") {
+        const wired = tree.nodes.filter(n => MAIN_WIRED_KINDS.has(n.kind) && nodeFqcn(tree, n));
+        lines.push("Main 负责创建并注册的项目类（只 import 实际用到的类，构造参数以各自契约为准）：", ...(wired.length ? wired.flatMap(n => [`  ${nodeFqcn(tree, n)}`, ...n.contract.constructors.map(ctor => `    public ${n.id}(${ctor.params})`)]) : ["  无"]));
+    }
     return lines.join("\n");
 }
 export function nodeReviewContext(tree: ProjectTree, node: TreeNode): string {

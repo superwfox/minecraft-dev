@@ -4,6 +4,7 @@ import {
     isDeepSeekPeakTime,
     MODEL_PRICING,
     usageCost,
+    usageEntryCost,
 } from "../functions/_lib/quota";
 
 function createQuotaKv(paidBalance = 5): {
@@ -27,6 +28,19 @@ afterEach(() => {
 });
 
 describe("DeepSeek official pricing", () => {
+    it("accounts for successful Search/Fetch requests separately from model tokens", async () => {
+        const kv = createQuotaKv();
+        const result = await accumulateCosts({ TASKS: kv.namespace }, "user-1", "task-tools", [
+            { service: "deepseek-search", requests: 2 }, { service: "deepseek-fetch", requests: 1 },
+            { model: "deepseek-flash", usage: { prompt_tokens: 0, completion_tokens: 0 } },
+        ]);
+        expect(result).toMatchObject({ outOfQuota: false, consumed: 0 });
+        expect(result.delta).toBeCloseTo(0.015);
+        expect(result.total).toBeCloseTo(0.015);
+        expect(usageEntryCost({ service: "deepseek-fetch", requests: -1 })).toBe(0);
+        expect(usageEntryCost({ service: "deepseek-fetch", requests: NaN })).toBe(0);
+        expect(usageEntryCost({ service: "deepseek-search", requests: 1.5 })).toBe(0);
+    });
     it("uses the official CNY prices for V4.1 Flash and legacy V4 Pro", () => {
         expect(MODEL_PRICING).toMatchObject({
             "deepseek-flash": {

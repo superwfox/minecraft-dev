@@ -25,3 +25,5 @@
 ## 真实业务链路验证
 
 - [结构规划与 DeepSeek 真实调用记录](project-tree-real-validation.md)：旧版故障复现、修复版规划和源码生成结果、逐路径静态审查结论；明确区分真实模型调用、模拟预览和未执行的 Java 编译。
+- [DeepSeek Prompt 清单](deepseek-prompts.md)：仅列 Prompt 文件行号、所处阶段、调用代码位置和期望输出要求，包含专项生成规则、Skill／Learning 上下文及遗留接口的使用状态。
+- [DeepSeek Search / Fetch 迁移与验证](deepseek-search-fetch.md)：新接口的调用边界、兼容开关、按次费用，以及真实接口、Learning 核验与缓存续接记录。

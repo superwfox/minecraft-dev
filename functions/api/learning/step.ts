@@ -1,5 +1,5 @@
 import { projectExternalDeps } from "../../_lib/projectTree";
-import { discoverLearningSources } from "../../_lib/deepseekResponses";
+import { discoverLearningSources } from "../../_lib/deepseekSearch";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM } from "../../_lib/llm";
 import { knowledgeLookupKey, learningLookupKeys } from "../../_lib/learning/assessment";
 import { compileNegativeEvidence, currentCompileApiEvidence } from "../../_lib/learning/compileApiEvidence";
@@ -598,6 +598,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                     : `资料发现第 ${attemptIndex + 1} 次调用完成`,
                 httpStatus: attempt.httpStatus,
                 elapsedMs: attempt.elapsedMs,
+                needId: attempt.needId,
+                query: attempt.query,
             })),
             ...discoveryValidationCodes.map((code: string) => diagnosticEvent({
                 stage: "discovery",
@@ -666,6 +668,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
                 jobId,
                 needs: leased.needs,
                 candidates: leased.work.candidates ?? [],
+                apiKey: llm.apiKey,
                 budgetMs: sourceBudget.budgetMs,
                 timeoutMs: LEARNING_SOURCE_TIMEOUT_MS,
                 maxSources: 6,
@@ -684,6 +687,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
         authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
         if (authorizationResponse) return authorizationResponse;
+
+        let quotaExhausted = false;
+        try {
+            quotaExhausted = await charge(fetched.usageEntries);
+        } catch (error) {
+            console.warn("learning fetch charge failed", error);
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "storage_unavailable");
+        }
+        authorizationResponse = await revalidateAuthorization({ ...leased.work, telemetry });
+        if (authorizationResponse) return authorizationResponse;
+        if (quotaExhausted) {
+            return persist("deferred", { ...leased.work, telemetry }, leased.resultIds, "quota_exhausted");
+        }
 
         const retainedSources = Object.keys(leased.work.negativeResultIds ?? {}).length
             ? (await listLearningSources(context.env, jobId, uid)).filter(source => source.verificationState === "verified_absent") : [];

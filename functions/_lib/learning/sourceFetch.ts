@@ -2,6 +2,8 @@ import {
     LEARNING_SOURCE_LIMIT_MS,
     LEARNING_SOURCE_TIMEOUT_MS,
 } from "./deadline";
+import { requestDeepSeekWebTool } from "../deepseekWebTools";
+import type { UsageCostEntry } from "../quota";
 import type {
     KnowledgeNeed,
     LearningCandidate,
@@ -235,7 +237,7 @@ export function validatePublicSourceUrl(raw: string): URL {
     return url;
 }
 
-function sourceClassification(url: URL, need: KnowledgeNeed): { sourceType: string; authority: string } {
+export function sourceClassification(url: URL, need: KnowledgeNeed): { sourceType: string; authority: string } {
     const host = url.hostname.toLowerCase();
     const path = decodedPath(url).toLowerCase();
     const isPom = path.endsWith(".pom");
@@ -419,11 +421,71 @@ function ensureSourceDeadline(controller: AbortController, deadlineAt: number): 
     throw new DOMException("Aborted", "AbortError");
 }
 
+function canUseWebFetch(url: URL, need: KnowledgeNeed): boolean {
+    const type = sourceClassification(url, need).sourceType;
+    // Raw artifacts and source files must retain their original bytes and transport checks.
+    return type !== "artifact" && type !== "repository"
+        && !/\.(?:xml|pom|json|jar|zip|gz|class|java|kt|md|txt|ya?ml|properties)$/i.test(url.pathname);
+}
+
+function canFallbackToWebFetch(error: unknown): boolean {
+    const code = sourceErrorCode(error);
+    return (error instanceof Error && error.name === "AbortError")
+        || code === "source_too_thin" || code === "source_fetch_failed" || code === "fetch_failed"
+        || /^source_http_(?:403|408|429|5\d\d)$/.test(code);
+}
+
+async function fetchSourceContent(input: {
+    need: KnowledgeNeed; url: string; apiKey?: string;
+    fetchImpl?: typeof fetch; onUsage?: (entry: UsageCostEntry) => void;
+}, controller: AbortController, deadlineAt: number) {
+    const url = validatePublicSourceUrl(input.url);
+    const fallbackEnabled = !!input.apiKey && canUseWebFetch(url, input.need);
+    const directController = new AbortController();
+    const abortDirect = () => directController.abort();
+    controller.signal.addEventListener("abort", abortDirect, { once: true });
+    const directTimer = fallbackEnabled
+        ? setTimeout(abortDirect, Math.max(1, Math.min(3_000, (deadlineAt - Date.now()) * 0.4))) : undefined;
+    try {
+        const fetched = await fetchOne(url.href, input.fetchImpl ?? fetch, directController);
+        ensureSourceDeadline(controller, deadlineAt);
+        const normalized = fetched.contentType === "text/html" ? htmlToText(fetched.text)
+            : { title: "", text: fetched.text.replace(/\s+/g, " ").trim() };
+        if (normalized.text.length < 40) throw new Error("source_too_thin");
+        return { ...fetched, normalized, viaWebFetch: false };
+    } catch (error) {
+        if (!fallbackEnabled || !canFallbackToWebFetch(error)) throw error;
+        ensureSourceDeadline(controller, deadlineAt);
+    } finally {
+        if (directTimer !== undefined) clearTimeout(directTimer);
+        controller.signal.removeEventListener("abort", abortDirect);
+    }
+    const fetched = await requestDeepSeekWebTool({
+        tool: "fetch", apiKey: input.apiKey!, body: { url: url.href },
+        budgetMs: Math.max(1, deadlineAt - Date.now()), signal: controller.signal,
+        fetchImpl: input.fetchImpl, onUsage: input.onUsage,
+    });
+    const last = fetched.attempts.at(-1);
+    if (fetched.ok === false) {
+        if (fetched.reason === "timeout") throw new DOMException("Aborted", "AbortError");
+        throw sourceError(last?.detailCode ?? "fetch_failed", { httpStatus: fetched.httpStatus });
+    }
+    ensureSourceDeadline(controller, deadlineAt);
+    const content = fetched.payload.content as string;
+    const byteCount = new TextEncoder().encode(content).byteLength;
+    if (byteCount > MAX_BYTES) throw sourceError("source_too_large", { httpStatus: 200, byteCount });
+    const normalized = { title: (fetched.payload.title as string).slice(0, 300), text: content.replace(/\s+/g, " ").trim() };
+    if (normalized.text.length < 40) throw sourceError("source_too_thin", { httpStatus: 200, byteCount });
+    return { url, normalized, httpStatus: 200, contentType: "text/markdown", byteCount, viaWebFetch: true };
+}
+
 export async function fetchLearningSource(input: {
     jobId: string;
     need: KnowledgeNeed;
     url: string;
+    apiKey?: string;
     fetchImpl?: typeof fetch;
+    onUsage?: (entry: UsageCostEntry) => void;
     timeoutMs?: number;
     now?: number;
     onTrace?: (trace: LearningSourceTrace) => void;
@@ -438,17 +500,14 @@ export async function fetchLearningSource(input: {
     const startedAt = Date.now();
     let responseTrace: Partial<LearningSourceTrace> = {};
     try {
-        const fetched = await fetchOne(input.url, input.fetchImpl ?? fetch, controller);
+        const fetched = await fetchSourceContent(input, controller, deadlineAt);
         responseTrace = {
             httpStatus: fetched.httpStatus,
             contentType: fetched.contentType,
             byteCount: fetched.byteCount,
         };
         ensureSourceDeadline(controller, deadlineAt);
-        const isHtml = fetched.contentType === "text/html";
-        const normalized = isHtml
-            ? htmlToText(fetched.text)
-            : { title: "", text: fetched.text.replace(/\s+/g, " ").trim() };
+        const normalized = fetched.normalized;
         ensureSourceDeadline(controller, deadlineAt);
         const excerpt = normalized.text.slice(0, 24_000);
         if (excerpt.length < 40) throw new Error("source_too_thin");
@@ -466,7 +525,8 @@ export async function fetchLearningSource(input: {
             canonicalUrl,
             domain: fetched.url.hostname.toLowerCase(),
             sourceType: classification.sourceType,
-            authority: classification.authority,
+            // Fetch provides extracted Markdown, not a redirect-checked original document.
+            authority: fetched.viaWebFetch && classification.authority === "ground_truth" ? "official" : classification.authority,
             title: normalized.title || fetched.url.hostname,
             fetchedAt: input.now ?? Date.now(),
             contentHash,
@@ -474,7 +534,7 @@ export async function fetchLearningSource(input: {
             verificationState: "pending",
         };
         input.onTrace?.({
-            detailCode: "source_fetched",
+            detailCode: fetched.viaWebFetch ? "source_fetched_via_deepseek" : "source_fetched",
             httpStatus: fetched.httpStatus,
             contentType: fetched.contentType,
             byteCount: fetched.byteCount,
@@ -545,11 +605,11 @@ function recordSourceFailure(
         telemetry.sourceTimeouts++;
         return "timeout";
     }
-    if (/^source_http_4\d\d$/.test(code)) {
+    if (/^(?:source|fetch)_http_4\d\d$/.test(code)) {
         telemetry.sourceHttp4xx++;
         return "http_4xx";
     }
-    if (/^source_http_5\d\d$/.test(code)) {
+    if (/^(?:source|fetch)_http_5\d\d$/.test(code)) {
         telemetry.sourceHttp5xx++;
         return "http_5xx";
     }
@@ -630,6 +690,7 @@ export async function fetchLearningSources(input: {
     jobId: string;
     needs: KnowledgeNeed[];
     candidates: LearningCandidate[];
+    apiKey?: string;
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
     budgetMs?: number;
@@ -638,6 +699,7 @@ export async function fetchLearningSources(input: {
     sources: LearningSourceRecord[];
     outcomes: LearningSearchedSource[];
     telemetry: LearningSourceFetchTelemetry;
+    usageEntries: UsageCostEntry[];
 }> {
     assertLearningCandidateBounds(input.needs, input.candidates);
     const startedAt = Date.now();
@@ -679,6 +741,7 @@ export async function fetchLearningSources(input: {
         sourceCount: 0,
     }));
     const sources: LearningSourceRecord[] = [];
+    const usageEntries: UsageCostEntry[] = [];
     const telemetry: LearningSourceFetchTelemetry = {
         sourceAttempts: 0,
         sourceAccepted: 0,
@@ -708,7 +771,7 @@ export async function fetchLearningSources(input: {
     const finish = (skippedReason?: LearningSourceRejectionCode) => {
         if (skippedReason) markRemainingSkipped(skippedReason);
         telemetry.sourceElapsedMs = Math.max(0, Date.now() - startedAt);
-        return { sources, outcomes, telemetry };
+        return { sources, outcomes, telemetry, usageEntries };
     };
     const budgetExhausted = () => {
         telemetry.sourceBudgetExhausted = 1;
@@ -760,7 +823,9 @@ export async function fetchLearningSources(input: {
                     jobId: input.jobId,
                     need: queue.need,
                     url: canonicalUrl,
+                    apiKey: input.apiKey,
                     fetchImpl: input.fetchImpl,
+                    onUsage: entry => { usageEntries.push(entry); },
                     timeoutMs: Math.max(1, Math.min(timeoutMs, remaining)),
                     onTrace: (value) => { trace = value; },
                 });

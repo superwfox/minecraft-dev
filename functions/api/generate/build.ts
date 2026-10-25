@@ -10,7 +10,7 @@ import {
     deleteBranch,
 } from "../../_lib/github";
 import { protectedBuildPath } from "../../_lib/learning/compileApiEvidence";
-import { sourceFingerprint } from "../../_lib/projectPathReview";
+import { activePathRepair, sourceFingerprint } from "../../_lib/projectPathReview";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import {
@@ -246,7 +246,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
             // Refuse stale evidence before recording an upload or clearing repair state.
             state.sourceFingerprint = await sourceFingerprint(state);
-            if (state.tree?.paths?.some(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint)) {
+            if (activePathRepair(state) !== undefined || state.tree?.paths?.some(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint)) {
                 await persistState(true);
                 return json({ error: "当前代码尚未完成路径静态审查", code: "PATH_REVIEW_REQUIRED" }, 409);
             }

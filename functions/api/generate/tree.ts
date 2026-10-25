@@ -992,7 +992,7 @@ export const onRequestPost: PagesFunction<Env> = async context => {
         const issues = validateProjectTree(tree);
         if (issues.length) return preflightJsonError("结构树仍有待处理问题", "TREE_INVALID", 409, undefined, { issues });
         const derived = deriveGenerationPlan(tree);
-        Object.assign(state, derived, tree.project, { status: "generating", fileStatuses: Object.fromEntries(derived.plan.map(file => [file.path, "pending"])), generationCheckpoints: {}, currentBucket: 0, generatedFiles: [], currentFileIndex: 0, nodeChecks: {}, pathReviews: {}, sourceFingerprint: "", compileCheck: null });
+        Object.assign(state, derived, tree.project, { status: "generating", fileStatuses: Object.fromEntries(derived.plan.map(file => [file.path, "pending"])), generationCheckpoints: {}, currentBucket: 0, generatedFiles: [], currentFileIndex: 0, nodeChecks: {}, pathReviews: {}, sourceFingerprint: "", compileCheck: null, pathRepair: null, pathRepairAttempts: 0 });
         tree.status = "locked"; tree.lockedRevision = tree.revision;
         const committed = await putTaskWithOperationLease(context.env, taskId, JSON.stringify(state), token, mode, 3600, uid, true);
         if (!committed) throw new TreeLeaseLostError();

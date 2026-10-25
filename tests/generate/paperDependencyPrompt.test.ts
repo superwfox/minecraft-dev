@@ -90,4 +90,23 @@ describe("Paper dependency prompt", () => {
         expect(paperFix).toContain("io.papermc.paper:paper-api:26.2.build.112-stable");
         expect(paperFix).toContain("https://repo.papermc.io/repository/maven-public/");
     });
+
+    it("keeps pom review and rework pinned to the verified target", () => {
+        const dispatched = dispatchGen(pomFile, {
+            projectName: "ExamplePlugin",
+            packageName: "com.example.plugin",
+            coreType: "Paper",
+            version: "26.2",
+            javaVersion: "25",
+        }, [], {});
+        const review = dispatched.checker("pom.xml", "<project/>").system;
+        const rework = dispatched.rework("<project/>", "依赖版本不存在").system;
+
+        expect(review).toContain("Maven pom.xml 审查器");
+        expect(review).toContain("io.papermc.paper:paper-api:26.2.build.112-stable");
+        expect(review).toContain("不得要求更换核心或降低 MC、Java、依赖版本");
+        expect(review).not.toContain("Java 代码审查器");
+        expect(rework).toContain("io.papermc.paper:paper-api:26.2.build.112-stable");
+        expect(rework).toContain("不得通过更换服务端核心、降低 MC 版本");
+    });
 });

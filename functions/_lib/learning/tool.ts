@@ -178,8 +178,8 @@ export function learningToolDefinition(llm: LLMProvider): Record<string, unknown
                     },
                     searchQueries: {
                         type: "array",
-                        items: { type: "string" },
-                        description: "1 到 4 条面向官方文档、版本化 JavaDoc 或固定源码标签的查询。",
+                        items: { type: "string", maxLength: 128 },
+                        description: "1 到 4 条面向官方文档、版本化 JavaDoc 或固定源码标签的查询，每条最多 128 个 Unicode 字符，保留目标版本与公开符号。",
                     },
                     acceptanceCriteria: {
                         type: "array",

@@ -48,7 +48,7 @@ vi.mock("../../functions/_lib/learning/store", async (original) => ({ ...await o
         return mocks.job;
     },
 }));
-vi.mock("../../functions/_lib/deepseekResponses", async (original) => ({ ...await original<Record<string, unknown>>(), discoverLearningSources: mocks.discover }));
+vi.mock("../../functions/_lib/deepseekSearch", async (original) => ({ ...await original<Record<string, unknown>>(), discoverLearningSources: mocks.discover }));
 vi.mock("../../functions/_lib/learning/negativeApiFacts", async (original) => ({ ...await original<Record<string, unknown>>(),
     findActiveNegativeApiFacts: async () => mocks.sharedNegativeFacts,
 }));

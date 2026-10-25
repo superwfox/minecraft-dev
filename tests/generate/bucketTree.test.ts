@@ -12,14 +12,35 @@ function fixture(stage = "generate", content = code) {
     tree.nodes.push(node); const path = nodePath(tree, node), plan = [planItemForNode(tree, node)];
     return { taskId: "task", uid: "user", ...tree.project, coreType: "Paper", version: "1.21.4", tree, nodeChecks: {}, plan, buckets: [plan], currentBucket: 0, fileStatuses: { [path]: "pending" }, generatedFiles: [], generationCheckpoints: { [path]: { version: 1, path, stage, content, reworkCount: 0, dynamicGenDone: false, dynamicFiles: [], dynamicIndex: 0, lastReason: "" } }, logs: [], skills: [] };
 }
-async function invoke() {
+async function invoke(superConcurrency = false) {
     const waits: Promise<unknown>[] = [];
-    const response = await onRequestPost({ request: new Request("https://app.test/api/generate/bucket", { method: "POST", body: JSON.stringify({ taskId: "task", bucketIndex: 0 }) }), env: { TASKS: {} }, data: { uid: "user" }, waitUntil: (promise: Promise<unknown>) => waits.push(promise) } as unknown as Parameters<typeof onRequestPost>[0]);
+    const response = await onRequestPost({ request: new Request("https://app.test/api/generate/bucket", { method: "POST", body: JSON.stringify({ taskId: "task", bucketIndex: 0, superConcurrency }) }), env: { TASKS: {} }, data: { uid: "user" }, waitUntil: (promise: Promise<unknown>) => waits.push(promise) } as unknown as Parameters<typeof onRequestPost>[0]);
     const text = await response.text(); await Promise.all(waits); return { response, text, events: text.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))) };
 }
 beforeEach(() => { memory.raw = JSON.stringify(fixture()); vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: code } }] })))); });
 afterEach(() => vi.unstubAllGlobals());
 describe("tree generation integration", () => {
+    it("finishes business repairs before processing Main even when the repair bucket is parallel", async () => {
+        const state = fixture("rework");
+        const main = state.tree.nodes.find(node => node.id === "Main")!;
+        const mainFile = planItemForNode(state.tree, main);
+        const businessFile = state.plan[0];
+        const mainCode = "package com.tahai.home; public class Main extends org.bukkit.plugin.java.JavaPlugin {}";
+        state.plan.push(mainFile);
+        state.fileStatuses[mainFile.path] = "pending";
+        state.generationCheckpoints[mainFile.path] = { ...state.generationCheckpoints[businessFile.path], path: mainFile.path, content: mainCode };
+        state.generatedFiles = [{ path: businessFile.path, content: code }, { path: mainFile.path, content: mainCode }];
+        memory.raw = JSON.stringify(state);
+        const first = await invoke(true);
+        expect(first.events.find(event => event.type === "bucket_start").paths).toEqual([businessFile.path]);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const resumed = JSON.parse(memory.raw);
+        resumed.fileStatuses[businessFile.path] = "done";
+        memory.raw = JSON.stringify(resumed);
+        vi.mocked(fetch).mockResolvedValueOnce(Response.json({ choices: [{ message: { content: mainCode } }] }));
+        const last = await invoke(true);
+        expect(last.events.find(event => event.type === "bucket_start").paths).toEqual([mainFile.path]);
+    });
     it("requires a locked tree before model calls", async () => {
         const state = fixture(); state.tree.status = "drafting"; memory.raw = JSON.stringify(state);
         const result = await invoke(); expect(result.response.status).toBe(409); expect(JSON.parse(result.text).code).toBe("TREE_NOT_LOCKED"); expect(fetch).not.toHaveBeenCalled();

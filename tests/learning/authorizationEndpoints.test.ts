@@ -32,7 +32,7 @@ vi.mock("../../functions/_lib/llm", async (importOriginal) => ({
     resolveTaskLLM: resolveLLMMock,
 }));
 
-vi.mock("../../functions/_lib/deepseekResponses", async (importOriginal) => ({
+vi.mock("../../functions/_lib/deepseekSearch", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     discoverLearningSources: discoverLearningSourcesMock,
 }));
@@ -440,6 +440,36 @@ describe("learning endpoint authorization", () => {
         });
         expect(findActiveKnowledgeMock).not.toHaveBeenCalled();
         expect(createOrGetLearningJobMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ["discovering", false], ["discovering", true], ["fetching", false], ["fetching", true],
+    ] as const)("records %s service costs only for platform billing (BYOK=%s)", async (status, byok) => {
+        const job = activeFixJob(status);
+        getLearningJobMock.mockResolvedValue(job);
+        acquireLearningJobLeaseMock.mockResolvedValue(job);
+        completeLearningJobStepMock.mockImplementation(async (_env: unknown, input: any) => ({
+            ...job, status: input.status, work: input.work, resultIds: input.resultIds,
+            error: input.error, revision: job.revision + 1,
+        }));
+        getKnowledgeItemsByIdsMock.mockResolvedValue([]);
+        listLearningSourcesMock.mockResolvedValue([]);
+        resolveLLMMock.mockResolvedValue({ providerId: "deepseek", apiKey: "test-key", byok, canAutoLearn: true });
+        const service = status === "discovering" ? "deepseek-search" : "deepseek-fetch";
+        discoverLearningSourcesMock.mockResolvedValue({ ok: false, candidates: [], reasonCode: "no_candidate_sources",
+            attempts: [], elapsedMs: 1, validationCodes: [], usageEntries: [{ service, requests: 1 }] });
+        fetchLearningSourcesMock.mockResolvedValue({ sources: [], outcomes: [], telemetry: {}, usageEntries: [{ service, requests: 1 }] });
+        const ctx = context(new Request("https://example.test/api/learning/step", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: "task-1", jobId: job.jobId, revision: job.revision }),
+        }), fixState());
+        const put = vi.fn();
+        ctx.env.TASKS.put = put;
+        const response = await stepLearning(ctx);
+        expect(response.status).toBe(200);
+        const costWrite = put.mock.calls.find(([key]) => key === "taskCost:task-1");
+        if (byok) expect(costWrite).toBeUndefined();
+        else expect(JSON.parse(costWrite![1])).toMatchObject({ total: 0.005, consumed: 0 });
     });
 
     it.each(["discovering", "fetching", "verifying"] as LearningJobStatus[])(

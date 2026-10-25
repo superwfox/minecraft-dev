@@ -2523,6 +2523,16 @@ async function ensurePathsReviewed(): Promise<void> {
             if (file) { delete file.content; file.streamingContent = ""; }
         }
         if (!result.verified) throw new Error("路径检查前发现实现文件缺失，请恢复生成阶段");
+        if (Number.isInteger(result.pathRepairBucketIndex)) {
+            setPhase("generating", "需求路径静态审查未通过，正在修正相关文件…");
+            for (const file of genTask.files) if (result.pathRepairFiles?.includes(file.path)) file.status = "pending";
+            genTask.currentBucket = result.pathRepairBucketIndex;
+            persistGenTaskNow();
+            await runBucket(result.pathRepairBucketIndex);
+            genTask.currentBucket = result.pathRepairBucketIndex + 1;
+            setPhase("verifying", "正在沿需求路径重新静态审查实现代码…");
+            continue;
+        }
         if (!Number.isInteger(result.reviewBucketIndex)) { persistGenTaskNow(); return; }
         genTask.currentBucket = result.reviewBucketIndex;
         persistGenTaskNow();

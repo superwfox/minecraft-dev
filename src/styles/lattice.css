@@ -76,7 +76,7 @@
   .gen-group { padding: 22px; }
   .gen-group-header { padding: 0 0 12px; }
   .gen-file { min-height: 46px; padding: 10px 12px; border-radius: 0; }
-  .gen-file-stream, .gen-preview-scroll, .gen-stream-wrap, .gen-logs { background: var(--surface-1); border-radius: 0; }
+  .gen-file-stream, .gen-preview-scroll, .gen-stream-wrap { background: var(--surface-1); border-radius: 0; }
   .gen-preview { padding: 18px; }
   .gen-preview-toolbar { padding: 0 0 12px; }
   .learning-progress { padding: 24px; color: var(--text-secondary); }
@@ -107,7 +107,8 @@
   .tray-head, .tray-foot { padding: 24px; gap: 16px; border-color: var(--line-soft); }
   .cs-modal .cs-head, .cs-modal .cs-foot { padding: 24px; gap: 12px; border-color: var(--line-soft); }
   .cs-drop, .cs-preview { border-radius: 0; }
-  .cc-card-inner, .pc-card-inner { padding: 28px 22px; }
+  /* 需求确认手牌保留自身的圆点邮票卡面与内边距。 */
+  .pc-card-inner { padding: 28px 22px; }
   .cc-foot, .pc-foot { max-width: 820px; gap: 12px; }
   .pc-preview-head { padding: 20px 24px; }
   .pc-preview-tools { gap: 12px; }
@@ -141,7 +142,7 @@
   .lattice-frame.composer-input-shell { padding: 28px 30px 20px; overflow: visible; }
   .lattice-frame:is(.quota-pop, .prompt-history-menu, .tray, .cs-modal, .sk-modal, .pc-preview-box, .gen-preview) { overflow: visible; }
   .lattice-frame.quota-pop { padding: 24px; }
-  .lattice-frame:is(.cc-card-inner, .pc-card-inner) { background: var(--surface-1); color: var(--text-primary); }
+  .lattice-frame.pc-card-inner { background: var(--surface-1); color: var(--text-primary); }
   .lattice-frame:is(.active, .selected) { border-color: var(--oak); }
   .lattice-frame.lattice-layer-one { --lattice-surface: var(--surface-1); --lattice-edge: var(--line); }
   .lattice-frame.lattice-layer-two { --lattice-surface: var(--surface-2); --lattice-edge: var(--line-warm); }
@@ -203,7 +204,7 @@
   .lattice-button > svg:not(.lattice-corner) { flex-shrink: 0; }
   .lattice-button > .lattice-corner { top: 1px; left: 1px; width: 27px; height: 27px; color: currentColor; }
   .lattice-button > .lattice-corner.lattice-end { top: auto; left: auto; bottom: 1px; right: 1px; }
-  .lattice-button:is(.recharge-btn, .key-manage-btn, .gen-download-btn, .sp-btn) { width: 100%; }
+  .lattice-button:is(.recharge-btn, .key-manage-btn, .sp-btn) { width: 100%; }
   .lattice-button.prompt-history-main { flex: 1 1 auto; min-width: 0; flex-direction: column; align-items: flex-start; text-align: left; }
   .lattice-button:is(.sp-tier) { flex-direction: column; }
   .lattice-button.learning-toggle { width: 100%; flex-wrap: wrap; justify-content: flex-start; }

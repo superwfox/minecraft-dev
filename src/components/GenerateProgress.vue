@@ -1,5 +1,5 @@
 <template>
-  <div class="gen-wrap" ref="wrapRef">
+  <div class="gen-wrap">
     <ProjectTree :mode="treeMode"/>
     <!-- 超级并发开关：默认逐阶段串行；开启后并行推进多个文件阶段 -->
     <div class="gen-super-bar" v-if="genTask.phase !== 'idle'">
@@ -111,7 +111,7 @@
     </div>
 
     <!-- 构建卡片 -->
-    <div v-lattice:one class="glass2 gen-card" v-if="showBuild" :aria-busy="['uploading', 'building', 'fixing'].includes(genTask.phase)">
+    <div v-lattice:one ref="buildRef" class="glass2 gen-card gen-build-card" v-if="showBuild" :aria-busy="['uploading', 'building', 'fixing'].includes(genTask.phase)">
       <div class="gen-card-title">▪ 构建</div>
       <div v-if="genTask.phase === 'building' || genTask.phase === 'uploading'" class="gen-building">
         <div class="gen-spinner"></div>
@@ -144,13 +144,6 @@
     <button v-lattice v-if="sourceReady && ['error', 'interrupted'].includes(genTask.phase)" class="gen-download-btn" :disabled="sourceBusy" :aria-busy="sourceBusy" @click="downloadSource">↓ 下载源码 ZIP</button>
     <p v-if="sourceError" role="alert" data-font="dynamic">{{ sourceError }}</p>
 
-    <!-- 日志卡片 -->
-    <div v-lattice:one class="glass2 gen-card" v-if="genTask.logs.length">
-      <div class="gen-card-title">▪ 日志</div>
-      <div class="gen-logs" ref="logRef">
-        <div v-for="(log, i) in genTask.logs" :key="i" data-font="dynamic" class="gen-log">{{ log }}</div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -345,8 +338,7 @@ async function downloadDebug() {
     URL.revokeObjectURL(url);
 }
 
-const wrapRef = ref<HTMLElement | null>(null);
-const logRef = ref<HTMLElement | null>(null);
+const buildRef = ref<HTMLElement | null>(null);
 const streamRef = ref<HTMLElement | null>(null);
 
 const streamPhaseLabels: Record<string, string> = {
@@ -363,15 +355,10 @@ const showBuild = computed(() =>
     ["uploading", "building", "fixing", "done"].includes(genTask.phase)
 );
 
-watch(() => genTask.logs.length, async () => {
+watch(() => genTask.phase, async phase => {
+    if (phase !== "done") return;
     await nextTick();
-    logRef.value?.scrollTo({top: logRef.value.scrollHeight, behavior: "smooth"});
-    // Keep the behavior paths in view while logs update.
-});
-
-watch(() => genTask.phase, async () => {
-    await nextTick();
-    wrapRef.value?.lastElementChild?.scrollIntoView({behavior: "smooth", block: "end"});
+    if (genTask.phase === "done") buildRef.value?.scrollIntoView({behavior: "smooth", block: "center"});
 });
 
 watch(() => genTask.streamingContent, async () => {
@@ -925,9 +912,13 @@ watch(() => genTask.streamingContent, async () => {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.gen-build-card { scroll-margin-top: 120px; }
 .gen-done {
   text-align: center;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
   gap: 12px;
   justify-content: center;
 }
@@ -947,20 +938,6 @@ watch(() => genTask.streamingContent, async () => {
 .gen-error {
   color: #ff9a8b;
   font-size: 14px;
-}
-
-.gen-logs {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 200px;
-  overflow-y: auto;
-  scroll-behavior: smooth;
-}
-.gen-log {
-  font-size: 12px;
-  color: rgba(255,255,255,0.35);
-  font-family: var(--font-content);
 }
 
 .gen-stream-wrap {

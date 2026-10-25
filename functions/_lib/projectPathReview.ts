@@ -70,6 +70,54 @@ export function parsePathReview(raw: string, state: PathReviewState, path: TreeP
     });
     return { pathId: path.id, fingerprint: state.sourceFingerprint!, passed: value.passed && steps.every(step => step.passed) && !contractFailures.length, summary: (contractFailures.length ? `契约未满足：${contractFailures.join("；")}` : value.summary).slice(0, 2000), steps };
 }
+export const MAX_PATH_REPAIR_ATTEMPTS = 1;
+type QueueState = PathReviewState & {
+    buckets: PlanFileItem[][]; fileStatuses: Record<string, string>; generationCheckpoints: Record<string, unknown>; currentBucket: number;
+    pathRepair?: { bucketIndex: number; files: string[] } | null; pathRepairAttempts?: number;
+};
+export function activePathRepair(state: QueueState): number | undefined {
+    const repair = state.pathRepair;
+    return repair && repair.files.some(file => state.fileStatuses?.[file] !== "done") ? repair.bucketIndex : undefined;
+}
+/** Queues one bounded rework round for files implicated by failed static path reviews of the current source. */
+export function queuePathRepair(state: QueueState): number | undefined {
+    const active = activePathRepair(state);
+    if (active !== undefined) return active;
+    if ((state.pathRepairAttempts ?? 0) >= MAX_PATH_REPAIR_ATTEMPTS) return;
+    const tree = state.tree!;
+    const contentOf = (id: string) => {
+        const node = tree.nodes.find(node => node.id === id);
+        return node ? state.generatedFiles?.find(file => file.path === nodePath(tree, node))?.content ?? "" : "";
+    };
+    const reasons = new Map<string, string[]>();
+    for (const path of tree.paths ?? []) {
+        const review = state.pathReviews?.[path.id];
+        if (!review || review.fingerprint !== state.sourceFingerprint || review.passed) continue;
+        const stepFiles = (stepId: string) => path.nodes.find(step => step.id === stepId)?.fileIds ?? [];
+        const failedSteps = review.steps.filter(step => !step.passed);
+        const contractNodes = pathReviewFiles(tree, path).filter(node => checkNodeContract(tree, node, contentOf(node.id)).items.some(item => !item.ok)).map(node => node.id);
+        const implicated = [...failedSteps.flatMap(step => stepFiles(step.id)), ...contractNodes];
+        for (const id of new Set(implicated.length ? implicated : path.nodes.flatMap(step => step.fileIds))) {
+            const details = failedSteps.filter(step => stepFiles(step.id).includes(id)).map(step => `- ${path.nodes.find(node => node.id === step.id)?.title ?? step.id}：${step.detail}`);
+            reasons.set(id, [...(reasons.get(id) ?? []), [`需求路径「${path.title}」静态审查未通过：${review.summary}`, ...details].join("\n")]);
+        }
+    }
+    const nodes = tree.nodes.filter(node => reasons.has(node.id) && contentOf(node.id).trim())
+        .sort((a, b) => Number(a.id === "Main") - Number(b.id === "Main"));
+    if (!nodes.length) return;
+    const index = state.buckets.length;
+    const bucket = nodes.map((node, order) => planItemForNode(tree, node, index, order + 1));
+    bucket.forEach((file, order) => {
+        const node = nodes[order];
+        state.fileStatuses[file.path] = "pending";
+        state.generationCheckpoints[file.path] = { version: 1, path: file.path, stage: "rework", content: contentOf(node.id), reworkCount: 0, dynamicGenDone: true, dynamicFiles: [], dynamicIndex: 0, lastReason: reasons.get(node.id)!.join("\n\n").slice(0, 2000) };
+    });
+    state.buckets.push(bucket);
+    state.currentBucket = index;
+    state.pathRepair = { bucketIndex: index, files: bucket.map(file => file.path) };
+    state.pathRepairAttempts = (state.pathRepairAttempts ?? 0) + 1;
+    return index;
+}
 export function queuePathReview(state: PathReviewState & { buckets: PlanFileItem[][]; fileStatuses: Record<string, string>; generationCheckpoints: Record<string, unknown>; currentBucket: number }): number | undefined {
     const pending = (state.tree?.paths ?? []).some(path => state.pathReviews?.[path.id]?.fingerprint !== state.sourceFingerprint);
     if (!pending) return;

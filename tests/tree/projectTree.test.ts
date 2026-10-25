@@ -117,7 +117,8 @@ describe("tree validation and derivation", () => {
         expect(buckets.at(-1)?.map(file => file.nodeId)).toEqual(["Main"]);
         expect(plan.filter(file => file.nodeId === "Main")).toHaveLength(1);
         expect(plan.find(file => file.nodeId === "ChatRewardListener")?.depends).toEqual(["Main"]);
-        expect(mainBlueprint.events).toContainEqual({ event: "AsyncChatEvent", listenerClass: "ChatRewardListener", priority: "NORMAL" });
+        expect(mainBlueprint.events).toContainEqual({ event: "AsyncChatEvent", listenerClass: "ChatRewardListener" });
+        expect(mainBlueprint.fqcn).not.toHaveProperty("Main");
     });
     it("appends review nodes in the referencing module or common, with stable duplicates and a cap", () => {
         const tree = fixture(); tree.status = "locked";

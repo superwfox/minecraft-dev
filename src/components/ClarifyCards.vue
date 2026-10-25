@@ -29,11 +29,15 @@
         :style="outerStyle(c)"
       >
         <div
-          v-lattice:card class="cc-card-inner"
+          class="cc-card-inner"
           :class="{ active: activeId === c.id, grabbing: drag && drag.id === c.id, selected: c.selected, custom: c.isCustom }"
           :style="innerStyle(c)"
           @pointerdown="startDrag($event, c)"
         >
+          <svg class="cc-dots" :viewBox="`0 0 ${baseW} ${baseH}`" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+            <rect :x="6" :y="6" :width="baseW - 12" :height="baseH - 12" rx="14" ry="14"
+                  fill="none" :stroke="dotColor(c)" stroke-width="3" stroke-linecap="round" pathLength="792" stroke-dasharray="0.01 10.99"/>
+          </svg>
           <div data-font="dynamic" class="cc-card-label">{{ c.label }}</div>
           <div v-if="c.selected" class="cc-card-badge">已选</div>
         </div>
@@ -208,9 +212,11 @@ function outerStyle(card: CardKind) {
 function innerStyle(card: CardKind) {
     const g = geom(card); if (!g) return {};
     return {
+        background: palette[card.color].bg, color: palette[card.color].text,
         transform: `rotate(${g.rot}deg) scale(${g.scale})`,
     };
 }
+const dotColor = (card: CardKind) => palette[card.color].dot;
 
 // ── 悬停聚焦 ──
 function onMove(e: MouseEvent) {
@@ -569,6 +575,7 @@ onUnmounted(() => {
 .cc-card-inner.selected { box-shadow: 0 0 0 2px rgba(213, 201, 172, .72), 0 18px 48px rgba(0, 0, 0, .52); }
 .cc-card-inner.custom { background-image: linear-gradient(155deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .12)); }
 
+.cc-dots { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .cc-card-label {
     position: relative;
     z-index: 2;

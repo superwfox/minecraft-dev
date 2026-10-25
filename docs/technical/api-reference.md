@@ -26,7 +26,7 @@ functions/api/learning/evidence.ts → GET  /api/learning/evidence
 
 | 模型 / 档位 | 用途 | 自动注入 |
 |------|------|----------|
-| `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / 对话兜底 / Responses 联网发现 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }`（Responses 使用 `reasoning: { effort: "low" }`） |
+| `deepseek-flash` / 原 flash 档 | Pre-checker / Generator / Summarizer / Dynamic Gen / 对话兜底 | `reasoning_effort: "low"` + `thinking: { type: "enabled" }` |
 | `deepseek-flash` / 原 pro 档 | clarify / 结构规划 / 路径审查 / reChecker / rework / fix / 证据验证 | `reasoning_effort: "high"` + `thinking: { type: "enabled" }` |
 
 两档统一调用 DeepSeek-V4.1-Flash，API 模型名为 `deepseek-flash`。`/api/chat` 和 `/api/stream` 优先读取 `reasoning_effort`（`low`、`high`、`max`），默认 `low`；未提供有效 effort 时，旧客户端模型名中的 `pro` / `reason` 仍映射到 `high`。`max` 会原样用于 DeepSeek 请求。需求整理器固定使用 `low`。DeepSeek BYOK 与平台请求采用相同路由；GLM BYOK 保持现有模型和参数策略。
@@ -98,7 +98,7 @@ confirm 返回 JSON，请求 {taskId, action: "confirm", revision}，成功返�
 ```json
 {
   "taskId": "1710556800000-abc123",
-  "answers": { "ui-interaction": "聊天命令 + SendMessage", "persistence": "文本存储" },
+  "answers": { "ui-interaction": "聊天命令 + SendMessage", "persistence": "保存到插件数据文件（YAML）" },
   "extraPrompt": "needMoreInput 后用户补充的描述（可选）"
 }
 ```
@@ -222,11 +222,19 @@ data: [DONE]
 | 变量名 | 用途 | 获取方式 |
 |--------|------|---------|
 | `DEEPSEEK_API_KEY` | DeepSeek API 认证 | https://platform.deepseek.com |
-| `DEEPSEEK_RESPONSES_WEB_SEARCH` | DeepSeek Responses 自动联网学习开关；默认关闭，接受 `1`、`true`、`yes` | 设置为 `true` |
+| `DEEPSEEK_RESPONSES_WEB_SEARCH` | 自动联网学习开关（沿用旧变量名，实际调用 Search/Fetch）；默认关闭，接受 `1`、`true`、`yes` | 设置为 `true` |
 | `GITHUB_PAT` | GitHub API 认证（repo + workflow） | GitHub → Developer settings → PAT |
 | `GEN_CONCURRENCY` | 桶内并发上限（可选，默认 2） | — |
 
 本地开发时在项目根创建 `.dev.vars`（非 `.env`）填入上述变量。`DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭；Production 和需要验证联网学习的 Preview 环境需分别配置，保存后重新部署 Pages Functions。开启后，服务端编排中的 结构规划器、Generator、Reviewer、Reworker 与 Fixer 会收到 `learn_public_api` function tool，并自行判断是否调用；只有技术缺口评估确认存在未被静态契约或公共知识覆盖的原子技术缺口时才启动 URL discovery，并不强制每个任务联网。运行时只接受版本化公开 API 或任务已声明的外部依赖，并继续执行来源验证、配额、任务授权、任务时限和 D1 缓存；模型可在取得验证结果后按需继续调用工具，不再受固定轮次上限约束。用户自带的 DeepSeek Key 通过统一服务端模型路由遵循同一开关，Key 只随请求临时传递并跳过平台计费；GLM BYOK 只读取已有公共知识，不会收到该工具。
+
+### Learning 的 Search / Fetch
+
+来源发现使用 `POST https://api.deepseek.com/v1/tools/search`，不再调用 Responses 或依赖模型内置 `web_search`。每个原子问题提交不超过 128 个 Unicode 字符的技术查询，`count=10`、`need_content=false`；最多处理 3 个问题、6 条查询，每个问题保留最多 3 个经过 URL 安全检查的候选。查询按问题轮转，优先本地规则识别的版本化 JavaDoc 与官方来源；服务端搜索分数和摘要不能作为核验结论。`ori_question` 仅发送经过任务隐私筛查的技术问题，不发送完整用户需求、源码或身份数据。
+
+候选网页先直接读取；网页阻断、网络失败或正文过薄时，可在同一来源预算内调用 `POST https://api.deepseek.com/v1/tools/fetch` 获取 Markdown。POM、Maven metadata、原始源码和制品仍直接读取；非法 URL、私网重定向、体积与类型拒绝不通过 Fetch 绕过。保留内容哈希、逐字引用、来源核验及 D1 缓存。Fetch 提取的内容不作为已校验原文的 `ground_truth` 自动入库，仍须证据审核。
+
+两接口使用当前 DeepSeek Bearer Key，无 `model` 参数。HTTP 408、429、5xx 最多重试一次且不超出当前阶段时限，其余 4xx 不以相同请求重试。按[官方 Search/Fetch 计费](https://api-docs.deepseek.com/zh-cn/guides/search/#计费)，HTTP 200 且 Search 结果非空或 Fetch 正文非空时，每次分别计入 ¥0.005；本地后续拒绝候选不抹掉已经发生的请求费用，失败和空结果不计费。平台任务与模型 token 成本合并累计，BYOK 不扣平台额度。迁移无需新密钥、D1 migration 或生产依赖；保留旧开关名与已有任务的诊断代码。
 
 ## KV 绑定
 

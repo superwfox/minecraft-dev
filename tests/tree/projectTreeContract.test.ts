@@ -35,7 +35,18 @@ describe("deterministic node contract checks", () => {
         const good = checkNodeContract(t, main, 'package com.tahai.home;\npublic class Main extends JavaPlugin { void enable() { getCommand("home"); new JoinListener(); HomeManager m; } }');
         expect(good.passed).toBe(good.total);
         const bad = checkNodeContract(t, main, "package com.tahai.home;\npublic class Main {}"); expect(bad.passed).toBeLessThan(bad.total);
-        expect(nodeGenerationContext(t, main)).toContain("import com.tahai.home.home.JoinListener;");
+        const context = nodeGenerationContext(t, main);
+        expect(context).toContain("Main 负责创建并注册的项目类");
+        expect(context).toContain("  com.tahai.home.home.JoinListener");
+        expect(context).not.toContain("不得新增 public 方法");
+    });
+    it("lets other nodes see services but not Main as a dependency", () => {
+        const listener: TreeNode = { ...base, id: "JoinListener", kind: "ListenerGen", depends: ["Main", "HomeManager"], contract: { ...emptyNodeContract(), constructors: [{ params: "Plugin plugin, HomeManager homeManager" }], events: ["PlayerJoinEvent"] } };
+        const t = structuredClone(tree); t.nodes.push(listener);
+        const context = nodeGenerationContext(t, listener);
+        expect(context).toContain("依赖 com.tahai.home.home.HomeManager");
+        expect(context).not.toContain("依赖 com.tahai.home.Main");
+        expect(context).toContain("public JoinListener(Plugin plugin, HomeManager homeManager)");
     });
     it("checks plugin commands within their section and config leaves, with no pom contract", () => {
         const t = structuredClone(tree); t.nodes[3].contract.commands.push({ name: "home", aliases: [], usage: "", permission: "", description: "" }); t.nodes[3].contract.configKeys.push("home.limit");

@@ -1,7 +1,7 @@
 import { getOwnedTask, putTaskState } from "../../_lib/taskStore";
 import { nodePath, planItemForNode, type ProjectTree } from "../../_lib/projectTree";
 import type { PlanFileItem } from "../../_lib/prompts";
-import { publicPathChecks, queuePathReview, sourceFingerprint, type PathReviewState } from "../../_lib/projectPathReview";
+import { activePathRepair, publicPathChecks, queuePathRepair, queuePathReview, sourceFingerprint, type PathReviewState } from "../../_lib/projectPathReview";
 import { normalizePomRepositories } from "../../_lib/pomGuard";
 
 interface Env { DB?: D1Database; TASKS: KVNamespace }
@@ -9,6 +9,7 @@ interface VerifyState extends PathReviewState {
     tree: ProjectTree; generatedFiles: { path: string; content: string }[];
     fileStatuses: Record<string, string>; generationCheckpoints: Record<string, unknown>;
     buckets: PlanFileItem[][]; currentBucket: number; logs: string[];
+    pathRepair?: { bucketIndex: number; files: string[] } | null; pathRepairAttempts?: number;
 }
 export const onRequestPost: PagesFunction<Env> = async context => {
     const uid = String(context.data.uid ?? "");
@@ -24,6 +25,7 @@ export const onRequestPost: PagesFunction<Env> = async context => {
     const missing = planned.filter(path => !generated.has(path));
     let repairBucketIndex: number | undefined;
     let reviewBucketIndex: number | undefined;
+    let pathRepairBucketIndex: number | undefined;
     const changedFiles: string[] = [];
     if (missing.length && fixMissing) {
         repairBucketIndex = state.buckets.length;
@@ -47,8 +49,15 @@ export const onRequestPost: PagesFunction<Env> = async context => {
             }
         }
         state.sourceFingerprint = await sourceFingerprint(state);
-        reviewBucketIndex = queuePathReview(state);
+        // An unfinished repair must complete before its partial edits are re-reviewed.
+        pathRepairBucketIndex = activePathRepair(state);
+        if (pathRepairBucketIndex === undefined) reviewBucketIndex = queuePathReview(state);
+        if (pathRepairBucketIndex === undefined && reviewBucketIndex === undefined) {
+            pathRepairBucketIndex = queuePathRepair(state);
+            if (pathRepairBucketIndex !== undefined) state.logs.push(`↻ 需求路径静态审查未通过，已加入 ${state.pathRepair!.files.length} 个文件的修正桶`);
+        }
         await putTaskState(context.env, taskId, state, 3600, uid);
     }
-    return json({ verified: !missing.length, total: planned.length, generated: planned.filter(path => generated.has(path)).length, missing, changedFiles, pathChecks: publicPathChecks(state), ...(repairBucketIndex === undefined ? {} : { repairBucketIndex }), ...(reviewBucketIndex === undefined ? {} : { reviewBucketIndex }) });
+    const pathRepairFiles = pathRepairBucketIndex === undefined ? undefined : state.pathRepair?.files;
+    return json({ verified: !missing.length, total: planned.length, generated: planned.filter(path => generated.has(path)).length, missing, changedFiles, pathChecks: publicPathChecks(state), ...(repairBucketIndex === undefined ? {} : { repairBucketIndex }), ...(reviewBucketIndex === undefined ? {} : { reviewBucketIndex }), ...(pathRepairBucketIndex === undefined ? {} : { pathRepairBucketIndex, pathRepairFiles }) });
 };

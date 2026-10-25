@@ -29,6 +29,49 @@ async function fetchAt(url: string, need = makeNeed()) {
 }
 
 describe("learning source fetch safety", () => {
+    it("falls back to Fetch for a blocked webpage without sending the key to the source host", async () => {
+        const fetchImpl = vi.fn(async (url, init) => {
+            if (String(url).startsWith("https://api.deepseek.com/")) {
+                expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
+                expect(JSON.parse(init?.body as string)).toEqual({ url: "https://jd.papermc.io/paper/1.21.4/org/bukkit/entity/Player.html" });
+                return Response.json({ title: "Player API", content: LONG_TEXT });
+            }
+            expect(init?.headers).not.toHaveProperty("Authorization");
+            return new Response("blocked", { status: 403 });
+        }) as unknown as typeof fetch;
+        const result = await fetchLearningSources({ jobId: "learn-fetch", needs: [makeNeed()], apiKey: "test-key", fetchImpl,
+            candidates: [{ needId: "need-api", sources: [{ url: "https://jd.papermc.io/paper/1.21.4/org/bukkit/entity/Player.html", reason: "Check the official API signature." }] }] });
+        expect(result.sources[0]).toMatchObject({ title: "Player API", authority: "official", verificationState: "pending", excerpt: LONG_TEXT.trim() });
+        expect(result.outcomes[0].detailCode).toBe("source_fetched_via_deepseek");
+        expect(result.sources[0].contentHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(result.usageEntries).toEqual([{ service: "deepseek-fetch", requests: 1 }]);
+    });
+
+    it("retains the Fetch charge if the returned webpage is too thin for evidence", async () => {
+        const result = await fetchLearningSources({ jobId: "learn-fetch-thin", needs: [makeNeed()], apiKey: "test-key",
+            candidates: [{ needId: "need-api", urls: ["https://docs.papermc.io/paper/test"] }],
+            fetchImpl: vi.fn(async (url) => String(url).startsWith("https://api.deepseek.com/")
+                ? Response.json({ title: "thin", content: "Short" }) : new Response("", { status: 503 })) });
+        expect(result.sources).toEqual([]);
+        expect(result.outcomes[0]).toMatchObject({ status: "rejected", rejectionCode: "too_thin" });
+        expect(result.usageEntries).toEqual([{ service: "deepseek-fetch", requests: 1 }]);
+    });
+
+    it("does not send blocked POM/metadata or raw source files to Fetch", async () => {
+        for (const url of ["https://repo.papermc.io/repository/maven-public/a/1/a-1.pom", "https://repo.maven.apache.org/a/maven-metadata.xml", "https://raw.githubusercontent.com/PaperMC/Paper/main/Player.java"]) {
+            const fetchImpl = vi.fn(async () => new Response("blocked", { status: 403 }));
+            await expect(fetchLearningSource({ jobId: "raw-source", need: makeNeed(), url, apiKey: "test-key", fetchImpl })).rejects.toThrow("source_http_403");
+            expect(fetchImpl).toHaveBeenCalledTimes(1);
+        }
+    });
+
+    it("never uses Fetch to bypass a forbidden redirect target", async () => {
+        const fetchImpl = vi.fn(async () => new Response(null, { status: 302, headers: { Location: "https://127.0.0.1/private" } }));
+        await expect(fetchLearningSource({ jobId: "bad-redirect", need: makeNeed(), url: "https://example.com/docs", apiKey: "test-key", fetchImpl }))
+            .rejects.toThrow("ip_literal_forbidden");
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
     it("rejects non-public URL forms before fetching", () => {
         const cases = [
             ["http://example.com/docs", "https_required"],

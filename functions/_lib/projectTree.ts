@@ -330,8 +330,8 @@ export function deriveGenerationPlan(tree: ProjectTree): { plan: PlanFileItem[];
     const buckets = usedDepths.map((_, bucket) => plan.filter(f => f.bucket === bucket));
     const mainBlueprint: MainBlueprint = { events: [], commands: [], tasks: [], services: [], config: { defaultsCopied: tree.nodes.some(n => n.id === "config.yml"), files: tree.nodes.filter(n => n.kind === "ConfigGen" && n.id !== "plugin.yml").map(n => n.id) }, fqcn: {} };
     for (const node of tree.nodes) {
-        if (nodeFqcn(tree, node)) mainBlueprint.fqcn![node.id] = nodeFqcn(tree, node);
-        if (node.kind === "ListenerGen") mainBlueprint.events.push(...node.contract.events.map(event => ({ event, listenerClass: node.id, priority: "NORMAL" })));
+        if (nodeFqcn(tree, node) && node.kind !== "MainGen") mainBlueprint.fqcn![node.id] = nodeFqcn(tree, node);
+        if (node.kind === "ListenerGen") mainBlueprint.events.push(...node.contract.events.map(event => ({ event, listenerClass: node.id })));
         if (node.kind === "CommandGen") mainBlueprint.commands.push(...node.contract.commands.map(cmd => ({ ...cmd, executorClass: node.id })));
         if (node.kind === "TaskGen" && node.contract.schedule) mainBlueprint.tasks.push({ taskClass: node.id, schedule: node.contract.schedule.mode, periodTicks: node.contract.schedule.periodTicks, delayTicks: node.contract.schedule.delayTicks, async: node.contract.schedule.mode === "async" });
         if (node.kind === "ManagerGen" && node.contract.lifecycle === "onEnable") mainBlueprint.services.push({ managerClass: node.id, lifecycle: "onEnable" });
