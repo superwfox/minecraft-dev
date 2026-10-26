@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "modelCalls": 3,
+  "deterministicTreeReplays": [],
+  "contractChecks": [
+    {
+      "path": "src/main/java/com/tahai/originalplugin/greeting/GreetingService.java",
+      "check": {
+        "nodeId": "GreetingService",
+        "revision": 5,
+        "items": [
+          {
+            "key": "class",
+            "label": "类名 GreetingService",
+            "ok": true
+          },
+          {
+            "key": "package",
+            "label": "包 com.tahai.originalplugin.greeting",
+            "ok": true
+          },
+          {
+            "key": "method:0",
+            "label": "方法 greet(0 参)",
+            "ok": true
+          },
+          {
+            "key": "constructor:0",
+            "label": "构造器 GreetingService(0 参)",
+            "ok": true
+          }
+        ],
+        "passed": 4,
+        "total": 4
+      }
+    },
+    {
+      "path": "src/main/java/com/tahai/originalplugin/Main.java",
+      "check": {
+        "nodeId": "Main",
+        "revision": 5,
+        "items": [
+          {
+            "key": "class",
+            "label": "类名 Main",
+            "ok": true
+          },
+          {
+            "key": "package",
+            "label": "包 com.tahai.originalplugin",
+            "ok": true
+          },
+          {
+            "key": "main",
+            "label": "继承 JavaPlugin",
+            "ok": true
+          },
+          {
+            "key": "reference:GreetingService",
+            "label": "引用 GreetingService",
+            "ok": true
+          }
+        ],
+        "passed": 4,
+        "total": 4
+      }
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "pom.xml",
+      "sha256": "044d09106f465e17ebc26f5d48d52a486d535663043c50852b158cd003a5d8ee"
+    },
+    {
+      "path": "src/main/resources/plugin.yml",
+      "sha256": "3b1e257d19aa0b8c15e9ca17e0a6ec4c4a5fc96d15fa5558dd4850d997a57478"
+    },
+    {
+      "path": "src/main/java/com/tahai/originalplugin/greeting/GreetingService.java",
+      "sha256": "8499ee55f4cf9b525c20928960ac50a2801d055bc75f70b73717f00866ab57b1"
+    },
+    {
+      "path": "src/main/java/com/tahai/originalplugin/Main.java",
+      "sha256": "4b4a59f6c74309e2df4659aecdf911fd8f857ddf4a7005ade2cb35d3e2cc4463"
+    }
+  ],
+  "gaps": [],
+  "complete": true,
+  "passed": true,
+  "compile": {
+    "status": "passed",
+    "exitCode": 0,
+    "release": "21",
+    "dependencies": "Caller-supplied classpath; changing external artifacts may change the result."
+  }
+}

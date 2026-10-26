@@ -1,0 +1,7 @@
+name: OriginalPlugin
+version: 1.0.0
+main: com.tahai.originalplugin.Main
+api-version: 1.21.4
+description: OriginalPlugin
+authors:
+  - tahai
