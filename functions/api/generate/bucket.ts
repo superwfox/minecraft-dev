@@ -1,12 +1,13 @@
 import { dispatchGen, computeSlice, inferGeneratorType, skillFileGenContext } from "../../_lib/prompts";
+import { journalRecorder } from "../../_lib/projectJournal";
 import type { FileSummary, PlanFileItem, MainBlueprint } from "../../_lib/prompts";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
 import { deepSeekKeyRequiredResponse, resolveTaskLLM, thinkingFor, type LLMProvider } from "../../_lib/llm";
 import { extractFileSummary } from "../../_lib/fileSummary";
 import { loadKnowledgeContext, mergeKnowledgeUsed, recordKnowledgeContextUsage } from "../../_lib/learning/context";
-import { appendReviewNode, findNodeByPath, nodePath, planItemForNode, projectExternalDeps, publicTreeView, type TreeNode } from "../../_lib/projectTree";
+import { appendReviewNode, findNodeByPath, nodeFqcn, nodePath, planItemForNode, projectExternalDeps, publicTreeView, type TreeNode } from "../../_lib/projectTree";
 import { checkNodeContract, nodeGenerationContext, nodeReviewContext } from "../../_lib/projectTreeContract";
-import { parsePathReview, pathReviewPrompt, publicPathChecks } from "../../_lib/projectPathReview";
+import { parsePathReview, pathReviewPrompt, publicPathChecks, sourceFingerprint } from "../../_lib/projectPathReview";
 import { getOwnedTask, markTaskQuotaExhausted, putTaskState } from "../../_lib/taskStore";
 import { buildApiContractContext, findKnownApiIssues } from "../../_lib/apiContracts";
 import {
@@ -106,6 +107,7 @@ function bucketStreamError(error: unknown, fallbackCode = "BUCKET_FAILED"): Buck
 }
 
 interface BackoffOptions {
+    fetchImpl?: typeof fetch;
     maxRetries?: number;
     onRetry?: (event: { attempt: number; status: number; waitMs: number }) => void;
 }
@@ -155,7 +157,7 @@ async function fetchWithBackoff(url: string, init: RequestInit, options: Backoff
     const maxRetries = options.maxRetries ?? 3;
     let attempt = 0;
     while (true) {
-        const resp = await fetch(url, init);
+        const resp = await (options.fetchImpl ?? fetch)(url, init);
         if (resp.status !== 429 || attempt >= maxRetries) return resp;
         const waitMs = retryDelayMs(resp.headers.get("Retry-After"), attempt);
         options.onRetry?.({ attempt: attempt + 1, status: resp.status, waitMs });
@@ -197,6 +199,7 @@ async function callAI(
             body: JSON.stringify(body),
             signal: ctrl.signal,
         }, {
+            fetchImpl: llm.fetch,
             onRetry: ({ attempt, status, waitMs }) => dbg("callAI:retry", { model, attempt, status, waitMs }),
         });
         dbg("callAI:http", { model, status: resp.status, ms: Date.now() - t0 });
@@ -262,6 +265,7 @@ async function callAIStream(
             body: JSON.stringify(body),
             signal: ctrl.signal,
         }, {
+            fetchImpl: llm.fetch,
             onRetry: ({ attempt, status, waitMs }) => dbg("stream:retry", { path: pathTag, model, attempt, status, waitMs }),
         });
         dbg("stream:http", { path: pathTag, status: resp.status, ms: Date.now() - t0 });
@@ -510,7 +514,8 @@ async function processFileStage(
     const filePath = target.path;
     const node = findNodeByPath(state.tree, filePath);
     if (!node) throw new Error("文件不在锁定的结构树中");
-    const treeContext = nodeGenerationContext(state.tree, node);
+    const existing = state.generatedFiles?.find((file: any) => file.path === filePath);
+    const treeContext = nodeGenerationContext(state.tree, node) + (existing ? `\n已有实现（增量修改：保留与需求无关的行为，返回完整文件）：\n${existing.content}\n本次修改需求：${state.changeRequest || state.userPrompt}` : "");
     const skillCtx = state.skills?.length ? skillFileGenContext(state.skills) : "";
     const apiContractInput = {
         coreType: ctx.coreType,
@@ -920,12 +925,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     };
 
     const bucket = buckets[bucketIndex];
+    const mainNode = state.tree.nodes.find(node => node.kind === "MainGen");
     const ctx = {
         projectName: state.projectName,
         packageName: state.packageName,
         coreType: state.coreType,
         version: state.version,
         javaVersion: state.javaVersion,
+        mainClass: mainNode ? nodeFqcn(state.tree, mainNode) : `${state.packageName}.Main`,
     };
     const blueprint = (state.mainBlueprint ?? null) as MainBlueprint | null;
     const needs = state.tree.knowledgeNeeds;
@@ -1158,6 +1165,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             assertBucketActive(operationAbort.signal);
             // 先保存阶段，再做计费等附属写入；计费故障不能让已完成的模型阶段丢失并被重复执行。
             await putTaskState(context.env, taskId, state, 3600, uid);
+            await journalRecorder(context as any).record("source.checkpoint", { revisionId: state.revisionId, fingerprint: await sourceFingerprint(state), bucket: bucketIndex, files: results.map(result => ({ path: result.path, stage: result.nextStage, content: result.completed?.content || result.checkpoint?.content || "", completed: !!result.completed })), nodeChecks: state.nodeChecks });
             try {
                 await flushCharge();
                 if (state.quotaExhausted) await putTaskState(context.env, taskId, state, 3600, uid);

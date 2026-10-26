@@ -17,7 +17,7 @@ export const SPONSOR_TIERS: { id: string; amount: number; label: string; badge: 
 
 export const authState = reactive({
     loaded: false,
-    user: null as { login: string } | null,
+    user: null as { id?: string; login: string; name?: string } | null,
     quota: null as QuotaInfo | null,
 });
 
@@ -40,7 +40,7 @@ export async function fetchMe(): Promise<void> {
     try {
         const resp = await fetch("/api/auth/me");
         const data = await resp.json() as {
-            user?: { login: string } | null;
+            user?: { id?: string; login: string; name?: string } | null;
             quota?: QuotaInfo | null;
         };
         authState.user = data.user ?? null;

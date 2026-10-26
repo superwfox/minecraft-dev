@@ -16,7 +16,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         });
     }
     const quota = await getQuota(context.env.TASKS, session.uid);
-    return new Response(JSON.stringify({ user: { login: session.login }, quota }), {
+    const name = typeof session.name === "string" ? session.name.trim() : "";
+    return new Response(JSON.stringify({ user: { id: session.uid, login: session.login, name }, quota }), {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 };

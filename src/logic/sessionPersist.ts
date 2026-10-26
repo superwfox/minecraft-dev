@@ -33,6 +33,7 @@ function snapshot() {
 }
 
 export function persistSession() {
+    if ((globalThis as any).__tahaiProjectPersistence) { window.dispatchEvent(new Event("project-checkpoint")); return; }
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot()));
     } catch {

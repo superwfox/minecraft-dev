@@ -142,6 +142,7 @@
   .lattice-frame.composer-input-shell { padding: 28px 30px 20px; overflow: visible; }
   .lattice-frame:is(.quota-pop, .prompt-history-menu, .tray, .cs-modal, .sk-modal, .pc-preview-box, .gen-preview) { overflow: visible; }
   .lattice-frame.quota-pop { padding: 24px; }
+  .lattice-frame.prompt-history-menu { position: absolute; }
   .lattice-frame.pc-card-inner { background: var(--surface-1); color: var(--text-primary); }
   .lattice-frame:is(.active, .selected) { border-color: var(--oak); }
   .lattice-frame.lattice-layer-one { --lattice-surface: var(--surface-1); --lattice-edge: var(--line); }

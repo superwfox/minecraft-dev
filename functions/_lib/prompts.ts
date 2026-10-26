@@ -515,7 +515,7 @@ function pomCoreRules(ctx: { coreType: string; version: string }): {
 function specializationBlock(
     file: PlanFileItem,
     slice: BlueprintSlice,
-    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string; mainClass?: string },
 ): string {
     const className = (file.path.split("/").pop() ?? "").replace(/\.java$/, "");
     switch (file.generatorType) {
@@ -608,7 +608,7 @@ function specializationBlock(
                 "- 本文件是 YAML 资源文件（plugin.yml / config.yml / lang.yml 等），不是 Java 代码",
                 "- 直接输出 YAML 内容，不包含任何 Java 关键字、import、class 声明",
                 file.path.endsWith("plugin.yml")
-                    ? `- plugin.yml 必须含字段：name: ${ctx.projectName}, version: 1.0.0, main: ${ctx.packageName}.Main, api-version: ${ctx.version}\n- 所有命令必须在 commands 节点声明（每条至少 description；可选 usage / aliases / permission）\n- 涉及的权限节点必须在 permissions 节点声明（含 description 与 default）`
+                    ? `- plugin.yml 必须含字段：name: ${ctx.projectName}, version: 1.0.0, main: ${ctx.mainClass || `${ctx.packageName}.Main`}, api-version: ${ctx.version}\n- 所有命令必须在 commands 节点声明（每条至少 description；可选 usage / aliases / permission）\n- 涉及的权限节点必须在 permissions 节点声明（含 description 与 default）`
                     : "- config.yml 仅放运行时可变默认值，注释用 # 说明每个字段的作用",
             ].join("\n");
         }
@@ -754,7 +754,7 @@ function checkerSpecializationBlock(
 /** 根据 generatorType 选择 FileGen 与 reChecker 的 prompt 构造器 */
 export function dispatchGen(
     file: PlanFileItem,
-    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string },
+    ctx: { projectName: string; packageName: string; coreType: string; version: string; javaVersion: string; mainClass?: string },
     ancestorSummaries: FileSummary[],
     slice: BlueprintSlice,
     skillContext?: string,

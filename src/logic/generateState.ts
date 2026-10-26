@@ -418,6 +418,8 @@ export type ClarifyRound = {
 };
 
 export type GenTask = {
+    importReport: { baseline?: { status?: string }; blockers?: string[]; missingClasses?: string[]; [key: string]: unknown } | null;
+    treeChanges: { added: string[]; affected: string[]; removed: string[] } | null;
     tree: ProjectTreeView | null;
     treeRequestId: string;
     treeMode: "build" | "refine" | "continue";
@@ -476,6 +478,8 @@ export type GenTask = {
 };
 
 export const genTask = reactive<GenTask>({
+    importReport: null,
+    treeChanges: null,
     tree: null,
     treeRequestId: "",
     treeMode: "build",
@@ -627,6 +631,8 @@ export function recordLearningDebugEvent(
 }
 
 export function resetGenTask() {
+    genTask.importReport = null;
+    genTask.treeChanges = null;
     genTask.tree = null;
     genTask.treeRequestId = "";
     genTask.treeMode = "build";
@@ -719,6 +725,7 @@ export const GEN_TASK_TTL_MS = 3_600_000;
 let persistTimer: any = null;
 
 function writeGenTaskSnapshot() {
+    if ((globalThis as any).__tahaiProjectPersistence) { window.dispatchEvent(new Event("project-checkpoint")); return; }
     try {
         const canRestartModeOne = !genTask.taskId
             && !!genTask.userPrompt

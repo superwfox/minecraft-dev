@@ -110,10 +110,10 @@ export async function downloadArtifact(token: string, artifactId: number): Promi
     return resp;
 }
 
-export async function createBlob(token: string, content: string): Promise<string> {
+export async function createBlob(token: string, content: string, encoding?: "base64"): Promise<string> {
     const resp = await ghFetch(token, "/git/blobs", {
         method: "POST",
-        body: JSON.stringify({ content: toBase64(content), encoding: "base64" }),
+        body: JSON.stringify({ content: encoding === "base64" ? content : toBase64(content), encoding: "base64" }),
     });
     const data = await resp.json() as any;
     return data.sha;
@@ -121,10 +121,10 @@ export async function createBlob(token: string, content: string): Promise<string
 
 export async function createTree(
     token: string, baseSha: string,
-    files: { path: string; blobSha: string }[],
+    files: { path: string; blobSha?: string; content?: string }[],
 ): Promise<string> {
     const tree = files.map(f => ({
-        path: f.path, mode: "100644" as const, type: "blob" as const, sha: f.blobSha,
+        path: f.path, mode: "100644" as const, type: "blob" as const, ...(f.blobSha ? { sha: f.blobSha } : { content: f.content }),
     }));
     const resp = await ghFetch(token, "/git/trees", {
         method: "POST",
@@ -156,12 +156,20 @@ export async function getRunJobs(token: string, runId: number): Promise<{ id: nu
 }
 
 export async function getJobLogs(token: string, jobId: number): Promise<string> {
-    const resp = await fetch(`${BASE}/actions/jobs/${jobId}/logs`, {
+    const signal = AbortSignal.timeout(30000);
+    let resp = await fetch(`${BASE}/actions/jobs/${jobId}/logs`, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "mc-devtool" },
-        redirect: "follow",
+        redirect: "manual", signal,
     });
+    if (resp.status === 302) {
+        const location = resp.headers.get("Location");
+        if (!location || new URL(location).protocol !== "https:") throw new Error("Invalid job log download location");
+        // Workerd may retain Authorization when automatically following redirects.
+        // Signed storage URLs require their own URL token, not the GitHub credential.
+        resp = await fetch(location, { signal });
+    }
     if (!resp.ok) throw new Error(`Failed to fetch job logs: ${resp.status}`);
-    return await resp.text();
+    return boundedLogText(resp);
 }
 
 async function boundedLogText(response: Response): Promise<string> {

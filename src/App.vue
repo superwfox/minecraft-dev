@@ -67,7 +67,7 @@ import SponsorModal from "./components/sponsorModal.vue";
 import TopNav from "./components/TopNav.vue";
 import HeaderMenu from "./components/HeaderMenu.vue";
 import {useRouter} from "vue-router";
-import {restoreSession, startSessionPersistence} from "./logic/sessionPersist";
+import {startProjectPersistence} from "./logic/projectSession";
 import {authState, fetchMe, login, logout, currentLogo, showSponsorModal} from "./logic/auth";
 import {
   deepSeekKeyConfigured,
@@ -147,9 +147,8 @@ function doLogout() {
   logout();
 }
 
-restoreSession();
+startProjectPersistence();
 onMounted(() => {
-  startSessionPersistence();
   fetchMe();
   promptForDeepSeekKey();
   window.addEventListener("resize", updateQuotaPosition);

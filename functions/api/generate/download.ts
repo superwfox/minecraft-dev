@@ -17,6 +17,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     if (!raw) return new Response("Task not found", { status: 404 });
     const state = JSON.parse(raw);
 
+    const revisionId = url.searchParams.get("revisionId");
+    if (revisionId && revisionId !== (state.revisionId || "initial")) return new Response("工程版本已更新，请从本地历史下载原版本产物", { status: 409 });
+    if (state.status !== "done") return new Response("当前版本尚未构建成功", { status: 409 });
+
     if (!state.artifactId) return new Response("Artifact not ready", { status: 409 });
 
     try {
@@ -30,6 +34,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             headers: {
                 "Content-Type": "application/zip",
                 "Content-Disposition": `attachment; filename="${state.projectName || "plugin"}.zip"`,
+                "X-Project-Revision": state.revisionId || "initial",
             },
         });
     } catch (e: any) {

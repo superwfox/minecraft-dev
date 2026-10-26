@@ -1,6 +1,7 @@
 import { inferGeneratorType, type GeneratorType, type MainBlueprint, type PlanFileItem } from "./prompts";
 import type { KnowledgeNeed } from "./learning/types";
 import type { ModelToolCall } from "./learning/tool";
+import { safeProjectPath } from "../../shared/projectArchive";
 
 export type TreeModuleKind = "business" | "common" | "system";
 export type TreeNodeOrigin = "system" | "planner" | "review";
@@ -16,6 +17,7 @@ export interface NodeContract {
 }
 export interface TreeModule { id: string; title: string; responsibility: string; kind: TreeModuleKind }
 export interface TreeNode {
+    sourcePath?: string; sourceClass?: string;
     id: string; moduleId: string; kind: GeneratorType; title: string; responsibility: string;
     depends: string[]; contract: NodeContract; tag: "gui" | null; pairId: string; origin: TreeNodeOrigin;
 }
@@ -70,15 +72,17 @@ export function createInitialTree(_coreType: string, version: string): ProjectTr
     return { schemaVersion: 1, revision: 0, lockedRevision: null, status: "drafting", project: { projectName: "", packageName: "", javaVersion: javaVersionFor(version), summary: "", externalDeps: [] }, modules, nodes, paths: [], knowledgeNeeds: [] };
 }
 export function nodePackage(tree: ProjectTree, node: TreeNode): string {
+    if (node.sourcePath?.startsWith("src/main/java/")) return node.sourcePath.slice(14, node.sourcePath.lastIndexOf("/")).replace(/\//g, ".");
     return node.moduleId === "_root" ? tree.project.packageName : `${tree.project.packageName}.${node.moduleId}`;
 }
 export function nodePath(tree: ProjectTree, node: TreeNode): string {
+    if (node.sourcePath && safeProjectPath(node.sourcePath)) return node.sourcePath;
     if (node.moduleId === "_build") return node.id;
     if (node.moduleId === "_resources") return `src/main/resources/${node.id}`;
     return `src/main/java/${nodePackage(tree, node).replace(/\./g, "/")}/${node.id}.java`;
 }
 export function nodeFqcn(tree: ProjectTree, node: TreeNode): string {
-    return ["_build", "_resources"].includes(node.moduleId) ? "" : `${nodePackage(tree, node)}.${node.id}`;
+    return ["_build", "_resources"].includes(node.moduleId) ? "" : `${nodePackage(tree, node)}.${node.sourceClass || node.id}`;
 }
 export function findNodeByPath(tree: ProjectTree, path: string): TreeNode | undefined {
     return tree.nodes.find(node => nodePath(tree, node) === path);
@@ -165,12 +169,12 @@ function upsertNode(tree: ProjectTree, input: Record<string, unknown>): TreeNode
     requireValue(tree.modules.some(m => m.id === moduleId), "目标模块不存在");
     const resource = moduleId === "_resources";
     requireValue(resource ? input.kind === "ConfigGen" && /^[a-z][a-z0-9_-]{0,39}\.yml$/.test(id) && id !== "plugin.yml" : /^[A-Z][A-Za-z0-9]{1,47}$/.test(id) && id !== "Main" && JAVA_KINDS.includes(input.kind as GeneratorType) && !moduleId.startsWith("_"), "节点 id、类型或模块不合法");
-    const count = tree.nodes.filter(n => n.origin !== "system").length;
+    const count = tree.nodes.filter(n => n.origin !== "system" && !n.sourcePath).length;
     requireValue(!!existing || count < MAX_TREE_NODES, "超出节点数上限");
     const tag = input.tag === "gui" ? "gui" as const : null;
     requireValue(["gui", "none", null].includes(input.tag as string | null), "非法节点标签");
     const node: TreeNode = { id, moduleId, kind: input.kind as GeneratorType, title: text(input.title, 24), responsibility: text(input.responsibility, 600), depends: strings(input.depends, 12, undefined, "depends"), contract: normalizeContract(input.contract), tag, pairId: tag ? text(input.pairId, 48, true) : "", origin: "planner" };
-    if (existing) tree.nodes.splice(tree.nodes.indexOf(existing), 1, node); else tree.nodes.push(node);
+    if (existing) { node.sourcePath = existing.sourcePath; node.sourceClass = existing.sourceClass; tree.nodes.splice(tree.nodes.indexOf(existing), 1, node); } else tree.nodes.push(node);
     return node;
 }
 export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): { tree: ProjectTree; results: TreeOpResult[]; finishRequested: boolean } {
@@ -189,7 +193,7 @@ export function applyTreeToolCalls(input: ProjectTree, calls: ModelToolCall[]): 
             if (tool === "set_project") {
                 const name = text(args.projectName, 40);
                 requireValue(/^[A-Z][A-Za-z0-9]{2,39}$/.test(name), "项目名必须为 PascalCase");
-                next.project = { ...next.project, projectName: name, packageName: packageNameFor(name), summary: text(args.summary, 1000, true), externalDeps: strings(args.externalDeps, 4, PLUGIN_NAME, "externalDeps", "填写插件名，如 Vault，不要填写 Maven 坐标、包名或版本") };
+                next.project = { ...next.project, projectName: name, packageName: next.nodes.some(n => n.sourcePath) ? next.project.packageName : packageNameFor(name), summary: text(args.summary, 1000, true), externalDeps: strings(args.externalDeps, 4, PLUGIN_NAME, "externalDeps", "填写插件名，如 Vault，不要填写 Maven 坐标、包名或版本") };
                 summary = `✎ 项目 ${name}`;
             } else if (tool === "upsert_module") {
                 const id = text(args.id, 24);
@@ -259,7 +263,7 @@ export function validateProjectTree(tree: ProjectTree): TreeIssue[] {
     const issues: TreeIssue[] = [];
     const add = (code: string, message: string, targetId?: string) => issues.push({ code, message, ...(targetId ? { targetId } : {}) });
     if (!tree.project.projectName) add("PROJECT_NOT_SET", "请设置项目名称");
-    if (!tree.nodes.some(n => n.origin !== "system")) add("NO_BUSINESS_NODE", "请添加业务文件节点");
+    if (!tree.nodes.some(n => n.origin !== "system" || n.sourcePath?.startsWith("src/main/java/"))) add("NO_BUSINESS_NODE", "请添加业务文件节点");
     if (!tree.paths?.length) add("NO_BEHAVIOR_PATH", "请按需求添加行为路径与步骤，并绑定实现文件");
     const stepIds = new Set<string>();
     for (const path of tree.paths ?? []) {
@@ -303,7 +307,7 @@ export function validateProjectTree(tree: ProjectTree): TreeIssue[] {
     }
     for (const node of tree.nodes) visit(node.id, []);
     if (tree.nodes.some(n => n.contract.configKeys.length) && !tree.nodes.some(n => n.id === "config.yml" && n.moduleId === "_resources")) add("CONFIG_FILE_REQUIRED", "声明配置键时必须包含 config.yml");
-    const nonSystem = tree.nodes.filter(n => n.origin !== "system");
+    const nonSystem = tree.nodes.filter(n => n.origin !== "system" && !n.sourcePath);
     if (tree.modules.filter(m => m.kind !== "system").length > MAX_TREE_MODULES || nonSystem.length > MAX_TREE_NODES + (tree.status === "locked" ? 10 : 0) || nonSystem.filter(n => n.origin !== "review").length > MAX_TREE_NODES) add("LIMIT_EXCEEDED", "超出模块或节点上限");
     return issues;
 }
@@ -342,7 +346,7 @@ export function appendReviewNode(tree: ProjectTree, input: { className: string; 
     const existing = tree.nodes.find(n => lower(n.id) === lower(input.className));
     if (existing) return { node: existing, created: false };
     const reference = tree.nodes.find(n => n.id === input.referencedByNodeId);
-    if (tree.status !== "locked" || !reference || !/^[A-Z][A-Za-z0-9]{1,47}$/.test(input.className) || tree.nodes.filter(n => n.origin !== "system").length >= MAX_TREE_NODES + 10 || tree.nodes.filter(n => n.origin === "review").length >= 10) return null;
+    if (tree.status !== "locked" || !reference || !/^[A-Z][A-Za-z0-9]{1,47}$/.test(input.className) || tree.nodes.filter(n => n.origin !== "system" && !n.sourcePath).length >= MAX_TREE_NODES + 10 || tree.nodes.filter(n => n.origin === "review").length >= 10) return null;
     const moduleId = reference.moduleId.startsWith("_") ? "common" : reference.moduleId;
     if (!tree.modules.some(m => m.id === moduleId)) {
         if (tree.modules.filter(m => m.kind !== "system").length >= MAX_TREE_MODULES) return null;

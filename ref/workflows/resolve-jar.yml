@@ -1,0 +1,61 @@
+name: ResolveJAR
+run-name: ResolveJAR ${{ inputs.submission_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      submission_id: { required: true, type: string }
+      input_ref: { required: true, type: string }
+      input_sha256: { required: true, type: string }
+      core_type: { required: true, type: string }
+      mc_version: { required: true, type: string }
+permissions:
+  contents: read
+concurrency:
+  group: resolve-jar-${{ inputs.submission_id }}
+  cancel-in-progress: false
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+          INPUT_REF: ${{ inputs.input_ref }}
+          INPUT_SHA: ${{ inputs.input_sha256 }}
+          MC_VERSION: ${{ inputs.mc_version }}
+          CORE_TYPE: ${{ inputs.core_type }}
+        shell: bash
+        run: |
+          [[ "$SUBMISSION_ID" =~ ^[A-Za-z0-9_-]{16,100}$ ]] || exit 2
+          [[ "$INPUT_REF" =~ ^[a-f0-9]{40}$ ]] || exit 2
+          [[ "$INPUT_SHA" =~ ^[a-f0-9]{64}$ ]] || exit 2
+          [[ "$MC_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}(-[A-Za-z0-9.-]+)?$ ]] || exit 2
+          [[ "$CORE_TYPE" =~ ^(PAPER|SPIGOT|paper|spigot)$ ]] || exit 2
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Download input as inert data
+        env:
+          INPUT_REF: ${{ inputs.input_ref }}
+          INPUT_SHA: ${{ inputs.input_sha256 }}
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/resolve-jar.py download
+      - name: Decompile and compile without write credentials
+        env:
+          MC_VERSION: ${{ inputs.mc_version }}
+          CORE_TYPE: ${{ inputs.core_type }}
+        run: |
+          python3 scripts/resolve-jar.py resolve
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resolved-${{ inputs.submission_id }}
+          path: resolve-output/resolved-project.json
+          if-no-files-found: error
+          retention-days: 7

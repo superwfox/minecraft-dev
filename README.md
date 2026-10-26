@@ -13,8 +13,11 @@
 - 实时查看思考、输出和阶段进度；中断后保留状态，由用户继续任务。
 - 构建失败时解析编译诊断，按需查证版本化公开 API，约束修复候选后重新构建。
 - 下载构建成功的 JAR 和 Maven 源码 ZIP，在路径节点中查看契约与源码；通过 Skill 为生成过程提供专门约束。
+- 在浏览器保存工程、源码、版本和已下载产物，从历史恢复现场后手动继续；构建结束后可以追加需求、确认结构变更并增量修改。
+- 从输入区的 `+` 或拖入普通 Java Paper/Spigot JAR 还原工程，再进入同一套结构确认、修改与编译流程。
+- 从 Debug 旁提交游戏实测或执行失败反馈；确认公开范围后，将源码与诊断 ZIP、截图发布到产品仓库 Issue。
 
-IDE、可视化蓝图和“追加需求并重建”已停用，相关实现保留在 [`.deprecated/ide/`](.deprecated/ide/)。旧 `/ide` 地址跳转到对话页。
+旧 IDE 与其中的可视化蓝图、追加需求实现保留在 [`.deprecated/ide/`](.deprecated/ide/)，旧 `/ide` 地址跳转到对话页。当前追加需求通过结构树和工程版本完成，详见[工程生命周期](ref/project-lifecycle.md)。
 
 ## 一次生成如何完成
 
@@ -29,7 +32,7 @@ IDE、可视化蓝图和“追加需求并重建”已停用，相关实现保�
 
 前端负责按阶段调用 API；服务端管理任务、授权、费用与模型请求。`MainBlueprint` 约束主类装配，`FileSummary` 向后续文件传递已生成的 API 契约。公开 API 学习通过 `learn_public_api` 工具和 Learning 端点接回模型对话。
 
-刷新会将活动任务恢复为 `interrupted`，等待用户手动继续；恢复时还需校验服务端任务有效期，浏览器快照不等于服务端任务仍然存在。
+刷新或从历史恢复进行中任务时，先还原本地现场并等待用户手动继续。服务端任务有效则对账续接，过期时使用拥有者绑定的签名 checkpoint 重建；代码可复用，授权、计费和验证由服务端重新确定。
 
 ## 技术与服务
 
@@ -37,7 +40,7 @@ IDE、可视化蓝图和“追加需求并重建”已停用，相关实现保�
 | --- | --- |
 | 页面与交互 | Vue 3、TypeScript、Vite、Vue Router |
 | API 与托管 | Cloudflare Pages + Pages Functions |
-| 持久化 | D1：生成任务、任务成本、公共知识；KV `TASKS`：用户资料、额度与缓存等 |
+| 持久化 | IndexedDB：本地工程、版本和产物；D1：任务、费用、知识、临时执行记录与提交状态；KV `TASKS`：用户资料、额度与缓存等 |
 | 模型适配 | DeepSeek 为默认提供方；支持用户自带 DeepSeek Key，以及受档位限制的 GLM Key |
 | 编译 | 独立 GitHub 构建仓执行 Maven，平台代理状态查询与产物下载 |
 | 测试与文档 | Vitest、VitePress |
@@ -75,7 +78,7 @@ npm run dev
 
 **完整生成流程还需要 D1。** 默认 `dev` 脚本只绑定本地 KV `TASKS`；需另外在 Wrangler 本地配置中绑定 D1 为 `DB` 并应用迁移。任务读取或存储的部分路径有 KV 兼容逻辑，但澄清、结构规划等操作的执行锁依赖 D1，不能将 KV 回退视为完整流程保障。
 
-新数据库按顺序执行 [`migrations/`](migrations/) 下 `0001` 至 `0005` 的 SQL；已有数据库只执行尚未应用的迁移。Git 登录、平台额度、模型凭证和构建仓配置也会影响相关功能能否使用。
+新数据库按顺序执行 [`migrations/`](migrations/) 下 `0001` 至 `0006` 的 SQL；已有数据库只执行尚未应用的迁移。`0006_project_journal_feedback.sql` 是新版模型调用记录与提交去重的前置条件，Pages 推送部署不会自动执行。Git 登录、平台额度、模型凭证和构建仓配置也会影响相关功能能否使用。
 
 ## 常用命令
 
@@ -102,7 +105,7 @@ npm run dev
 | [`src/styles/typography.css`](src/styles/typography.css) | 顶栏品牌与 chat / skill 导航用 Minecrafter，其他固定文案用全量江西拙楷，输入与生成内容用钉钉进步体；动态内容标记 `data-font="dynamic"`，字体文件存放在 `public/` |
 | [`src/logic/`](src/logic/) | 对话、生成状态、恢复与 Learning 续跑；优先看 `chatHandler.ts`、`generateHandler.ts`、`generateState.ts` |
 | [`src/api/deepseek.ts`](src/api/deepseek.ts) | 预检、信息提取与前端流式调用 |
-| [`.deprecated/`](.deprecated/) | 已停用功能与重构片段归档；IDE 与追加需求功能见 `.deprecated/ide/` |
+| [`.deprecated/`](.deprecated/) | 已停用功能与重构片段归档；旧 IDE 及其追加需求实现见 `.deprecated/ide/` |
 | [`ref/`](ref/) | 界面样稿与用户提供的动画参考包，不参与应用构建 |
 | [`functions/api/generate/`](functions/api/generate/) | 任务创建、需求确认、结构树、分桶生成、路径审查、构建、修复、下载 |
 | [`functions/api/learning/`](functions/api/learning/) | 公开 API 学习任务的创建、推进和查询 |
@@ -116,6 +119,8 @@ npm run dev
 前端产物部署到 Cloudflare Pages，输出目录为 `dist`，同时发布 Pages Functions。需要配置 `TASKS` KV、`DB` D1、对应环境变量及 OAuth 回调地址。Production 和 Preview 的绑定与开关分别配置。
 
 构建仓目前由 [`functions/_lib/github.ts`](functions/_lib/github.ts) 指向 `superwfox/minecraft-dev-workflow`，并调用其 `maven.yml` 工作流。更换部署归属时需同步检查仓库地址、令牌权限及工作流输入，不能只改前端配置。
+
+ResolveJAR 使用该仓库单独的受控反编译工作流。公开反馈还需 `GITHUB_FEEDBACK_TOKEN`、Pages 排除 `feedback-data` 分支及 `FEEDBACK_DATA_BRANCH_READY=true`；分支限制、权限和安装步骤见[工程生命周期](ref/project-lifecycle.md)。
 
 `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭，开启后才允许符合条件的 DeepSeek 自动联网学习；GLM 路由只读取已有公共知识。不可用 API 共享缓存还要求 `0005_negative_api_facts.sql` 和可信构建证据链就绪，详见[编译学习闭环](docs/technical/compile-learning.md)。
 

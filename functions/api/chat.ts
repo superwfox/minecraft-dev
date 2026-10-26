@@ -133,7 +133,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }, CHAT_TIMEOUT_MS);
     let data: any;
     try {
-        const resp = await fetch(llm.url, {
+        const resp = await (llm.fetch ?? fetch)(llm.url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

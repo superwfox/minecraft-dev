@@ -11,6 +11,7 @@ import {
 } from "../../_lib/github";
 import { protectedBuildPath } from "../../_lib/learning/compileApiEvidence";
 import { activePathRepair, sourceFingerprint } from "../../_lib/projectPathReview";
+import { journalRecorder } from "../../_lib/projectJournal";
 import { MAX_BUILDS_PER_USER_DAY, userBuildCheck, userBuildIncrement } from "../../_lib/quota";
 import { checkPom, normalizePomRepositories } from "../../_lib/pomGuard";
 import {
@@ -320,15 +321,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         state.buildBranch = branch;
         state.logs.push(`已创建临时分支 ${branch}`);
 
-        const treeFiles: { path: string; blobSha: string }[] = [];
-        for (const file of state.generatedFiles) {
-            await renewBuildLease();
+        const treeFiles: { path: string; blobSha?: string; content?: string }[] = [];
+        const buildFiles = [...new Map([...(state.resources || []), ...state.generatedFiles].map((file: any) => [file.path, file])).values()] as any[];
+        for (const file of buildFiles) {
             const content = file.path.endsWith("plugin.yml")
                 ? injectTahaiAuthor(file.content)
                 : file.content;
-            const blobSha = await createBlob(token, content);
-            treeFiles.push({ path: file.path, blobSha });
-            state.logs.push(`已创建 blob: ${file.path}`);
+            if (file.encoding === "base64") { await renewBuildLease(); treeFiles.push({ path: file.path, blobSha: await createBlob(token, content, file.encoding) }); }
+            else treeFiles.push({ path: file.path, content });
         }
 
         await renewBuildLease();
@@ -342,6 +342,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         const beforeTrigger = new Date(Date.now() - BUILD_RUN_LOOKBACK_MS).toISOString();
         state.buildRunStartedAfter = beforeTrigger;
         await persistState();
+        await journalRecorder(context as any).record("build.configuration", { revisionId: state.revisionId, fingerprint: state.sourceFingerprint, javaVersion: state.javaVersion, coreType: state.coreType, mcVersion: state.version, buildHeadSha: state.buildHeadSha, buildBaseSha: sha, branch, pom: buildFiles.find(file => file.path === "pom.xml")?.content, files: treeFiles.map(file => ({ path: file.path, blobSha: file.blobSha })) });
         await renewBuildLease();
         await triggerWorkflow(token, branch, state.javaVersion);
         workflowTriggered = true;

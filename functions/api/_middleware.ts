@@ -10,6 +10,7 @@ import { verifySession, getSessionCookie } from "../_lib/session";
 import { getQuota, consume, ipAllow } from "../_lib/quota";
 import { isDeepSeekByokRequest, resolveLLM } from "../_lib/llm";
 import { deleteTask, TaskStoreUnavailableError } from "../_lib/taskStore";
+import { journalRecorder, observeResponse } from "../_lib/projectJournal";
 
 interface Env {
     SESSION_SECRET: string;
@@ -48,7 +49,7 @@ function needsKvFallbackLimit(path: string): boolean {
         || path === "/api/auth/callback"
         || path === "/api/learning/start"
         || path === "/api/learning/step"
-        || ["clarify", "tree", "bucket", "fix", "build", "task"]
+        || ["clarify", "tree", "bucket", "fix", "build", "task", "revise", "checkpoint", "feedback", "jar"]
             .some(name => path === `/api/generate/${name}`);
 }
 
@@ -61,8 +62,23 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     const path = new URL(request.url).pathname;
     let session: any = null;
     const next = async (): Promise<Response> => {
+        const startedAt = Date.now();
         try {
-            return await context.next();
+            if (session && context.data.journalInput === undefined && /json/.test(request.headers.get("Content-Type") || "") && !path.endsWith("/feedback")) {
+                try { context.data.journalInput = await request.clone().json(); context.data.journalTaskId = (context.data.journalInput as any)?.taskId || ""; } catch {}
+            }
+            const response = await context.next();
+            if (session && (path.startsWith("/api/generate/") || path.startsWith("/api/learning/"))
+                && !["journal", "checkpoint", "download", "source", "feedback", "jar"].some(name => path === `/api/generate/${name}`)
+                && /json|event-stream/.test(response.headers.get("Content-Type") || "")) {
+                const recorder = journalRecorder(context as any);
+                const input: unknown = context.data.journalInput || null;
+                await recorder.record("operation.request", { path, method: request.method, input, startedAt, productVersion: (env as any).CF_PAGES_COMMIT_SHA || "development", promptVersion: "2026-10-project-v1" });
+                const wrapped = observeResponse(response, (data, incomplete) => recorder.record("operation.result", { path, status: response.status, elapsedMs: Date.now() - startedAt, ...data }, incomplete), recorder.defer);
+                wrapped.headers.set("X-Project-Journal", (env as any).DB ? "recording" : "unavailable");
+                return wrapped;
+            }
+            return response;
         } catch (error) {
             if (error instanceof TaskStoreUnavailableError) {
                 return json({

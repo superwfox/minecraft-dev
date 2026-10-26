@@ -62,7 +62,7 @@ npm run dev
 
 生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
 
-生成任务与单任务成本在生产环境优先使用变量名为 `DB` 的 D1 绑定。本地 `npm run dev` 未绑定 D1 时会自动回退本地 `TASKS` KV，不影响开发流程。
+完整生成流程需要以 `DB` 绑定 D1 并执行迁移；默认 `npm run dev` 只绑定 `TASKS` KV，须另外提供本地 D1 配置。部分读写支持 KV 回退，但执行锁、Learning 和执行记录依赖 D1，KV 回退不能代替完整开发环境。
 
 生产环境可选择变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding；配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`。Pages + Git 集成更推荐在域名上建立 WAF Rate Limiting rule，并在 Pages 的 Production 环境变量中设置 `EDGE_RATE_LIMITING=true`，同样会关闭 KV 限流兜底。两者均未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
 
@@ -156,10 +156,14 @@ git push -u origin master
    - `migrations/0002_autonomous_learning.sql`
    - `migrations/0003_generation_task_quota.sql`
    - `migrations/0004_generation_task_planner_lease.sql`
+   - `migrations/0005_negative_api_facts.sql`
+   - `migrations/0006_project_journal_feedback.sql`
 
 已有数据库只需从尚未执行的下一份 migration 继续，不能重复执行包含 `ALTER TABLE ... ADD COLUMN` 的文件。Cloudflare Pages 的 Git 自动部署只发布代码，不会自动执行 D1 migration；每次发布包含新 SQL 文件时必须先在对应的 Preview / Production 数据库执行。
 
-D1 承载高频生成任务状态、单任务成本和公共技术知识；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。
+D1 承载高频生成任务状态、单任务成本、公共技术知识、24 小时临时执行记录及反馈／JAR 提交状态；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。`0006` 缺失时，新版会在外部模型调用前报执行记录存储不可用。
+
+公开反馈还需配置 `GITHUB_FEEDBACK_TOKEN`（产品仓库 Contents、Issues 写权限），并在 Pages preview 分支中排除 `feedback-data` 后设置 `FEEDBACK_DATA_BRANCH_READY=true`。ResolveJAR 沿用执行仓库和 `GITHUB_PAT`，需预先安装受控工作流；工程恢复、完整权限与验证范围见[工程生命周期](../../ref/project-lifecycle.md)。
 
 ### 5. 部署
 

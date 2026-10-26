@@ -58,7 +58,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // 3) 签发会话
     const token = await signSession(
-        { uid: `gh_${ghUser.id}`, login: ghUser.login },
+        { uid: `gh_${ghUser.id}`, login: ghUser.login, name: ghUser.name },
         context.env.SESSION_SECRET,
     );
 

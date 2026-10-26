@@ -10,6 +10,7 @@
 // 统一解析提供方、模型名与思考强度。
 
 import { getTier } from "./quota";
+import { journalRecorder } from "./projectJournal";
 
 export type LLMTier = "pro" | "flash";
 export type ReasoningEffort = "low" | "high" | "max";
@@ -32,6 +33,7 @@ const GLM_MODELS: Record<LLMTier, string> = {
 };
 
 export interface LLMProvider {
+    fetch?: typeof fetch;
     providerId: "deepseek" | "glm";
     url: string;
     apiKey: string;
@@ -118,7 +120,7 @@ function sharedDeepSeekProvider(env: Env): LLMProvider {
     };
 }
 
-export async function resolveLLM(context: { request: Request; env: Env; data: any }): Promise<LLMProvider> {
+async function resolveProvider(context: { request: Request; env: Env; data: any }): Promise<LLMProvider> {
     const provider = (context.request.headers.get("X-LLM-Provider") || "").trim().toLowerCase();
     const userKey = (context.request.headers.get("X-LLM-Key") || "").trim();
     const endpoint = (context.request.headers.get("X-LLM-Endpoint") || "").trim().toLowerCase();
@@ -159,6 +161,12 @@ export async function resolveLLM(context: { request: Request; env: Env; data: an
     }
 
     return sharedDeepSeekProvider(context.env);
+}
+
+export async function resolveLLM(context: { request: Request; env: Env; data: any; waitUntil?: (promise: Promise<any>) => void }): Promise<LLMProvider> {
+    const provider = await resolveProvider(context);
+    if ((context.env as any).DB) provider.fetch = journalRecorder(context as any).fetch;
+    return provider;
 }
 
 /**

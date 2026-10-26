@@ -244,4 +244,6 @@ data: [DONE]
 
 ## D1 绑定
 
-生产环境以变量名 `DB` 绑定 D1 数据库，并按编号依次执行 `migrations/0001_generation_tasks.sql`、`0002_autonomous_learning.sql`、`0003_generation_task_quota.sql`、`0004_generation_task_planner_lease.sql`。Cloudflare Pages 部署不会自动执行这些 migration；已有数据库发布新版本时只执行尚未应用的后续文件。D1 保存生成任务、单任务成本和公共技术知识；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。
+生产环境以变量名 `DB` 绑定 D1 数据库，按编号执行 `migrations/` 下 `0001` 至 `0006`；已有数据库只执行尚未应用的后续文件。Cloudflare Pages 部署不会自动执行 migration。D1 保存生成任务、单任务成本、公共技术知识、临时 journal 与提交去重状态；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。
+
+工程恢复、增量修改、journal、反馈和 JAR 导入接口及其权限／状态约束见[工程生命周期接口](../../ref/project-lifecycle.md#服务端接口)。公开反馈需要服务端 `GITHUB_FEEDBACK_TOKEN` 及数据分支排除配置；浏览器不持有仓库写入凭据。

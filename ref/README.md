@@ -24,6 +24,15 @@
 
 ## 真实业务链路验证
 
+- [本轮功能检查链接与完成情况](project-lifecycle-checks.md)：逐项列出本地界面预览、真实 Actions／Issue、重放报告及尚未完成的验收范围。
+- [本地工程、公开反馈与 ResolveJAR](project-lifecycle.md)：IndexedDB、过期恢复、增量修改、执行 journal、反馈公开边界、执行工作流安装及真实／模拟验证范围。
+- [公开反馈联调预览](feedback-live-validation.md)：拟公开的自建测试资料、Issue 内容、丢失响应后的重试方式与 Pages 分支配置前提。
+
 - [结构规划与 DeepSeek 真实调用记录](project-tree-real-validation.md)：旧版故障复现、修复版规划和源码生成结果、逐路径静态审查结论；明确区分真实模型调用、模拟预览和未执行的 Java 编译。
 - [DeepSeek Prompt 清单](deepseek-prompts.md)：仅列 Prompt 文件行号、所处阶段、调用代码位置和期望输出要求，包含专项生成规则、Skill／Learning 上下文及遗留接口的使用状态。
 - [DeepSeek Search / Fetch 迁移与验证](deepseek-search-fetch.md)：新接口的调用边界、兼容开关、按次费用，以及真实接口、Learning 核验与缓存续接记录。
+
+## 头像风格偏好
+
+- [用户头像风格偏好](avatar-style-preferences.md)：用户已确认喜欢的白毛狮子头像及其角色、超大色块眼睛、像素颗粒和构图偏好。
+- [已确认头像样本](white-lion-avatar-large-eyes-v9.png)：后续同类头像的优先视觉参考。

@@ -117,6 +117,7 @@ async function callReasoner(
     requireUsage: boolean,
     onThinking: (content: string) => Promise<void>,
     onOutput: (content: string) => Promise<void>,
+    fetchImpl: typeof fetch = fetch,
 ): Promise<{ content: string; usage?: UsageBreakdown }> {
     const ctrl = new AbortController();
     const unlinkParent = linkAbortSignal(ctrl, parentSignal);
@@ -127,7 +128,7 @@ async function callReasoner(
         ctrl.signal,
     );
     try {
-        const resp = await withPreflightDeadline(() => fetch(url, {
+        const resp = await withPreflightDeadline(() => fetchImpl(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
             body: JSON.stringify({
@@ -743,6 +744,7 @@ async function handleClarifyRequest(
                             operationAbort,
                             operationDeadline.signal,
                         ),
+                        llm.fetch,
                     );
                     usage = callRes.usage;
                     assertClarifyOperationActive(operationDeadline.signal);

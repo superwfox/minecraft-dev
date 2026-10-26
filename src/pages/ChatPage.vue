@@ -1,5 +1,6 @@
 <template>
   <div class="chat-page" :class="{ 'is-focus': inFocusPhase }">
+    <p v-if="projectStorage.error" class="reset-error" role="alert">{{ projectStorage.error }}</p>
 
     <!-- ════════ 聚焦阶段：居中输入 + 需求确认 ════════ -->
     <div v-if="inFocusPhase" class="focus-stack">
@@ -8,9 +9,9 @@
           <Blocks :size="42" :stroke-width="1.35" aria-hidden="true"/>
           <h1>
             <span>今天想构建什么</span>
-            <template v-if="welcomeLogin">
+            <template v-if="welcomeName">
               <span>，</span>
-              <span data-font="dynamic" class="welcome-user" :title="welcomeLogin">{{ welcomeLogin }}</span>
+              <span data-font="dynamic" class="welcome-user" :title="welcomeName">{{ welcomeName }}</span>
             </template>
             <span>？</span>
           </h1>
@@ -182,6 +183,7 @@
               />
             </template>
             <div class="composer-actions">
+              <JarImport :disabled="composerDisabled"/>
               <button v-lattice class="action-btn skill-toggle" :class="{ on: trayOpen }" :disabled="composerDisabled" @click="toggleTray" title="技能">
                 <Layers3 :size="17"/><span>技能</span>
                 <span v-if="selected.length" class="skill-toggle-badge">{{ selected.length }}</span>
@@ -226,35 +228,23 @@
                   <section v-if="promptHistoryOpen" v-lattice:two class="prompt-history-menu" aria-label="提示词历史">
                     <div class="prompt-history-head">
                       <strong>提示词历史</strong>
-                      <span>{{ promptHistory.length }} 条</span>
+                      <div class="prompt-history-search-group"><label class="prompt-history-search"><Search :size="14" aria-hidden="true"/><input v-model="historySearch" type="search" maxlength="100" placeholder="搜索提示词" aria-label="搜索历史提示词"/></label><span>{{ historySearch.trim() ? `${filteredPromptHistory.length} / ${promptHistory.length}` : promptHistory.length }} 条</span></div>
                     </div>
                     <div class="prompt-history-list">
-                      <div v-for="entry in promptHistory" :key="entry.id" class="prompt-history-row">
+                      <p v-if="!filteredPromptHistory.length" class="prompt-history-empty">{{ historySearch.trim() ? '没有匹配的提示词' : '暂无历史记录' }}</p>
+                      <div v-for="entry in filteredPromptHistory" :key="entry.id" class="prompt-history-row" :class="{ 'history-reserved': historyMotion[entry.id]?.reserved, 'history-visible': historyMotion[entry.id]?.visible }" @pointerenter="revealHistory(entry.id)" @pointerleave="historyPointerLeave(entry.id, $event)" @focusin="revealHistory(entry.id)" @focusout="historyFocusOut(entry.id, $event)">
                         <button v-lattice
                           type="button"
                           class="prompt-history-main"
-                          title="载入此提示词"
-                          @click="loadHistoryPrompt(entry)"
+                          :title="entry.prompt"
                         >
                           <span data-font="dynamic" class="prompt-history-text">{{ entry.prompt }}</span>
                           <span data-font="dynamic" class="prompt-history-meta">{{ promptHistoryMeta(entry) }}</span>
                         </button>
                         <div class="prompt-history-actions">
-                          <button v-lattice:icon
-                            type="button"
-                            class="prompt-history-icon"
-                            :disabled="!canReplayPromptHistory"
-                            :title="canReplayPromptHistory ? '重新调用' : '请先重置当前任务'"
-                            aria-label="重新调用"
-                            @click="replayHistoryPrompt(entry)"
-                          ><Play :size="15"/></button>
-                          <button v-lattice:icon
-                            type="button"
-                            class="prompt-history-icon"
-                            title="删除记录"
-                            aria-label="删除记录"
-                            @click="deleteHistoryPrompt(entry.id)"
-                          ><X :size="15"/></button>
+                          <button v-lattice:icon type="button" class="prompt-history-icon" title="复制提示词" aria-label="复制提示词" @click="loadHistoryPrompt(entry)"><Copy :size="28"/></button>
+                          <button v-lattice:icon type="button" class="prompt-history-icon" :disabled="!canReplayPromptHistory || !entry.available" :title="entry.available ? '恢复任务' : '旧记录没有工程快照，仅支持复制提示词'" aria-label="恢复任务" @click="replayHistoryPrompt(entry)"><Play :size="28"/></button>
+                          <button v-lattice:icon type="button" class="prompt-history-icon" title="删除记录" aria-label="删除记录" @click="deleteHistoryPrompt(entry.id)"><Trash2 :size="28"/></button>
                         </div>
                       </div>
                     </div>
@@ -319,7 +309,7 @@
 </template>
 
 <script setup lang="ts">
-import {ref, computed, inject, nextTick, onMounted, onBeforeUnmount, watch} from "vue";
+import {ref, reactive, computed, inject, nextTick, onMounted, onBeforeUnmount, watch} from "vue";
 import type {Component, Ref} from "vue";
 import type {ChatBlock} from "../logic/chatState";
 import {chatBlocks, removeChatBlock, removeDraftBlock, resetChat} from "../logic/chatState";
@@ -327,6 +317,10 @@ import {handleUserInput, resumeInterruptedAnalysis, continueAfterSelect, CORE_TY
 import {formatUserPrompt} from "../api/deepseek";
 import {createIdlePromptScheduler, shouldAcceptFormattedPrompt} from "../logic/promptFormatting";
 import type {PrecheckGuidance} from "../logic/promptFormatting";
+import { restoreLocalProject, saveProjectNow, activeProjectId } from "../logic/projectSession";
+import { projectStorage, projectOwner, dbGet, dbPut } from "../logic/projectDb";
+import { activeProjectKey } from "../logic/projectSession";
+import JarImport from "../components/JarImport.vue";
 import GenerateProgress from "../components/GenerateProgress.vue";
 import ClarifyCards from "../components/ClarifyCards.vue";
 import MarkdownComposer from "../components/MarkdownComposer.vue";
@@ -354,6 +348,9 @@ import {
     CircleAlert,
     CircleCheck,
     Clock3,
+    Copy,
+    Search,
+    Trash2,
     Info,
     KeyRound,
     Layers3,
@@ -377,6 +374,25 @@ const centerText = inject<Ref<string>>("centerText")!;
 
 const inputText = ref("");
 const extraInput = ref("");
+let composerSaveTimer: ReturnType<typeof setTimeout>;
+let restoringComposer = false;
+const composerDraftKey = () => activeProjectKey() ? `${activeProjectKey()}:composer` : projectOwner() ? `${projectOwner()}:composer` : "";
+watch([inputText, extraInput], () => {
+    if (restoringComposer) return;
+    const key = composerDraftKey(), value = { input: inputText.value, extra: extraInput.value };
+    if (!key) return;
+    clearTimeout(composerSaveTimer); composerSaveTimer = setTimeout(() => dbPut("drafts", key, value).catch(() => {}), 400);
+});
+async function restoreComposerDraft() {
+    const key = composerDraftKey(); if (!key) return;
+    const draft = await dbGet<any>("drafts", key);
+    if (composerDraftKey() !== key) return;
+    restoringComposer = true;
+    inputText.value = draft?.input || ""; extraInput.value = draft?.extra || "";
+    await nextTick(); restoringComposer = false;
+}
+watch(() => authState.user?.id || authState.user?.login, () => { if (!authState.user) { inputText.value = ""; extraInput.value = ""; } else restoreComposerDraft().catch(() => {}); });
+
 const lastSubmitted = ref(""); // 记住上次提交的需求，ESC 中断后恢复回输入框
 const sending = ref(false);
 const composerEl = ref<{ focusEnd: () => void } | null>(null);
@@ -384,6 +400,28 @@ const liveBodyEl = ref<HTMLElement | null>(null);
 const promptHistoryRootEl = ref<HTMLElement | null>(null);
 const livePinned = ref(true);
 const promptHistoryOpen = ref(false);
+const historySearch = ref("");
+const filteredPromptHistory = computed(() => { const keyword = historySearch.value.trim().toLocaleLowerCase(); return promptHistory.filter(entry => !keyword || entry.prompt.toLocaleLowerCase().includes(keyword)); });
+const historyMotion = reactive<Record<string, { reserved: boolean; visible: boolean }>>({});
+const historyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function revealHistory(id: string) {
+    clearTimeout(historyTimers.get(id));
+    historyMotion[id] ||= { reserved: false, visible: false };
+    const state = historyMotion[id];
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (state.reserved) { state.visible = true; return; }
+    state.reserved = true;
+    historyTimers.set(id, setTimeout(() => state.visible = true, reduced ? 0 : 240));
+}
+function concealHistory(id: string) {
+    clearTimeout(historyTimers.get(id)); const state = historyMotion[id]; if (!state) return;
+    state.visible = false;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    historyTimers.set(id, setTimeout(() => state.reserved = false, reduced ? 0 : 160));
+}
+function historyFocusOut(id: string, event: FocusEvent) { if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node)) concealHistory(id); }
+function historyPointerLeave(id: string, event: PointerEvent) { const focused = document.activeElement; if (!focused || !focused.matches(':focus-visible') || !(event.currentTarget as HTMLElement).contains(focused)) concealHistory(id); }
+
 const showResetModal = ref(false);
 const resetting = ref(false);
 const resetError = ref("");
@@ -493,7 +531,7 @@ const showWelcome = computed(() =>
     && !sending.value
     && inputText.value.length === 0
 );
-const welcomeLogin = computed(() => authState.user?.login?.trim() || "");
+const welcomeName = computed(() => authState.user?.name?.trim() || authState.user?.login?.trim() || "");
 const fallbackText = computed(() => activeDraft.value?.streamText || "");
 const statusText = computed(() => {
     if (sending.value) return "正在分析需求…";
@@ -755,9 +793,7 @@ const composerDisabled = computed(() =>
 const canOpenPromptHistory = computed(() => !composerDisabled.value && promptHistory.length > 0);
 const canReplayPromptHistory = computed(() =>
     canOpenPromptHistory.value
-    && genTask.phase === "idle"
-    && !genTask.taskId
-    && !activeDraft.value
+    && !generationWorkActive.value
     && !selectingBlock.value
 );
 const promptHistoryTriggerTitle = computed(() =>
@@ -884,7 +920,7 @@ watch(composerDisabled, (disabled) => {
     }
 }, { immediate: true });
 
-loadPromptHistory();
+loadPromptHistory().catch(() => {});
 
 watch(trayOpen, (open) => {
     if (open) promptHistoryOpen.value = false;
@@ -1052,27 +1088,23 @@ function togglePromptHistory() {
     promptHistoryOpen.value = !promptHistoryOpen.value;
 }
 
-function loadHistoryPrompt(entry: PromptHistoryEntry) {
+async function loadHistoryPrompt(entry: PromptHistoryEntry) {
     if (composerDisabled.value) return;
-    promptHistoryOpen.value = false;
-    resetFormatOffer(true, true);
-    inputText.value = entry.prompt;
-    nextTick(() => composerEl.value?.focusEnd());
+    try { await navigator.clipboard.writeText(entry.prompt); } catch { resetError.value = "复制失败，请允许剪贴板访问"; }
+
 }
 
-function replayHistoryPrompt(entry: PromptHistoryEntry) {
-    if (!canReplayPromptHistory.value) return;
-    promptHistoryOpen.value = false;
-    trayOpen.value = false;
-    resetFormatOffer(true, true);
-    inputText.value = "";
-    lastSubmitted.value = entry.prompt;
-    setSelectedSkills(entry.skillIds);
-    startGenerate(entry.prompt, entry.coreType, entry.version).catch(() => {});
+async function replayHistoryPrompt(entry: PromptHistoryEntry) {
+    if (!canReplayPromptHistory.value || !entry.available) return;
+    interruptGenerate({ preserve: true });
+    promptHistoryOpen.value = false; trayOpen.value = false;
+    try { await restoreLocalProject(entry.id); } catch(error) { resetError.value = String(error); }
 }
 
-function deleteHistoryPrompt(id: string) {
-    removePromptHistoryEntry(id);
+async function deleteHistoryPrompt(id: string) {
+    await saveProjectNow();
+    if (activeProjectId() === id) { interruptGenerate({ preserve: false }); resetGenTask(); resetChat(); }
+    await removePromptHistoryEntry(id);
     if (promptHistory.length === 0) promptHistoryOpen.value = false;
 }
 
@@ -1147,6 +1179,7 @@ async function doReset() {
     cancelCurrentWork();
     persistSession();
     try {
+        await saveProjectNow();
         await deleteRemoteTask(tid);
         resetChat();
         clearSession();
@@ -1207,10 +1240,9 @@ onMounted(() => {
     window.addEventListener("keydown", onKeydown);
     window.addEventListener("pagehide", onPageHide);
     document.addEventListener("pointerdown", onDocumentPointerDown);
+    window.addEventListener("project-restored", restoreComposerDraft);
 
-    if (genTask.phase === "idle" && !genTask.taskId) {
-        restoreGenTask();
-    }
+
     if (activeIncomplete.value && !inputText.value) {
         inputText.value = activeDraft.value?.userMessages.join("\n\n") || "";
     }
@@ -1218,10 +1250,12 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+    for (const timer of historyTimers.values()) clearTimeout(timer);
     window.removeEventListener("keydown", onTrayEscapeCapture, true);
     window.removeEventListener("keydown", onKeydown);
     window.removeEventListener("pagehide", onPageHide);
     document.removeEventListener("pointerdown", onDocumentPointerDown);
+    window.removeEventListener("project-restored", restoreComposerDraft);
     trayOpen.value = false;
     cancelCurrentWork();
     persistSession();
@@ -1761,6 +1795,7 @@ watch(() => genTask.phase, (p) => {
   opacity: 0.3;
   cursor: not-allowed;
 }
+
 .prompt-history-popover-enter-active,
 .prompt-history-popover-leave-active {
   transition: opacity 0.16s ease, transform 0.16s ease;
@@ -2313,4 +2348,25 @@ watch(() => genTask.phase, (p) => {
 }
 
 }
+</style>
+
+<style scoped>
+@layer lattice {
+.prompt-history-search-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.prompt-history-search { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-soft); padding: 7px 10px; color: var(--text-muted); }
+.prompt-history-search input { width: 125px; min-width: 0; padding: 0; margin: 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 11px; line-height: 1.5; outline-offset: 3px; }
+.prompt-history-search-group > span { white-space: nowrap; }
+.prompt-history-empty { margin: 0; padding: 20px; font-size: 12px; color: var(--text-muted); }
+.prompt-history-row { --history-card-height: 92px; display: grid; grid-template-columns: minmax(0, 1fr) 0px; column-gap: 0; align-items: stretch; transition: grid-template-columns .24s ease, column-gap .24s ease; }
+.prompt-history-row.history-reserved { grid-template-columns: minmax(0, 1fr) 160px; column-gap: 10px; }
+.prompt-history-main { box-sizing: border-box; height: var(--history-card-height); }
+.prompt-history-actions { width: 100%; height: var(--history-card-height); min-width: 0; overflow: hidden; display: flex; flex-wrap: nowrap; gap: 8px; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .16s ease, visibility 0s linear .16s; }
+.history-visible .prompt-history-actions { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
+.prompt-history-actions .prompt-history-icon { box-sizing: border-box; width: 48px; height: var(--history-card-height); min-width: 48px; min-height: var(--history-card-height); flex: 0 0 48px; padding: 10px; }
+@media (prefers-reduced-motion: reduce) { .prompt-history-row, .prompt-history-actions { transition: none; } }
+}
+</style>
+
+<style scoped>
+.prompt-history-search input { background-color: transparent; }
 </style>

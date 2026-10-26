@@ -19,7 +19,7 @@ export function checkNodeContract(tree: ProjectTree, node: TreeNode, content: st
     const test = (pattern: string, flags = "m") => new RegExp(pattern, flags).test(content);
     if (nodeFqcn(tree, node)) {
         const summary = extractFileSummary(nodePath(tree, node), content);
-        add("class", `类名 ${node.id}`, test(`\\b(class|interface|enum|record)\\s+${escape(node.id)}\\b`));
+        add("class", `类名 ${node.id}`, test(`\\b(class|interface|enum|record)\\s+${escape(node.sourceClass || node.id)}\\b`));
         add("package", `包 ${nodePackage(tree, node)}`, test(`^\\s*package\\s+${escape(nodePackage(tree, node))}\\s*;`));
         node.contract.methods.forEach((method, index) => add(`method:${index}`, `方法 ${method.name}(${parameterCount(method.params)} 参)`, !!summary.publicMethods?.some(m => m.name === method.name && parameterCount(m.params) === parameterCount(method.params))));
         node.contract.constructors.forEach((ctor, index) => add(`constructor:${index}`, `构造器 ${node.id}(${parameterCount(ctor.params)} 参)`, !!summary.constructors?.some(c => parameterCount(c.params) === parameterCount(ctor.params))));
@@ -36,12 +36,15 @@ export function checkNodeContract(tree: ProjectTree, node: TreeNode, content: st
             add("main", "继承 JavaPlugin", test("\\bextends\\s+(?:org\\.bukkit\\.plugin\\.java\\.)?JavaPlugin\\b"));
             for (const other of tree.nodes) {
                 for (const cmd of other.contract.commands) add(`command:${cmd.name}`, `命令 /${cmd.name}`, test(`getCommand\\(\\s*"${escape(cmd.name)}"\\s*\\)`));
-                if (other.kind === "ListenerGen" && other.contract.events.length) add(`listener:${other.id}`, `注册监听 ${other.id}`, test(`\\bnew\\s+${escape(other.id)}\\s*\\(`));
-                if (["TaskGen", "ManagerGen"].includes(other.kind)) add(`reference:${other.id}`, `引用 ${other.id}`, test(`\\b${escape(other.id)}\\b`));
+                const className = other.sourceClass || other.id;
+                if (other.kind === "ListenerGen" && other.contract.events.length) add(`listener:${other.id}`, `注册监听 ${className}`, test(`\\bnew\\s+${escape(className)}\\s*\\(`));
+                if (["TaskGen", "ManagerGen"].includes(other.kind)) add(`reference:${other.id}`, `引用 ${className}`, test(`\\b${escape(className)}\\b`));
             }
         }
     } else if (node.id === "plugin.yml") {
-        add("main", `主类 ${tree.project.packageName}.Main`, test(`^main:\\s*["']?${escape(tree.project.packageName)}\\.Main["']?\\s*$`));
+        const main = tree.nodes.find(candidate => candidate.kind === "MainGen");
+        const mainClass = main ? nodeFqcn(tree, main) : `${tree.project.packageName}.Main`;
+        add("main", `主类 ${mainClass}`, test(`^main:\\s*["']?${escape(mainClass)}["']?\\s*$`));
         const block = content.match(/^commands:\s*\r?\n((?:[ \t]+[^\n]*\n?|\s*\n)*)/m)?.[1] ?? "";
         for (const cmd of tree.nodes.flatMap(n => n.contract.commands)) add(`command:${cmd.name}`, `命令 /${cmd.name}`, new RegExp(`^[ \\t]+${escape(cmd.name)}\\s*:`, "m").test(block));
     } else if (node.id === "config.yml") {
@@ -62,6 +65,7 @@ const MAIN_WIRED_KINDS = new Set(["CommandGen", "ListenerGen", "TaskGen", "Manag
 export function nodeGenerationContext(tree: ProjectTree, node: TreeNode): string {
     const module = tree.modules.find(m => m.id === node.moduleId);
     const lines = ["结构树成员契约（必须全部实现且签名一致）：", `所在模块 ${module?.title}（${node.moduleId}）：${module?.responsibility}`, `文件 ${nodePath(tree, node)}`, `职责：${node.responsibility}`, ...contractSignatureLines(node)];
+    if (node.sourceClass) lines.push(`导入工程实际类名：${node.sourceClass}；结构树 id ${node.id} 仅用于绑定，不能将类重命名。`);
     if (nodeFqcn(tree, node)) lines.push(`FQCN: ${nodeFqcn(tree, node)}`, `强制包声明：package ${nodePackage(tree, node)};`, publicMethodRule(node));
     for (const id of node.depends) {
         const dependency = tree.nodes.find(n => n.id === id);
@@ -71,6 +75,8 @@ export function nodeGenerationContext(tree: ProjectTree, node: TreeNode): string
     for (const path of tree.paths ?? []) if (path.nodes.some(step => step.fileIds.includes(node.id))) lines.push(`需求路径 ${path.title}：`, ...path.nodes.map((step, index) => `${index + 1}. ${step.title}：${step.summary}；实现文件 ${step.fileIds.join(", ")}`));
     if (node.id === "plugin.yml") {
         const deps = tree.project.externalDeps;
+        const main = tree.nodes.find(candidate => candidate.kind === "MainGen");
+        if (main) lines.push(`插件描述文件必须使用实际入口 main: ${nodeFqcn(tree, main)}；保留已有主类名。`);
         lines.push("全部命令（含权限、usage、别名和 description）：", ...tree.nodes.flatMap(n => contractSignatureLines(n).filter(s => s.startsWith("命令"))), deps.length ? `外部依赖 ${deps.join(", ")}，缺失后插件无法工作的写入 depend，可降级运行的写入 softdepend。` : "外部依赖：无，不要声明 depend 或 softdepend。");
     }
     if (node.id === "config.yml") for (const key of new Set(tree.nodes.flatMap(n => n.contract.configKeys))) lines.push(`配置 ${key}，使用者：${tree.nodes.filter(n => n.contract.configKeys.includes(key)).map(n => n.id).join(", ")}`);
@@ -81,5 +87,5 @@ export function nodeGenerationContext(tree: ProjectTree, node: TreeNode): string
     return lines.join("\n");
 }
 export function nodeReviewContext(tree: ProjectTree, node: TreeNode): string {
-    return [`结构树文件 ${nodeFqcn(tree, node) || node.id}`, ...contractSignatureLines(node), `全树类名列表：${tree.nodes.filter(n => nodeFqcn(tree, n)).map(n => n.id).join(", ")}`, `关联需求路径：${JSON.stringify((tree.paths ?? []).filter(path => path.nodes.some(step => step.fileIds.includes(node.id))))}`].join("\n");
+    return [`结构树文件 ${nodeFqcn(tree, node) || node.id}`, ...contractSignatureLines(node), `全树类名列表：${tree.nodes.filter(n => nodeFqcn(tree, n)).map(n => n.sourceClass || n.id).join(", ")}`, `关联需求路径：${JSON.stringify((tree.paths ?? []).filter(path => path.nodes.some(step => step.fileIds.includes(node.id))))}`].join("\n");
 }

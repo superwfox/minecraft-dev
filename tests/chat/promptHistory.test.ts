@@ -1,87 +1,31 @@
-import {beforeEach, describe, expect, it, vi} from "vitest";
-import {
-    loadPromptHistory,
-    promptHistory,
-    recordPromptHistory,
-    removePromptHistoryEntry,
-} from "../../src/logic/promptHistory";
-
-function memoryStorage(): Storage {
-    const values = new Map<string, string>();
-    return {
-        get length() { return values.size; },
-        clear() { values.clear(); },
-        getItem(key: string) { return values.get(key) ?? null; },
-        key(index: number) { return [...values.keys()][index] ?? null; },
-        removeItem(key: string) { values.delete(key); },
-        setItem(key: string, value: string) { values.set(key, String(value)); },
-    };
-}
-
-describe("task prompt history", () => {
-    beforeEach(() => {
-        vi.restoreAllMocks();
-        vi.stubGlobal("localStorage", memoryStorage());
-        loadPromptHistory();
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const memory = vi.hoisted(() => ({ owner: "live:alice", values: new Map<string, any>(), fail: false }));
+vi.mock("../../src/logic/projectDb", () => ({
+    projectOwner: () => memory.owner,
+    dbList: async (_store: string, prefix: string, select?: (value: any) => any) => [...memory.values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: select ? select(value) : value })),
+    dbPut: async (_store: string, key: string, value: unknown) => { if (memory.fail) throw new Error("QuotaExceededError"); memory.values.set(key, value); },
+    deleteProjectData: async (owner: string, id: string) => { memory.values.delete(`${owner}:${id}`); },
+}));
+import { loadPromptHistory, migratePromptHistory, promptHistory, removePromptHistoryEntry } from "../../src/logic/promptHistory";
+describe("task project history", () => {
+    beforeEach(() => { memory.values.clear(); memory.owner = "live:alice"; memory.fail = false; vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 }))); });
+    it("keeps distinct tasks with the same prompt without the old twenty-entry eviction", async () => {
+        for (let index = 0; index < 25; index++) memory.values.set(`live:alice:${index}`, { meta: { id: String(index), prompt: "相同需求", lastUsedAt: index } });
+        await loadPromptHistory(); expect(promptHistory).toHaveLength(25); expect(promptHistory[0].id).toBe("24");
     });
-
-    it("normalizes, deduplicates, and moves an identical invocation to the front", () => {
-        vi.spyOn(Date, "now").mockReturnValueOnce(1_000).mockReturnValueOnce(2_000);
-        recordPromptHistory({
-            prompt: "  第一行\r\n第二行  ",
-            coreType: " PAPER ",
-            version: " 1.21.4 ",
-            skillIds: ["economy", "economy", " quests "],
-        });
-        recordPromptHistory({
-            prompt: "第一行\n第二行",
-            coreType: "PAPER",
-            version: "1.21.4",
-            skillIds: ["economy", "quests"],
-        });
-
-        expect(promptHistory).toHaveLength(1);
-        expect(promptHistory[0]).toMatchObject({
-            prompt: "第一行\n第二行",
-            coreType: "PAPER",
-            version: "1.21.4",
-            skillIds: ["economy", "quests"],
-            createdAt: 1_000,
-            lastUsedAt: 2_000,
-        });
+    it("isolates accounts and preview namespace", async () => {
+        memory.values.set("live:alice:one", { meta: { id: "one" } }); memory.values.set("preview:alice:two", { meta: { id: "two" } }); memory.values.set("live:bob:three", { meta: { id: "three" } });
+        await loadPromptHistory(); expect(promptHistory.map(row => row.id)).toEqual(["one"]);
+        memory.owner = "live:bob"; await loadPromptHistory(); expect(promptHistory.map(row => row.id)).toEqual(["three"]);
     });
-
-    it("persists one browser-local history and reloads it", () => {
-        recordPromptHistory({
-            prompt: "本地插件需求",
-            coreType: "PAPER",
-            version: "1.21.4",
-            skillIds: [],
-        });
-        promptHistory.splice(0, promptHistory.length);
-        loadPromptHistory();
-        expect(promptHistory.map(entry => entry.prompt)).toEqual(["本地插件需求"]);
+    it("cleans only the deleted task and attempts remote cleanup", async () => {
+        memory.values.set("live:alice:one", { meta: { id: "one", taskId: "remote-one" } }); memory.values.set("live:alice:two", { meta: { id: "two" } });
+        await loadPromptHistory(); await removePromptHistoryEntry("one"); expect(promptHistory.map(row => row.id)).toEqual(["two"]);
+        expect(fetch).toHaveBeenCalledWith("/api/generate/task?taskId=remote-one", { method: "DELETE" });
     });
-
-    it("keeps the newest twenty entries and supports deleting one record", () => {
-        const now = vi.spyOn(Date, "now");
-        for (let index = 0; index < 22; index++) {
-            now.mockReturnValue(1_000 + index);
-            recordPromptHistory({
-                prompt: `需求 ${index}`,
-                coreType: "PAPER",
-                version: "1.21.4",
-                skillIds: [],
-            });
-        }
-
-        expect(promptHistory).toHaveLength(20);
-        expect(promptHistory[0].prompt).toBe("需求 21");
-        expect(promptHistory.at(-1)?.prompt).toBe("需求 2");
-
-        const removedId = promptHistory[0].id;
-        removePromptHistoryEntry(removedId);
-        expect(promptHistory).toHaveLength(19);
-        expect(promptHistory.some(entry => entry.id === removedId)).toBe(false);
+    it("does not delete legacy storage until migration completes", async () => {
+        const remove = vi.fn(); vi.stubGlobal("localStorage", { getItem: () => JSON.stringify([{ id: "old", prompt: "legacy" }]), removeItem: remove });
+        memory.fail = true; await expect(migratePromptHistory("live:alice")).rejects.toThrow(); expect(remove).not.toHaveBeenCalled();
+        memory.fail = false; await migratePromptHistory("live:alice"); expect(remove).toHaveBeenCalledOnce(); expect(memory.values.get("live:alice:legacy_old").meta.available).toBe(false);
     });
 });

@@ -2,11 +2,16 @@ import { resolveLLM, taskBillingProviderFor } from "../../_lib/llm";
 import { ClientCancelledError, isClientCancelled } from "../../_lib/clientAbort";
 import { getSkillBundles } from "../../_lib/skills";
 import { assertBoundTaskStoreSchema, cleanupExpiredTasks, putTaskState, TASK_STATE_TTL_SECONDS, TaskStoreUnavailableError, deleteTask, hasOwnedTask, renewOwnedTask } from "../../_lib/taskStore";
+import { getOwnedTask } from "../../_lib/taskStore";
+import { deleteBranch } from "../../_lib/github";
+import { BUILD_REPO, projectGit } from "../../_lib/projectGithub";
+import { cleanupProjectJournal } from "../../_lib/projectJournal";
 
 interface Env {
     DB?: D1Database;
     DEEPSEEK_API_KEY: string;
     TASKS: KVNamespace;
+    GITHUB_PAT?: string;
 }
 
 function json(data: unknown, status: number): Response {
@@ -41,7 +46,30 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
         return json({ error: "Task not found", code: "TASK_NOT_FOUND" }, 404);
     }
 
+    const raw = context.env.GITHUB_PAT ? await getOwnedTask(context.env, taskId, uid) : null;
     await deleteTask(context.env, taskId, uid);
+    if (context.env.DB || raw && context.env.GITHUB_PAT) context.waitUntil((async () => {
+        const token = context.env.GITHUB_PAT;
+        if (raw && token) {
+            const state = JSON.parse(raw);
+            if (state.runId) await projectGit(token, BUILD_REPO, `/actions/runs/${state.runId}/cancel`, "POST").catch(() => {});
+            if (state.buildBranch) await deleteBranch(token, state.buildBranch).catch(() => {});
+        }
+        const db = context.env.DB; if (!db) return;
+        const rows = await db.prepare("SELECT submission_id,state_json FROM project_submissions WHERE owner_uid=? AND kind='jar'").bind(uid).all<{ submission_id: string; state_json: string }>();
+        for (const row of rows.results || []) {
+            const saved = JSON.parse(row.state_json); if (saved.taskId !== taskId) continue;
+            if (token) {
+                const runs = saved.runId ? [] : (await projectGit(token, BUILD_REPO, "/actions/workflows/resolve-jar.yml/runs?event=workflow_dispatch&per_page=100").catch(() => ({}))).workflow_runs || [];
+                const runId = saved.runId || runs.find((run: any) => run.display_title === `ResolveJAR ${row.submission_id}`)?.id;
+                if (runId) await projectGit(token, BUILD_REPO, `/actions/runs/${runId}/cancel`, "POST").catch(() => {});
+                await deleteBranch(token, `resolve-input-${row.submission_id}`).catch(() => {});
+            }
+            await db.prepare("DELETE FROM project_submissions WHERE submission_id=? AND owner_uid=? AND kind='jar'").bind(row.submission_id, uid).run();
+        }
+        await db.prepare("DELETE FROM project_journal WHERE task_id=? AND owner_uid=?").bind(taskId, uid).run();
+        await db.prepare("DELETE FROM project_journal_health WHERE task_id=? AND owner_uid=?").bind(taskId, uid).run();
+    })().catch(() => {}));
     return new Response(null, {
         status: 204,
         headers: { "Cache-Control": "no-store" },
@@ -112,8 +140,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const skills = skillIds.length ? await getSkillBundles(context.env, skillIds, { signal }) : [];
             assertClientActive();
             const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            context.data.journalTaskId = taskId;
             const state = {
                 taskId,
+                revisionId: crypto.randomUUID(),
+                projectOrigin: "prompt",
                 uid,
                 billingProvider: taskBillingProviderFor(llm),
                 status: "clarifying",
@@ -145,7 +176,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await putTaskState(context.env, taskId, state, TASK_STATE_TTL_SECONDS, uid);
             persistedTaskId = taskId;
             assertClientActive();
-            context.waitUntil(cleanupExpiredTasks(context.env).catch(() => { }));
+            context.waitUntil(Promise.allSettled([cleanupExpiredTasks(context.env), cleanupProjectJournal(context.env.DB)]));
             const expiresAt = Math.floor(Date.now() / 1000) * 1000
                 + TASK_STATE_TTL_SECONDS * 1000;
             return new Response(JSON.stringify({ taskId, expiresAt, skillsLoaded: skills.length }), {

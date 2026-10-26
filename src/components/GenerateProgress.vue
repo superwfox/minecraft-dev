@@ -16,7 +16,9 @@
               title="下载已脱敏的生成与联网学习诊断（JSON）">
         ⬇ 安全 Debug
       </button>
+      <button v-lattice v-if="genTask.taskId && ['done', 'error'].includes(genTask.phase)" class="gen-super-toggle" @click="feedback?.show()">反馈</button>
     </div>
+    <ProjectFeedback ref="feedback"/>
 
     <details v-if="genTask.learningProgress.status !== 'idle' || genTask.negativeFactsUsed.length" class="gen-card"><summary>查证与知识记录</summary>
       <section v-if="genTask.learningProgress.status !== 'idle'" v-lattice:two class="learning-progress"
@@ -118,7 +120,7 @@
         <span>{{ genTask.phase === "uploading" ? "上传中..." : "构建中，请稍候..." }}</span>
       </div>
       <div v-if="genTask.phase === 'done'" class="gen-done">
-        <a v-lattice :href="downloadUrl" class="gen-download-btn">↓ 下载 JAR</a>
+        <button v-lattice class="gen-download-btn" @click="downloadJar">↓ 下载 JAR</button>
         <button v-lattice class="gen-download-btn" :disabled="sourceBusy || !sourceReady" :aria-busy="sourceBusy" @click="downloadSource">↓ 下载源码 ZIP</button>
       </div>
     </div>
@@ -143,6 +145,7 @@
 
     <button v-lattice v-if="sourceReady && ['error', 'interrupted'].includes(genTask.phase)" class="gen-download-btn" :disabled="sourceBusy" :aria-busy="sourceBusy" @click="downloadSource">↓ 下载源码 ZIP</button>
     <p v-if="sourceError" role="alert" data-font="dynamic">{{ sourceError }}</p>
+    <details v-if="versions.length > 1" class="gen-card"><summary>历史工程版本 · {{ versions.length }}</summary><div v-for="version in versions" :key="version.key" class="gen-error-actions"><span data-font="dynamic">{{ new Date(version.value.savedAt).toLocaleString() }}</span><button v-lattice class="gen-download-btn" @click="versionSource(version.value.checkpoint.revisionId)">下载此版本源码</button><button v-lattice class="gen-download-btn" @click="versionJar(version.value.checkpoint.revisionId)">下载此版本构建</button></div></details>
 
   </div>
 </template>
@@ -156,6 +159,17 @@ import {buildSafeDebugExport} from "../logic/safeDebug";
 import {Play} from "lucide-vue-next";
 import LearningEvidence from "./LearningEvidence.vue";
 import ProjectTree from "./ProjectTree.vue";
+import ProjectFeedback from "./ProjectFeedback.vue";
+import { downloadBuildArtifact, cacheBuildArtifact } from "../logic/generateHandler";
+import { syncProjectCheckpoint } from "../logic/projectSession";
+import { localVersions } from "../logic/projectSession";
+const versions = ref<any[]>([]);
+watch(() => [genTask.taskId, genTask.phase], async () => { versions.value = await localVersions().catch(() => []); }, { immediate: true });
+async function versionSource(id: string) { try { await downloadSourceZip(id); } catch (error) { sourceError.value = String(error); } }
+async function versionJar(id: string) { try { await downloadBuildArtifact(id); } catch (error) { sourceError.value = String(error); } }
+const feedback = ref<InstanceType<typeof ProjectFeedback>>();
+async function downloadJar() { try { await downloadBuildArtifact(); } catch (error) { sourceError.value = String(error); } }
+watch(() => genTask.phase, async (phase, previous) => { if (phase === 'done' && previous !== 'idle') { try { await syncProjectCheckpoint(); await cacheBuildArtifact(); } catch (error) { sourceError.value = String(error); } } });
 
 const treeMode = computed(() => genTask.phase === 'tree_planning' ? 'draft' : genTask.phase === 'tree_confirming' ? 'confirm' : 'progress');
 const sourceBusy = ref(false), sourceError = ref('');

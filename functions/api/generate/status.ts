@@ -5,6 +5,8 @@ import { buildRepairRecoverySnapshot } from "../../_lib/buildRepairRecovery";
 import { evaluateKnowledgeUsage } from "../../_lib/learning/store";
 import { currentFixRepairAuthorization } from "../../_lib/learning/fixAuthorization";
 import { publicPathChecks } from "../../_lib/projectPathReview";
+import { getRunJobs, getJobLogs } from "../../_lib/github";
+import { journalRecorder } from "../../_lib/projectJournal";
 
 interface Env {
     DB?: D1Database;
@@ -102,6 +104,31 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const { status, conclusion, headSha } = await getRunStatus(token, state.runId);
+    if (status === "completed" && state.status !== "done" && state.status !== "error") {
+        const recorder = journalRecorder(context as any);
+        // A terminal response is a checkpoint boundary: persist its logs before
+        // clients export diagnostics, rather than racing a background waitUntil.
+        try {
+            const jobs = await getRunJobs(token, state.runId);
+            if (!jobs.length) throw new Error("Completed build has no job records");
+            let complete = true;
+            for (const job of jobs) {
+                const identity = { runId: state.runId, headSha, jobId: job.id, name: job.name, conclusion: job.conclusion };
+                // GitHub does not create downloadable logs for an unexecuted job.
+                if (job.conclusion === "skipped") {
+                    await recorder.record("build.logs", { ...identity, content: "", noLogReason: "job_not_executed" });
+                    continue;
+                }
+                try { await recorder.record("build.logs", { ...identity, content: await getJobLogs(token, job.id) }); }
+                catch (error) {
+                    complete = false;
+                    await recorder.record("build.logs", { ...identity, gap: "build_log_unavailable", error: String(error) }, true);
+                }
+            }
+            if (complete) await recorder.record("build.logs.complete", { runId: state.runId, headSha, jobIds: jobs.map(job => job.id) });
+        }
+        catch (error) { await recorder.record("build.logs", { runId: state.runId, gap: "build_log_unavailable", error: String(error) }, true); }
+    }
     if (state.compileCheck && headSha !== state.compileCheck.headSha) return new Response(JSON.stringify({ status: "error", error: "构建提交与当前待验证代码不一致", code: "BUILD_REVISION_MISMATCH", pathChecks: publicPathChecks(state) }), { status: 409, headers: { "Content-Type": "application/json" } });
 
     if (status !== "completed") {

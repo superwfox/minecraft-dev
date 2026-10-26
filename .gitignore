@@ -56,4 +56,6 @@ scripts
 scripts/*
 !scripts/build-minecraft-fonts.mjs
 !scripts/update-minecraft-versions.mjs
+!scripts/resolve-jar.py
+!scripts/replay-project.mjs
 planReference

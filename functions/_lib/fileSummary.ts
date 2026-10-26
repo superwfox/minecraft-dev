@@ -46,10 +46,9 @@ export function extractFileSummary(
 
     if (className) {
         const escapedClassName = escapeRegExp(className);
-        const publicConstructors = collectMatches(
-            content,
+        const publicConstructors = Array.from(content.matchAll(
             new RegExp(`^\\s*public\\s+${escapedClassName}\\s*\\(([^)]*)\\)`, "gm"),
-        ).map(params => ({ params }));
+        ), match => ({ params: match[1].trim() }));
         const anyConstructor = new RegExp(
             `^\\s*(?:(?:public|protected|private)\\s+)?${escapedClassName}\\s*\\(`,
             "m",

@@ -63,7 +63,7 @@ afterEach(() => {
 });
 
 describe("expired generation task recovery", () => {
-    it("clears the snapshot before clarification when server renewal rejects the task", async () => {
+    it("preserves the local snapshot when renewal rejects a task without a recovery receipt", async () => {
         const now = Date.now();
         genTask.taskId = "task-expired";
         genTask.taskExpiresAt = now - 1;
@@ -95,13 +95,12 @@ describe("expired generation task recovery", () => {
 
         expect(fetchWithByokFallbackMock).toHaveBeenCalledOnce();
         expect(genTask).toMatchObject({
-            taskId: "",
-            taskExpiresAt: 0,
+            taskId: "task-expired",
             phase: "error",
             userPrompt: "创建一个唯一 Boss 插件",
-            error: "任务已超过服务端有效期或已被清理，请重新开始生成",
+            error: "服务端任务已过期，尚无完整恢复凭证。已有本地内容仍保留，可下载后重新创建。",
         });
-        expect(localStorage.getItem(GEN_KEY)).toBeNull();
+        expect(localStorage.getItem(GEN_KEY)).not.toBeNull();
     });
 
     it("accepts server renewal after the local expiry hint and does not retry Clarify 404", async () => {
@@ -144,14 +143,13 @@ describe("expired generation task recovery", () => {
             .filter(([url]) => url === "/api/generate/clarify");
         expect(clarifyCalls).toHaveLength(1);
         expect(genTask).toMatchObject({
-            taskId: "",
-            taskExpiresAt: 0,
+            taskId: "task-expired",
             phase: "error",
             userPrompt: "创建一个唯一 Boss 插件",
             coreType: "PAPER",
             version: "1.21.4",
             error: "任务已超过服务端有效期或已被清理，请重新开始生成",
         });
-        expect(localStorage.getItem(GEN_KEY)).toBeNull();
+        expect(localStorage.getItem(GEN_KEY)).not.toBeNull();
     });
 });

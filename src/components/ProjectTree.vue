@@ -2,6 +2,7 @@
   <section class="project-tree" aria-label="项目行为路径结构树">
     <header class="pt-header"><div><h1 data-font="dynamic">{{ tree?.project.projectName || '正在规划项目' }}</h1><p>{{ genTask.coreType }} {{ genTask.version }} <span>Java {{ tree?.project.javaVersion || genTask.javaVersion }}</span></p></div><ProjectTreeStatusCard :label="statusLabel" :detail="statusDetail" :busy="busy"/></header>
     <slot/>
+    <details v-if="genTask.importReport" class="pt-operations" :open="!!genTask.importReport.blockers?.length"><summary>JAR 还原记录 · 基线编译{{ genTask.importReport.baseline?.status === 'passed' ? '通过' : '未通过' }}</summary><p v-for="(blocker, index) in genTask.importReport.blockers || []" :key="index" data-font="dynamic">{{ blocker }}</p><p v-if="genTask.importReport.missingClasses?.length" data-font="dynamic">未还原的类：{{ genTask.importReport.missingClasses.join('、') }}</p></details>
     <div v-if="tree" class="path-viewport">
       <div ref="pathViewport" class="path-map" tabindex="0" aria-label="纵向行为路径，可横向滚动">
         <div class="path-canvas">
@@ -18,7 +19,7 @@
     </div>
     <details v-if="mode === 'draft' || genTask.treeOpsLog.length" class="pt-operations"><summary>规划记录 · 第 {{ genTask.treeRound || 1 }} 轮 · {{ genTask.treeToolCallCount }} 项工具调用</summary><p v-for="(operation, index) in genTask.treeOpsLog.slice(-20)" :key="index" data-font="dynamic">{{ operation }}</p></details>
     <div v-if="genTask.preflightActive || mode === 'draft' && (genTask.preflightThinking || genTask.preflightOutput)" class="pt-thinking" :aria-busy="genTask.preflightActive"><details :open="genTask.preflightActive"><summary>结构规划过程</summary><pre data-font="dynamic">{{ genTask.preflightThinking }}{{ genTask.preflightOutput }}</pre></details></div>
-    <TreeGate v-if="mode === 'confirm'" @decision="$emit('decision', $event)"/>
+    <TreeGate v-if="mode === 'confirm' || ['done', 'error'].includes(genTask.phase)" @decision="$emit('decision', $event)"/>
   </section>
 </template>
 

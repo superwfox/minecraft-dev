@@ -76,7 +76,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     );
     let resp: Response;
     try {
-        resp = await fetch(llm.url, {
+        resp = await (llm.fetch ?? fetch)(llm.url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

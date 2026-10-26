@@ -1,5 +1,7 @@
 <template>
+  <div class="markdown-composer-host" :class="{ 'with-media': acceptImages, 'media-disabled': disabled }" @paste="onFramePaste" @dragover.prevent @drop="onDrop">
   <div
+    v-bind="$attrs"
     ref="editorEl"
     class="markdown-composer"
     :class="{ 'is-empty': visuallyEmpty, 'is-disabled': disabled }"
@@ -19,19 +21,34 @@
     @dragover.prevent
     @drop="onDrop"
   ></div>
+  <div v-if="acceptImages && images.length" class="composer-images" aria-label="输入框内的图片">
+    <figure v-for="image in images" :key="image.id" class="composer-image">
+      <img :src="image.url" :alt="image.name || '待提交图片'"/>
+      <button v-if="!disabled" type="button" class="composer-image-remove" aria-label="移除图片" title="移除图片" @click="emit('remove-image', image.id)">×</button>
+    </figure>
+  </div>
+  <slot v-if="acceptImages" name="footer"/>
+  </div>
 </template>
 
 <script setup lang="ts">
 import {nextTick, onMounted, ref, watch} from "vue";
 import {editorToMarkdown, markdownToEditorHtml} from "../logic/composerMarkdown";
+defineOptions({ inheritAttrs: false });
 
 const props = withDefaults(defineProps<{
   modelValue: string;
   placeholder?: string;
   disabled?: boolean;
+  acceptImages?: boolean;
+  images?: { id: string; url: string; name?: string }[];
+  submitOnEnter?: boolean;
 }>(), {
   placeholder: "",
   disabled: false,
+  acceptImages: false,
+  images: () => [],
+  submitOnEnter: true,
 });
 
 const emit = defineEmits<{
@@ -39,6 +56,8 @@ const emit = defineEmits<{
   (event: "submit"): void;
   (event: "composition-start"): void;
   (event: "composition-end"): void;
+  (event: "images", files: File[]): void;
+  (event: "remove-image", id: string): void;
 }>();
 
 const editorEl = ref<HTMLElement | null>(null);
@@ -640,7 +659,7 @@ function handleUnmodifiedEnter(event: Event) {
     return true;
   }
 
-  if (isPlainSingleParagraph()) {
+  if (props.submitOnEnter && isPlainSingleParagraph()) {
     event.preventDefault();
     requestSubmit();
     return true;
@@ -657,7 +676,7 @@ function handleUnmodifiedEnter(event: Event) {
 
 function onKeydown(event: KeyboardEvent) {
   if (props.disabled || event.key !== "Enter" || isImeEvent(event)) return;
-  if (event.metaKey || event.ctrlKey) {
+  if ((event.metaKey || event.ctrlKey) && props.submitOnEnter) {
     event.preventDefault();
     requestSubmit();
     return;
@@ -719,6 +738,8 @@ function insertPlainText(value: string) {
 function onPaste(event: ClipboardEvent) {
   if (props.disabled) return;
   event.preventDefault();
+  const files = Array.from(event.clipboardData?.files || []);
+  if (props.acceptImages && files.length) { event.stopPropagation(); emit("images", files); return; }
   const text = event.clipboardData?.getData("text/plain") || "";
   if (!text) return;
   if (closestWithinRoot("[data-code-fence-draft]")) {
@@ -734,8 +755,13 @@ function onPaste(event: ClipboardEvent) {
 }
 
 function onDrop(event: DragEvent) {
-  // Dropped fragments may carry arbitrary HTML and files; the composer only accepts typed or pasted text.
   event.preventDefault();
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (props.acceptImages && files.length) { event.stopPropagation(); if (!props.disabled) emit("images", files); }
+}
+function onFramePaste(event: ClipboardEvent) {
+  if (!props.acceptImages || props.disabled || !event.clipboardData?.files.length) return;
+  event.preventDefault(); event.stopPropagation(); emit("images", Array.from(event.clipboardData.files));
 }
 
 watch(() => props.modelValue, (value) => {
@@ -751,6 +777,13 @@ onMounted(() => renderMarkdown(props.modelValue));
 </script>
 
 <style scoped>
+.markdown-composer-host { display: contents; }
+.markdown-composer-host.with-media { display: grid; gap: 12px; padding: 16px 18px; border: 1px solid var(--line-soft, #706346); background: var(--surface-0, #080805); }
+.markdown-composer-host.with-media:focus-within { border-color: var(--oak, #c1af77); }
+.composer-images { display: flex; flex-wrap: wrap; gap: 10px; }
+.composer-image { position: relative; width: 112px; height: 76px; margin: 0; padding: 5px; border: 1px solid var(--line-soft, #706346); box-sizing: border-box; }
+.composer-image img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.composer-image-remove { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; padding: 2px; display: grid; place-items: center; border: 1px solid var(--line-soft, #706346); color: var(--text-primary); background: var(--surface-0, #080805); font: 18px/1 sans-serif; cursor: pointer; }
 .markdown-composer {
   position: relative;
   flex: 1;

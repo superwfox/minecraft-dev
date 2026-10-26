@@ -3,6 +3,7 @@ import { checkNodeContract, nodeGenerationContext } from "../../_lib/projectTree
 import { buildFixPrompt } from "../../_lib/prompts";
 import type { FileSummary } from "../../_lib/prompts";
 import { getRunJobs, getJobLogs, getCompileApiEvidence } from "../../_lib/github";
+import { journalRecorder } from "../../_lib/projectJournal";
 import { compileEvidenceFactApplies, compileNegativeEvidence, currentCompileApiEvidence, resolvedCompileDependencies } from "../../_lib/learning/compileApiEvidence";
 import { negativeFactsUsed } from "../../_lib/learning/negativeLearning";
 import { accumulateCosts, type UsageBreakdown, type UsageCostEntry } from "../../_lib/quota";
@@ -174,7 +175,7 @@ async function callAIStream(
     const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), FIX_IDLE_MS); };
     arm();
     try {
-        const resp = await fetch(llm.url, {
+        const resp = await (llm.fetch ?? fetch)(llm.url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
             body: JSON.stringify(body),
@@ -876,6 +877,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             if (!failedJob) throw new Error("未找到构建 Job");
 
             const fullLog = await getJobLogs(token, failedJob.id);
+            await journalRecorder(context as any).record("build.logs", { runId: state.runId, jobId: failedJob.id, content: fullLog });
             assertRepairLease();
             const errorSection = errorLogExcerpt(fullLog);
             const diagnostics = parseBuildDiagnostics(fullLog);

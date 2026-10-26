@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyTreeToolCalls, createInitialTree, nodePath } from "../../functions/_lib/projectTree";
 import { emptyNodeContract } from "../../functions/_lib/projectTree";
-import { activePathRepair, parsePathReview, publicPathChecks, queuePathRepair, queuePathReview, sourceFingerprint, type PathReviewState } from "../../functions/_lib/projectPathReview";
+import { activePathRepair, parsePathReview, pathReviewPrompt, publicPathChecks, queuePathRepair, queuePathReview, sourceFingerprint, type PathReviewState } from "../../functions/_lib/projectPathReview";
 import type { PlanFileItem } from "../../functions/_lib/prompts";
 
 async function fixture() {
@@ -23,6 +23,26 @@ async function fixture() {
 const report = { passed: true, summary: "实现与路径一致", steps: [{ id: "save-home-data", passed: true, detail: "HomeData 提供该路径的数据表示；Main 已实现生命周期入口" }] };
 
 describe("path review evidence", () => {
+    it("provides retained text and binary resource evidence without placing binary payloads in prompts", async () => {
+        const state = await fixture();
+        state.resources = [{ path: "src/main/resources/config.yml", content: "enabled: true" }, { path: "src/main/resources/icon.png", encoding: "base64", content: "cHJpdmF0ZWJpbmFyeQ==" }];
+        const prompt = pathReviewPrompt(state, state.tree.paths[0], "保留配置与图片");
+        expect(prompt.user).toContain("enabled: true");
+        expect(prompt.user).toContain("src/main/resources/icon.png");
+        expect(prompt.user).not.toContain("cHJpdmF0ZWJpbmFyeQ==");
+        const before = await sourceFingerprint(state);
+        state.resources[1].content = "Y2hhbmdlZA==";
+        expect(await sourceFingerprint(state)).not.toBe(before);
+    });
+    it("fingerprints the same effective files as compilation when a generated file replaces a resource", async () => {
+        const state = await fixture();
+        const config = { path: "src/main/resources/config.yml", content: "enabled: true" };
+        state.generatedFiles.push(config); state.resources = [{ ...config, content: "stale: true" }];
+        const before = await sourceFingerprint(state);
+        state.resources[0].content = "obsolete: true";
+        expect(await sourceFingerprint(state)).toBe(before);
+        expect(pathReviewPrompt(state, state.tree.paths[0], "修改配置").user).not.toContain("obsolete: true");
+    });
     it("requires static review and matching successful compilation", async () => {
         const state = await fixture();
         state.pathReviews["save-home"] = parsePathReview(JSON.stringify(report), state, state.tree.paths[0]);

@@ -572,6 +572,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             discovery = await discoverLearningSources({
                 apiKey: llm.apiKey,
+                fetchImpl: llm.fetch,
                 needs: leased.needs.filter(need => !leased!.work.negativeResultIds?.[need.id]),
                 budgetMs: discoveryBudget.budgetMs,
             });
@@ -666,6 +667,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         try {
             fetched = await fetchLearningSources({
                 jobId,
+                fetchImpl: llm.fetch,
                 needs: leased.needs,
                 candidates: leased.work.candidates ?? [],
                 apiKey: llm.apiKey,

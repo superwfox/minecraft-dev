@@ -4,6 +4,7 @@
 export interface Session {
     uid: string;
     login: string;
+    name?: string;
     exp: number;
 }
 
@@ -34,10 +35,12 @@ async function hmac(secret: string, msg: string): Promise<Uint8Array> {
     return new Uint8Array(sig);
 }
 
-export async function signSession(payload: { uid: string; login: string }, secret: string): Promise<string> {
+export async function signSession(payload: { uid: string; login: string; name?: string }, secret: string): Promise<string> {
+    const name = typeof payload.name === "string" ? Array.from(payload.name.trim()).slice(0, 128).join("") : "";
     const data: Session = {
         uid: payload.uid,
         login: payload.login,
+        ...(name ? { name } : {}),
         exp: Math.floor(Date.now() / 1000) + TTL_SEC,
     };
     const body = b64urlEncode(new TextEncoder().encode(JSON.stringify(data)));
