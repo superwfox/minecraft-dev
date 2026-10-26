@@ -130,4 +130,4 @@ ResolveJAR 使用该仓库单独的受控反编译工作流。公开反馈还需
 
 先读本页了解项目，再读 [`CHANGELOG.md`](CHANGELOG.md) 顶部的最新修改记录，随后定位到对应模块。后续核心修改按“日期 → 修改方面 → 编号列表”的格式记录，每次在 CHANGELOG 顶部新增。
 
-深入阅读：[AI 工作流](docs/features/ai-workflow.md) · [Skill 系统](docs/features/skills.md) · [系统架构](docs/technical/architecture.md) · [编译学习闭环](docs/technical/compile-learning.md)。详细文档若与当前实现不一致，以代码为准，并在相关改动中同步修正。
+深入阅读：[生成流水线](docs/technical/generation-pipeline.md) · [Skill 系统](docs/features/skills.md) · [系统架构](docs/technical/architecture.md) · [编译学习闭环](docs/technical/compile-learning.md)。详细文档若与当前实现不一致，以代码为准，并在相关改动中同步修正。

@@ -1,315 +1,120 @@
 # 开发与部署
 
-本文档介绍如何在本地开发踏海项目，以及如何部署到生产环境。
-
 ## 环境要求
 
-- **Node.js**：18.x 或更高
-- **npm**：9.x 或更高
-- **Git**：用于版本控制
+- Node.js 18 或更高（重放 CLI 需要 Node 24+）
+- npm 9 或更高
+- 可选：Python 3（真实 SQLite 回归用例）、JDK（本地重放编译）
 
 ## 本地开发
-
-### 1. 克隆项目
 
 ```bash
 git clone https://github.com/superwfox/minecraft-dev.git
 cd minecraft-dev
-```
-
-### 2. 安装依赖
-
-```bash
 npm install
 ```
 
-### 3. 配置环境变量
-
-在项目根目录创建 `.dev.vars` 文件（注意不是 `.env`）：
+在项目根目录创建 `.dev.vars`（不是 `.env`，且不要提交）：
 
 ```
 DEEPSEEK_API_KEY=sk-...
 DEEPSEEK_RESPONSES_WEB_SEARCH=true
 GITHUB_PAT=ghp_...
+GITHUB_OAUTH_CLIENT_ID=...
+GITHUB_OAUTH_CLIENT_SECRET=...
+SESSION_SECRET=...
 ```
 
-`DEEPSEEK_RESPONSES_WEB_SEARCH` 是独立功能开关，不是密钥。它默认关闭，接受 `1`、`true`、`yes`（忽略大小写）；开启后，模型工具提出未被静态契约或已有公共知识覆盖的原子技术缺口，或首次编译诊断确认了版本和依赖明确的公共 API 缺口时，可以联网查证。用户自带的 DeepSeek Key 通过统一服务端模型路由按同一开关参与联网学习。编译修复的资格、降级和负面事实规则见[编译学习闭环](./compile-learning.md)。
-
-此开关沿用历史变量名，目前启用的是 DeepSeek 原始 Search / Fetch API；不再发送 Responses `web_search`。Search 负责发现 URL，网页直读失败时 Fetch 补充 Markdown；原始 Maven／制品读取与后续证据验证保留。无需修改现有 Key 或新增依赖。请求费用、边界及真实验证记录见 [API 参考](./api-reference.md#learning-的-search--fetch) 与 [迁移记录](../../ref/deepseek-search-fetch.md)。
-
-**获取密钥**：
-
-| 密钥 | 获取方式 |
-|------|---------|
-| `DEEPSEEK_API_KEY` | 访问 [DeepSeek 平台](https://platform.deepseek.com)，注册并创建 API Key |
-| `GITHUB_PAT` | GitHub Settings → Developer settings → Personal access tokens → Generate new token，勾选 `repo` 权限 |
-
-### 4. 启动开发服务器
+启动：
 
 ```bash
 npm run dev
 ```
 
-这个命令（`wrangler pages dev --kv TASKS --proxy=5173 -- npx vite`）会：
-1. 启动 Vite 开发服务器（前端，端口 5173）
-2. 启动 Wrangler Pages Dev 并代理到 Vite，同时提供 `/api/*` Functions 与本地 KV
+该命令运行 `wrangler pages dev --kv TASKS --proxy=5173 -- npx vite`：Vite 提供前端（5173），Wrangler 代理 Vite 并提供 `/api/*` Functions 与本地 KV。请访问 Wrangler 输出的地址（默认 `http://localhost:8788`），直接访问 5173 时 `/api/*` 会 404。
 
-访问 Wrangler 输出的本地地址（默认 `http://localhost:8788`）查看完整应用（前端 + Functions）。
+默认脚本只绑定 `TASKS` KV。完整生成流程还需要以 `DB` 绑定本地 D1 并执行迁移；部分读写支持 KV 回退，但执行锁、Learning 和 journal 依赖 D1。
 
-### 5. KV 命名空间
+## 测试与检查
 
-本地开发时，`npm run dev` 脚本中的 `wrangler pages dev --kv TASKS` 会**自动创建本地 KV 存储**，无需额外配置或 `wrangler.toml`。
+| 命令 | 用途 |
+| --- | --- |
+| `npm test` | Vitest 全量回归，含前端逻辑、服务端端点与真实 SQLite 事务用例 |
+| `npx tsc --noEmit` | 类型检查（排除 `.deprecated/` 与 `ref/`） |
+| `npm run build` | Vite 生产构建 |
 
-生产环境则在 Cloudflare Dashboard 创建 KV 命名空间，并以变量名 `TASKS` 绑定到 Pages 项目（见下方「部署到 Cloudflare Pages」章节）。
+Windows 下 SQLite 用例在全量并发时可能触发 5 秒超时，可单 worker 运行或单独复查对应文件。会触发部署的推送前，上述检查必须全部通过。
 
-完整生成流程需要以 `DB` 绑定 D1 并执行迁移；默认 `npm run dev` 只绑定 `TASKS` KV，须另外提供本地 D1 配置。部分读写支持 KV 回退，但执行锁、Learning 和执行记录依赖 D1，KV 回退不能代替完整开发环境。
+## 环境变量
 
-生产环境可选择变量名为 `API_RATE_LIMITER` 的 Cloudflare Rate Limiting binding；配置后所有受保护 API 使用原生软限流，不再为限流读写 `TASKS`。Pages + Git 集成更推荐在域名上建立 WAF Rate Limiting rule，并在 Pages 的 Production 环境变量中设置 `EDGE_RATE_LIMITING=true`，同样会关闭 KV 限流兜底。两者均未配置时，代码仅对会触发 LLM、GitHub 写入等昂贵端点回退 KV 限流，本地开发无需额外绑定。
+| 变量 | 必需 | 用途 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 是 | 平台模型调用与 Search/Fetch |
+| `GITHUB_PAT` | 是 | 执行仓库的读写、调度 Actions、读取日志与产物（`repo` + `workflow`） |
+| `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_CLIENT_SECRET` | 是 | GitHub 登录（OAuth App） |
+| `SESSION_SECRET` | 是 | 会话与恢复凭证签名，可用 `npm run gen:secret` 生成；轮换会使旧 checkpoint 失效 |
+| `DEEPSEEK_RESPONSES_WEB_SEARCH` | 否 | 联网学习开关，默认关闭，接受 `1`、`true`、`yes`；沿用旧名，实际调用 Search/Fetch |
+| `GITHUB_FEEDBACK_TOKEN` | 反馈 | 产品仓库 Contents 与 Issues 写权限，配置为 Secret |
+| `FEEDBACK_DATA_BRANCH_READY` | 否 | 设为 `false` 时暂停公开反馈；默认启用 |
+| `GEN_CONCURRENCY` | 否 | 桶内并发上限，默认 2 |
+| `EDGE_RATE_LIMITING` | 否 | 使用域名级 WAF 限流时设为 `true`，关闭 KV 限流兜底 |
 
-## 项目结构
-
-```
-minecraft-dev/
-├── src/                      # 前端源码
-│   ├── pages/                # 页面组件（HomePage / ChatPage）
-│   ├── components/           # 通用组件
-│   ├── logic/                # 业务逻辑（chat / generate / session）
-│   ├── api/deepseek.ts       # 前端 LLM 调用封装
-│   └── router.ts             # 路由配置（/ /chat /skills）
-├── functions/                # Cloudflare Functions
-│   ├── api/                  # API 端点（generate / learning / chat / stream）
-│   └── _lib/                 # 共享库（prompts / github）
-├── .deprecated/              # 已停用功能归档，不参与应用构建
-├── ref/                      # 界面样稿与动画参考资料
-├── public/                   # 静态资源
-├── docs/                     # 文档（VitePress）
-├── package.json              # 依赖与脚本
-├── vite.config.js            # Vite 配置
-└── .dev.vars                 # 本地环境变量（不提交）
-```
+联网学习的资格、降级和负面事实规则见[编译诊断与 API 学习](./compile-learning.md)；Search/Fetch 的费用和边界见 [API 参考](./api-reference.md#learning-的-search--fetch)。
 
 ## 部署到 Cloudflare Pages
 
-### 1. 创建 GitHub 仓库
+1. **连接仓库**：Workers & Pages → Create → Pages → Connect to Git，选择本仓库。Framework preset 选 Vite，Build command 为 `npm run build`，输出目录为 `dist`。
+2. **环境变量**：在 Production 和需要的 Preview 环境分别配置上表变量，保存后重新部署才会生效。
+3. **KV**：创建命名空间并以变量名 `TASKS` 绑定。
+4. **D1**：创建数据库并以变量名 `DB` 绑定，在 D1 Console 按编号执行 `migrations/0001` 至 `0006`。已有数据库只执行尚未应用的后续文件，不能重复执行包含 `ALTER TABLE ... ADD COLUMN` 的文件。Pages 的 Git 自动部署不会执行迁移，包含新 SQL 文件的发布必须先执行迁移。
+5. **限流（可选）**：绑定 Rate Limiting binding `API_RATE_LIMITER`，或在域名上配置 WAF Rate Limiting 并设置 `EDGE_RATE_LIMITING=true`。两者都未配置时，只有触发模型或 GitHub 写入的昂贵端点回退到 KV 限流。
+6. **反馈**：配置 `GITHUB_FEEDBACK_TOKEN`，并在 Pages 的 preview 分支规则中排除 `feedback-data`。
 
-将项目推送到 GitHub：
+### GitHub 登录
+
+登录使用 **OAuth App**（不是 GitHub App）：Settings → Developer settings → OAuth Apps → New OAuth App。
+
+| 字段 | 正式站点的值 |
+| --- | --- |
+| Homepage URL | `https://tahai.xyz` |
+| Authorization callback URL | `https://tahai.xyz/api/auth/callback` |
+
+`login.ts` 和 `callback.ts` 都用当前访问域名拼接 `redirect_uri`，所以必须从 `tahai.xyz` 发起登录。从 `*.pages.dev` 预览地址登录会因回调地址不匹配而失败；自建部署时把两处 `tahai.xyz` 换成自己绑定到平台 Pages 项目的域名。缺少三个登录变量会导致点击登录后返回 500。
+
+## 执行仓库
+
+编译与 ResolveJAR 在独立仓库 `superwfox/minecraft-dev-workflow` 执行，仓库名写在 `functions/_lib/github.ts` 与 `functions/_lib/projectGithub.ts`。自建部署需要：
+
+- 编译工作流：以仓库内 `public/maven.yml` 与 `public/compile_api_evidence.py` 为准，安装到执行仓库。工作流通过 `workflow_dispatch` 接收分支与 Java 版本，并输出编译证据步骤。
+- ResolveJAR 工作流：`ref/workflows/resolve-jar.yml` 与 `scripts/resolve-jar.py`，见[工程生命周期](./project-lifecycle.md#resolvejar)。
+- 修改上述脚本后同步到执行仓库；服务端会核对已审查的 workflow 与扫描器 Git blob。
+
+## 目录结构
+
+```
+minecraft-dev/
+├── src/                 # 前端：pages、components、logic、styles
+├── functions/
+│   ├── api/             # Pages Functions 端点
+│   └── _lib/            # Prompt、结构树、契约、路径审查、Learning、GitHub、journal 等
+├── shared/              # 前后端共用的 ZIP 与归档逻辑
+├── migrations/          # D1 迁移 0001–0006
+├── scripts/             # 重放 CLI、ResolveJAR、版本更新等脚本
+├── tests/               # Vitest 回归
+├── public/              # 静态资源与执行仓库工作流模板
+├── docs/                # 本文档站（VitePress）
+├── ref/                 # 参考资料、Prompt 清单与真实验证记录
+└── .deprecated/         # 已停用功能归档，不参与构建
+```
+
+## 文档站
 
 ```bash
-git remote add origin https://github.com/your-username/minecraft-dev.git
-git push -u origin master
+cd docs
+npm install
+npx vitepress dev
 ```
 
-### 2. 连接 Cloudflare Pages
+构建使用 `npx vitepress build`。
 
-1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)
-2. 进入 **Workers & Pages** → **Create application** → **Pages**
-3. 选择 **Connect to Git**
-4. 授权 GitHub，选择 `minecraft-dev` 仓库
-5. 配置构建设置：
-   - **Framework preset**：Vite
-   - **Build command**：`npm run build`
-   - **Build output directory**：`dist`
-
-### 3. 配置环境变量
-
-在 Pages 项目设置中，添加环境变量：
-
-1. **Settings** → **Environment variables**
-2. 添加以下变量（Production 和 Preview 都需要）：
-   ```
-   DEEPSEEK_API_KEY=sk-...
-   DEEPSEEK_RESPONSES_WEB_SEARCH=true
-   GITHUB_PAT=ghp_...
-
-   # GitHub 登录（OAuth）—— 缺这三个会导致点登录后 500 / 登录失败
-   GITHUB_OAUTH_CLIENT_ID=...           # OAuth App 的 Client ID
-   GITHUB_OAUTH_CLIENT_SECRET=...       # OAuth App 设置页生成的 client secret
-   SESSION_SECRET=...                   # 会话签名密钥，可用 npm run gen:secret 生成
-   ```
-
-   > 登录使用 **OAuth App**（不是 GitHub App）：Settings → Developer settings →
-   > **OAuth Apps** → New OAuth App。**Authorization callback URL** 填
-   > `https://<你的域名>/api/auth/callback`，并确认该域名指向的是带 Functions 的**平台**
-   > Pages 项目。把它的 Client ID / client secret 填入上面两个变量即可。
-   >
-   > 注：OAuth App 对任意 GitHub 用户开箱即用，无需安装、无 public/private 开关；
-   > 这也是登录场景比 GitHub App 更合适的原因（GitHub App 会强制「先安装再授权」）。
-   >
-   > `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭。Production 和需要验证联网学习的 Preview 环境必须分别配置；保存环境变量后重新部署对应环境的 Pages Functions 才会生效。用户自带的 DeepSeek Key 在服务端编排阶段也遵循该开关。
-
-### 4. 创建 KV 命名空间
-
-1. **Workers & Pages** → **KV** → **Create namespace**
-2. 命名为 `TASKS`
-3. 在 Pages 项目设置中绑定：
-   - **Settings** → **Functions** → **KV namespace bindings**
-   - Variable name: `TASKS`
-   - KV namespace: `TASKS`
-
-### 4.1 创建 D1 任务数据库
-
-1. **D1 SQL Database** → **Create database**
-2. 在 Pages 项目的 **Settings** → **Bindings** 中新增 D1 database binding
-3. Variable name 固定为 `DB`
-4. 在 D1 Console 按文件编号依次执行：
-   - `migrations/0001_generation_tasks.sql`
-   - `migrations/0002_autonomous_learning.sql`
-   - `migrations/0003_generation_task_quota.sql`
-   - `migrations/0004_generation_task_planner_lease.sql`
-   - `migrations/0005_negative_api_facts.sql`
-   - `migrations/0006_project_journal_feedback.sql`
-
-已有数据库只需从尚未执行的下一份 migration 继续，不能重复执行包含 `ALTER TABLE ... ADD COLUMN` 的文件。Cloudflare Pages 的 Git 自动部署只发布代码，不会自动执行 D1 migration；每次发布包含新 SQL 文件时必须先在对应的 Preview / Production 数据库执行。
-
-D1 承载高频生成任务状态、单任务成本、公共技术知识、24 小时临时执行记录及反馈／JAR 提交状态；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。`0006` 缺失时，新版会在外部模型调用前报执行记录存储不可用。
-
-公开反馈还需在 Pages 生产环境的 Secret 配置 `GITHUB_FEEDBACK_TOKEN`（产品仓库 Contents、Issues 写权限），并在 Pages preview 分支中排除 `feedback-data`。功能默认启用，无需另设 true；如需暂停公开发布，可设置 `FEEDBACK_DATA_BRANCH_READY=false`。ResolveJAR 沿用执行仓库和 `GITHUB_PAT`，需预先安装受控工作流；工程恢复、完整权限与验证范围见[工程生命周期](../../ref/project-lifecycle.md)。
-
-### 5. 部署
-
-推送代码到 GitHub，Cloudflare 自动触发部署：
-
-```bash
-git add .
-git commit -m "Initial deployment"
-git push
-```
-
-部署完成后，访问 Cloudflare 提供的 URL（如 `https://minecraft-dev.pages.dev`）。
-
-## 配置 GitHub Actions
-
-### 1. 创建构建仓库
-
-创建一个独立的 GitHub 仓库用于构建（如 `minecraft-dev-workflow`），添加以下文件：
-
-```yaml
-# .github/workflows/maven.yml
-name: Build Plugin
-
-on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to build'
-        required: true
-      java_version:
-        description: 'Java version'
-        required: true
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          ref: ${{ github.event.inputs.branch }}
-
-      - uses: actions/setup-java@v3
-        with:
-          java-version: ${{ github.event.inputs.java_version }}
-          distribution: 'temurin'
-
-      - name: Build with Maven
-        run: mvn clean package
-
-      - uses: actions/upload-artifact@v3
-        with:
-          name: plugin-jar
-          path: target/*.jar
-          retention-days: 1
-```
-
-### 2. 创建 GitHub PAT
-
-1. GitHub Settings → Developer settings → Personal access tokens
-2. Generate new token (classic)
-3. 勾选权限：
-   - `repo`（完整权限）
-   - `workflow`（触发 Actions）
-4. 复制 token，添加到 Cloudflare 环境变量 `GITHUB_PAT`
-
-### 3. 更新 Functions 配置
-
-修改 `functions/_lib/github.ts`，将仓库名改为你的构建仓库：
-
-```typescript
-const REPO_OWNER = "your-username";
-const REPO_NAME = "minecraft-dev-workflow";
-```
-
-## 常见问题
-
-### 本地开发时 Functions 无法访问
-
-**问题**：访问 `/api/chat` 返回 404
-
-**解决**：
-1. 确认 `npm run dev` 同时启动了 Wrangler 与 Vite（`wrangler pages dev --kv TASKS --proxy=5173 -- npx vite`）
-2. 通过 Wrangler 的端口（默认 8788）访问，而非直接访问 Vite 的 5173——`/api/*` Functions 与本地 KV 由 Wrangler 提供
-
-### KV 存储无法访问
-
-**问题**：Functions 报错 `env.TASKS is undefined`
-
-**解决**：
-1. 本地开发：确认 `wrangler.toml` 中配置了 KV 绑定
-2. 生产环境：在 Cloudflare Dashboard 中绑定 KV 命名空间
-
-### GitHub Actions 构建失败
-
-**问题**：Maven 构建报错 `Could not resolve dependencies`
-
-**解决**：
-1. 检查 `pom.xml` 中的依赖版本是否正确
-2. 确认 Maven 仓库 URL 可访问
-3. 查看 Actions 日志中的详细错误信息
-
-## 性能优化
-
-### 前端优化
-
-1. **代码分割**：Vite 自动按路由分割代码
-2. **懒加载**：大组件使用 `defineAsyncComponent`
-3. **图片优化**：使用 WebP 格式，压缩图片
-4. **字体子集化**：只包含使用的字符
-
-### Functions 优化
-
-1. **缓存 AI 响应**：相同需求可缓存结果（可选）
-2. **并发控制**：限制同时生成的任务数
-3. **KV TTL**：合理设置过期时间，避免存储浪费
-
-### 构建优化
-
-1. **Maven 缓存**：GitHub Actions 缓存 `.m2` 目录
-2. **并行构建**：`mvn -T 1C` 使用多核编译
-3. **Artifact 清理**：设置 `retention-days: 1`
-
-## 监控和日志
-
-### Cloudflare Analytics
-
-在 Cloudflare Dashboard 中查看：
-- 请求量
-- 错误率
-- 响应时间
-- 流量分布
-
-### Functions 日志
-
-使用 `wrangler tail` 实时查看日志：
-
-```bash
-npx wrangler pages deployment tail
-```
-
-### GitHub Actions 日志
-
-在 GitHub 仓库的 **Actions** 标签页查看构建日志。
-
-## 下一步
-
-- [查看 API 参考](/technical/api-reference)：了解所有 API 端点
-- [了解架构设计](/technical/architecture)：深入理解系统设计
-- [查看 AI 工作流](/features/ai-workflow)：了解 AI 如何生成代码
+<a class="detail-link" href="./history">历史与停用功能 →</a>

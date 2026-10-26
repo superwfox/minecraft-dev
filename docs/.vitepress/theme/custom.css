@@ -13,3 +13,110 @@ html.dark {
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
     "Noto Sans", sans-serif;
 }
+
+.VPHero .image-bg {
+    display: none;
+}
+
+@media (min-width: 768px) {
+    .VPHome .VPHero.has-image {
+        --home-portrait-size: clamp(400px, 44vw, 680px);
+        padding-left: 0;
+        padding-right: clamp(32px, 5.3vw, 88px);
+    }
+
+    .VPHome .VPHero.has-image .container {
+        max-width: none;
+        width: 100%;
+        margin: 0;
+        flex-direction: row;
+        align-items: center;
+        gap: clamp(24px, 3vw, 64px);
+        text-align: right;
+    }
+
+    .VPHome .VPHero.has-image .image {
+        order: 1;
+        flex: 0 0 var(--home-portrait-size);
+        width: var(--home-portrait-size);
+        min-height: 0;
+        margin: 0;
+    }
+
+    .VPHome .VPHero.has-image .image-container {
+        display: flex;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1;
+        margin: 0;
+        transform: none;
+        justify-content: flex-start;
+        align-items: center;
+    }
+
+    .VPHome .VPHero.has-image .image-src {
+        position: static;
+        top: auto;
+        left: auto;
+        transform: none;
+        width: 100%;
+        max-width: none;
+        max-height: none;
+        height: auto;
+    }
+
+    .VPHome .VPHero.has-image .main {
+        order: 2;
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        flex: 1 1 0;
+        margin-left: auto;
+        text-align: right;
+    }
+
+    .VPHome .VPHero.has-image .heading {
+        align-items: flex-end;
+    }
+
+    .VPHome .VPHero.has-image .name,
+    .VPHome .VPHero.has-image .text,
+    .VPHome .VPHero.has-image .tagline {
+        margin-left: auto;
+        margin-right: 0;
+    }
+
+    .VPHome .VPHero.has-image .actions {
+        justify-content: flex-end;
+    }
+}
+
+.VPFeature .VPImage {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+}
+
+.home-thanks {
+    margin-top: 24px;
+    text-align: center;
+    font-size: 12px;
+    opacity: 0.7;
+}
+
+.vp-doc a.detail-link {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 6px 16px;
+    border: 1px solid var(--vp-c-brand-1);
+    border-radius: 4px;
+    color: var(--vp-c-brand-1);
+    font-size: 14px;
+    text-decoration: none;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.vp-doc a.detail-link:hover {
+    background-color: var(--vp-c-brand-1);
+    color: var(--vp-c-bg);
+}

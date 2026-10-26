@@ -49,6 +49,11 @@ __screenshots__/
 # Claude Code
 .claude/
 
+# VitePress
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+docs/docs/
+
 #reference
 font
 scripts

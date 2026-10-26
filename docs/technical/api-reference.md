@@ -16,6 +16,11 @@ functions/api/generate/build.ts    → POST /api/generate/build
 functions/api/generate/status.ts   → GET  /api/generate/status
 functions/api/generate/fix.ts      → POST /api/generate/fix     (SSE)
 functions/api/generate/download.ts → GET  /api/generate/download
+functions/api/generate/checkpoint.ts → GET / POST /api/generate/checkpoint (工程快照与过期重建)
+functions/api/generate/revise.ts   → POST /api/generate/revise  (追加需求)
+functions/api/generate/journal.ts  → GET  /api/generate/journal (执行记录)
+functions/api/generate/feedback.ts → GET / POST /api/generate/feedback (公开反馈)
+functions/api/generate/jar.ts      → GET / POST /api/generate/jar (ResolveJAR 导入)
 functions/api/learning/start.ts    → POST /api/learning/start
 functions/api/learning/step.ts     → POST /api/learning/step
 functions/api/learning/status.ts   → GET  /api/learning/status
@@ -193,7 +198,7 @@ data: [DONE]
 
 - 拉失败 Job 日志 → 解析 Maven `[ERROR]` 行定位出错文件 → 对每个文件用 `buildFixPrompt` 流式改写 → 更新 `generatedFiles`
 - 修复变更使旧代码指纹的路径检查失效，前端重新进行路径审查后再调 `/build`；`result.fixed === 0` 表示未修复任何文件
-- 前端 `buildWithRetry` 最多修复重试 2 次（`MAX_FIX_ATTEMPTS`）
+- 前端 `buildWithRetry` 最多修复重试 3 次（`MAX_FIX_ATTEMPTS`）
 
 ### GET /api/generate/download
 
@@ -246,4 +251,6 @@ data: [DONE]
 
 生产环境以变量名 `DB` 绑定 D1 数据库，按编号执行 `migrations/` 下 `0001` 至 `0006`；已有数据库只执行尚未应用的后续文件。Cloudflare Pages 部署不会自动执行 migration。D1 保存生成任务、单任务成本、公共技术知识、临时 journal 与提交去重状态；用户额度、订单、赞助及缓存继续保留在 `TASKS` KV。
 
-工程恢复、增量修改、journal、反馈和 JAR 导入接口及其权限／状态约束见[工程生命周期接口](../../ref/project-lifecycle.md#服务端接口)。公开反馈需要服务端 `GITHUB_FEEDBACK_TOKEN` 及数据分支排除配置；浏览器不持有仓库写入凭据。
+## 工程生命周期接口
+
+checkpoint、revise、journal、feedback 和 jar 接口及其权限、状态约束见[工程生命周期](./project-lifecycle.md#接口)。公开反馈需要服务端 `GITHUB_FEEDBACK_TOKEN` 及数据分支排除配置；浏览器不持有仓库写入凭据。
