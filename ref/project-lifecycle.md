@@ -56,7 +56,7 @@ node scripts/replay-project.mjs <诊断目录> [输出目录] --compile --releas
 
 1. 应用 D1 迁移；配置服务端 `GITHUB_FEEDBACK_TOKEN`，授予产品仓库 `superwfox/minecraft-dev` 的 Contents write 与 Issues write。兼容已有 `GITHUB_PR_TOKEN`，但必须具备相应权限。凭据不进入浏览器或工程档案。
 2. 在 Cloudflare Pages 的分支构建设置中，生产分支沿用现有配置，preview 排除 `feedback-data`。数据分支从无父提交的空树创建，仅保存反馈资料，不继承产品源码或 `.github/workflows`。
-3. 检查产品 Actions 不对数据分支执行部署或其他写操作；现有 workflow 仅 schedule／workflow_dispatch。完成分支限制后才设置 `FEEDBACK_DATA_BRANCH_READY=true`。未设置时发布接口返回 503，不会尝试写仓库。
+3. 检查产品 Actions 不对数据分支执行部署或其他写操作；现有 workflow 仅 schedule／workflow_dispatch。功能默认启用，无需增加 true 开关；显式设置 `FEEDBACK_DATA_BRANCH_READY=false` 可暂停公开写入，此时发布接口返回 503。未配置数据库或仓库凭据同样返回 503。默认启用仍保留用户公开确认、身份和仓库权限校验，部署者仍须确保数据分支不触发部署。
 
 最终失败自动展开一次反馈；查看旧失败工程不自动弹出。成功后可从 Debug 旁手动打开“实现与预期不符”，可选具体路径和节点，自动附上绑定文件信息。失败反馈自动带入错误摘要，不要求输入文字。
 
@@ -120,6 +120,6 @@ Issue 和链接资料均公开，链接绑定不可变 commit；删除 Issue 不
 
 GitHub 侧核对数据分支 Actions 为 0，该提交没有 commit status、check run 或 GitHub deployment。发布后 Pages 管理 API 的部署列表二次回读因本机 OAuth 续期失败尚未完成，不将其标为通过；此前已确认的分支排除配置及具体边界见 [feedback-live-validation.md](feedback-live-validation.md)。
 
-2026-10-26 推送前完整回归更新为 72 个文件、532 项通过；TypeScript、Vite 与 Functions 打包通过。用户已在产品绑定的 D1 执行 0006 迁移，Console 返回成功。当前工作区全部变更已获授权统一提交推送；生产环境凭据和 `FEEDBACK_DATA_BRANCH_READY=true` 仍需在实际 Pages 环境核对，不能由本地配置推定线上已经生效。
+2026-10-26 首轮推送前完整回归为 72 个文件、532 项通过；TypeScript、Vite 与 Functions 打包通过。用户已在产品绑定的 D1 执行 0006 迁移，Console 返回成功，并确认在 Pages Production 保存 GITHUB_FEEDBACK_TOKEN Secret。当前工作区全部变更已获授权统一提交推送；随后按用户要求将反馈改为默认启用、显式 false 关闭，新增默认状态回归，最新完整测试 72 个文件、533 项通过，类型检查及前后端构建通过。生产实际发布和登录仍需部署后验收，不能由本地配置推定线上已经生效。
 
 反馈数据分支公开测试和执行仓库安装属于另行授权的外部操作。本地隔离函数调用真实 Actions，不等于生产浏览器全流程已验收。

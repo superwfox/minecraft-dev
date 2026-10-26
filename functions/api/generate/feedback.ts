@@ -5,16 +5,18 @@ import { feedbackBundle } from "../../../shared/feedbackBundle";
 interface Env { DB: D1Database; GITHUB_FEEDBACK_TOKEN?: string; GITHUB_PR_TOKEN?: string; DEEPSEEK_API_KEY?: string; GITHUB_PAT?: string; FEEDBACK_DATA_BRANCH_READY?: string }
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 const publicBranch = "feedback-data";
+const feedbackEnabled = (env: Env) => env.FEEDBACK_DATA_BRANCH_READY?.trim().toLowerCase() !== "false";
 export const onRequestGet: PagesFunction<Env> = async context => {
     const id = new URL(context.request.url).searchParams.get("submissionId");
-    if (!id) return json({ repository: PRODUCT_REPO, public: true, configured: !!(context.env.DB && (context.env.GITHUB_FEEDBACK_TOKEN || context.env.GITHUB_PR_TOKEN) && context.env.FEEDBACK_DATA_BRANCH_READY === "true") });
+    if (!id) return json({ repository: PRODUCT_REPO, public: true, configured: !!(context.env.DB && (context.env.GITHUB_FEEDBACK_TOKEN || context.env.GITHUB_PR_TOKEN) && feedbackEnabled(context.env)) });
     if (!context.env.DB) return json({ error: "反馈服务尚未配置工程存储" }, 503);
     const row: any = await context.env.DB.prepare("SELECT state_json FROM project_submissions WHERE submission_id=? AND owner_uid=? AND kind='feedback'").bind(id, String(context.data.uid)).first();
     return row ? json(JSON.parse(row.state_json)) : json({ error: "反馈不存在" }, 404);
 };
 export const onRequestPost: PagesFunction<Env> = async context => {
     const uid = String(context.data.uid), token = context.env.GITHUB_FEEDBACK_TOKEN || context.env.GITHUB_PR_TOKEN || "";
-    if (!context.env.DB || !token || context.env.FEEDBACK_DATA_BRANCH_READY !== "true") return json({ error: "反馈服务尚未配置：需要 D1 迁移、仓库权限，并确认 feedback-data 不触发 Pages/Actions 后设置 FEEDBACK_DATA_BRANCH_READY=true" }, 503);
+    if (!feedbackEnabled(context.env)) return json({ error: "反馈发布已关闭：FEEDBACK_DATA_BRANCH_READY=false" }, 503);
+    if (!context.env.DB || !token) return json({ error: "反馈服务尚未配置：需要 D1 迁移及生产环境的 GITHUB_FEEDBACK_TOKEN 仓库凭据" }, 503);
     if (Number(context.request.headers.get("Content-Length")) > 32 * 1024 * 1024) return json({ error: "反馈资料超过 32 MiB" }, 413);
     let lock = "", id = "";
     try {

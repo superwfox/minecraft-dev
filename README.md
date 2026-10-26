@@ -120,7 +120,7 @@ npm run dev
 
 构建仓目前由 [`functions/_lib/github.ts`](functions/_lib/github.ts) 指向 `superwfox/minecraft-dev-workflow`，并调用其 `maven.yml` 工作流。更换部署归属时需同步检查仓库地址、令牌权限及工作流输入，不能只改前端配置。
 
-ResolveJAR 使用该仓库单独的受控反编译工作流。公开反馈还需 `GITHUB_FEEDBACK_TOKEN`、Pages 排除 `feedback-data` 分支及 `FEEDBACK_DATA_BRANCH_READY=true`；分支限制、权限和安装步骤见[工程生命周期](ref/project-lifecycle.md)。
+ResolveJAR 使用该仓库单独的受控反编译工作流。公开反馈还需 `GITHUB_FEEDBACK_TOKEN` 及 Pages 排除 `feedback-data` 分支；功能默认启用，可设置 `FEEDBACK_DATA_BRANCH_READY=false` 关闭。分支限制、权限和安装步骤见[工程生命周期](ref/project-lifecycle.md)。
 
 `DEEPSEEK_RESPONSES_WEB_SEARCH` 默认关闭，开启后才允许符合条件的 DeepSeek 自动联网学习；GLM 路由只读取已有公共知识。不可用 API 共享缓存还要求 `0005_negative_api_facts.sql` 和可信构建证据链就绪，详见[编译学习闭环](docs/technical/compile-learning.md)。
 

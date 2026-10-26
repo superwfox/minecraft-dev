@@ -6,7 +6,7 @@ import { onRequestGet as readJournal } from "../../functions/api/generate/journa
 import { submission, lockSubmission, saveSubmission, unlockSubmission } from "../../functions/_lib/projectSubmission";
 const git = vi.hoisted(() => vi.fn());
 vi.mock("../../functions/_lib/projectGithub", async importOriginal => ({ ...await importOriginal<any>(), projectGit: git }));
-import { onRequestPost as feedback } from "../../functions/api/generate/feedback";
+import { onRequestGet as feedbackStatus, onRequestPost as feedback } from "../../functions/api/generate/feedback";
 import JSZip from "jszip";
 let sql: ReturnType<typeof sqliteD1>;
 beforeEach(async () => {
@@ -66,9 +66,18 @@ describe("persistent journal and publication", () => {
         expect(git.mock.calls.find(call => call[2] === "/git/trees")?.[4].tree[0].content).toBe("class Main {}");
         expect(git.mock.calls.find(call => call[2] === "/git/commits")?.[4].parents).toEqual([]);
     });
-    it("refuses publication until deployment branch exclusions are acknowledged", async () => {
-        const response = await feedback({ request: new Request("https://app.test/api/generate/feedback", { method: "POST" }), env: { DB: sql.db, GITHUB_FEEDBACK_TOKEN: "token" }, data: { uid: "alice" } } as any);
-        expect(response.status).toBe(503); expect(git).not.toHaveBeenCalled();
+    it("reports feedback ready by default when database and repository credentials exist", async () => {
+        const response = await feedbackStatus({ request: new Request("https://app.test/api/generate/feedback"), env: { DB: sql.db, GITHUB_FEEDBACK_TOKEN: "token" }, data: { uid: "alice" } } as any);
+        expect(await response.json()).toMatchObject({ configured: true }); expect(git).not.toHaveBeenCalled();
+    });
+    it("refuses publication when feedback is explicitly disabled", async () => {
+        for (const flag of ["false", " FALSE "]) {
+            const context = { request: new Request("https://app.test/api/generate/feedback", { method: "POST" }), env: { DB: sql.db, GITHUB_FEEDBACK_TOKEN: "token", FEEDBACK_DATA_BRANCH_READY: flag }, data: { uid: "alice" } } as any;
+            const response = await feedback(context);
+            expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ error: expect.stringContaining("已关闭") });
+            expect(await (await feedbackStatus(context)).json()).toMatchObject({ configured: false });
+        }
+        expect(git).not.toHaveBeenCalled();
     });
     it("publishes automatic ZIPs after server redaction and mentions only the signed-in author", async () => {
         let issues: any[] = []; let blobs = 0;
@@ -87,7 +96,7 @@ describe("persistent journal and publication", () => {
             { path: "manifest.json", content: JSON.stringify({ journalIncomplete: false, missing: [] }) },
             { path: "source/Main.java", content: "// server-token\nclass Main {}" },
         ] };
-        const invoke = (publicConsent = true) => feedback({ request: new Request("https://app.test/api/generate/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, publicConsent }) }), env: { DB: sql.db, GITHUB_FEEDBACK_TOKEN: "server-token", FEEDBACK_DATA_BRANCH_READY: "true" }, data: { uid: "alice", login: "trusted-user" } } as any);
+        const invoke = (publicConsent = true) => feedback({ request: new Request("https://app.test/api/generate/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, publicConsent }) }), env: { DB: sql.db, GITHUB_FEEDBACK_TOKEN: "server-token" }, data: { uid: "alice", login: "trusted-user" } } as any);
         expect((await invoke(false)).status).toBe(400); expect(git).not.toHaveBeenCalled();
         expect((await invoke()).status).toBe(200); expect((await invoke()).status).toBe(200);
         expect(blobs).toBe(2); expect(issues).toHaveLength(1);

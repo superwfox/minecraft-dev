@@ -163,7 +163,7 @@ git push -u origin master
 
 D1 承载高频生成任务状态、单任务成本、公共技术知识、24 小时临时执行记录及反馈／JAR 提交状态；用户额度、订单、赞助、Skill 缓存和限流兜底继续使用 `TASKS` KV。`0006` 缺失时，新版会在外部模型调用前报执行记录存储不可用。
 
-公开反馈还需配置 `GITHUB_FEEDBACK_TOKEN`（产品仓库 Contents、Issues 写权限），并在 Pages preview 分支中排除 `feedback-data` 后设置 `FEEDBACK_DATA_BRANCH_READY=true`。ResolveJAR 沿用执行仓库和 `GITHUB_PAT`，需预先安装受控工作流；工程恢复、完整权限与验证范围见[工程生命周期](../../ref/project-lifecycle.md)。
+公开反馈还需在 Pages 生产环境的 Secret 配置 `GITHUB_FEEDBACK_TOKEN`（产品仓库 Contents、Issues 写权限），并在 Pages preview 分支中排除 `feedback-data`。功能默认启用，无需另设 true；如需暂停公开发布，可设置 `FEEDBACK_DATA_BRANCH_READY=false`。ResolveJAR 沿用执行仓库和 `GITHUB_PAT`，需预先安装受控工作流；工程恢复、完整权限与验证范围见[工程生命周期](../../ref/project-lifecycle.md)。
 
 ### 5. 部署
 
