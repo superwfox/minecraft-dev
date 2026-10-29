@@ -1,8 +1,8 @@
 <template>
   <nav class="topnav">
     <div class="topnav-tabs">
-      <router-link v-lattice to="/chat" class="tab" :class="{ active: act('chat'), busy: chatBusy }" :aria-busy="chatBusy">chat</router-link>
-      <router-link v-lattice to="/skills" class="tab" :class="{ active: act('skills') }">skill</router-link>
+      <router-link v-lattice to="/chat" class="tab" :class="{ active: chatActive, busy: chatBusy }" :aria-busy="chatBusy">chat</router-link>
+      <a v-lattice href="https://model2blueprint.pages.dev/" class="tab">craft</a>
     </div>
     <div class="topnav-status">{{ statusText }}</div>
   </nav>
@@ -16,12 +16,7 @@ import { genTask, clarifyWaiting, treeGateWaiting } from "../logic/generateState
 
 const route = useRoute();
 const centerText = inject<Ref<string>>("centerText");
-
-function act(which: "chat" | "skills"): boolean {
-    const p = route.path;
-    if (which === "chat") return p === "/chat";
-    return p === "/skills";
-}
+const chatActive = computed(() => route.path === "/chat");
 
 // CHAT 运行态：generateState 的 busy 阶段（排除 idle/done/error/awaiting_input）
 const BUSY_PHASES = new Set([

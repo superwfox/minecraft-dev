@@ -53,7 +53,18 @@
   .floor-img-wrap::before, .floor-img-wrap::after { display: none; }
 
   .composer-stage { height: 230px; flex-basis: 230px; }
-  .composer-actions { min-height: 60px; flex-wrap: wrap; gap: 12px; padding-top: 14px; border-color: var(--line-soft); }
+  .composer-stage:not(.is-processing) {
+    position: relative;
+    top: 16px;
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    flex: 0 1 auto;
+    min-height: min(230px, var(--composer-max-height));
+    max-height: var(--composer-max-height);
+  }
+  .composer-stage:not(.is-processing) .composer { height: auto; flex: 1; }
+  .composer-actions { flex-shrink: 0; min-height: 60px; flex-wrap: wrap; gap: 12px; padding-top: 14px; border-color: var(--line-soft); }
   .composer-input { color: var(--text-primary); }
   .composer-message, .live-thinking, .live-output { border-radius: 0; box-shadow: none; background: transparent; }
   .live-thinking, .live-output { border-color: var(--line); }

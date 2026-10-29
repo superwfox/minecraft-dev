@@ -1312,8 +1312,11 @@ watch(() => genTask.phase, (p) => {
 
 /* 聚焦阶段：整列垂直居中 */
 .chat-page.is-focus {
+  --chat-padding-top: 112px;
+  --chat-padding-bottom: 44px;
+  --composer-max-height: calc((100dvh - var(--chat-padding-top) - var(--chat-padding-bottom)) * 0.75);
   min-height: 100vh;
-  padding: 112px 18px 44px;
+  padding: var(--chat-padding-top) 18px var(--chat-padding-bottom);
   justify-content: safe center;
   align-items: center;
   overflow-x: hidden;
@@ -2316,12 +2319,12 @@ watch(() => genTask.phase, (p) => {
 }
 
 @media (max-height: 760px) {
-  .chat-page.is-focus { padding-top: 88px; }
+  .chat-page.is-focus { --chat-padding-top: 88px; }
   .focus-welcome { margin-bottom: 16px; }
 }
 
 @media (max-width: 520px) {
-  .chat-page.is-focus { padding: 96px 12px 32px; }
+  .chat-page.is-focus { --chat-padding-top: 96px; --chat-padding-bottom: 32px; padding-inline: 12px; }
   .focus-welcome { gap: 10px; margin-bottom: 16px; }
   .focus-welcome h1 { font-size: 34px; }
   .composer-stage { height: 176px; flex-basis: 176px; }
@@ -2368,5 +2371,6 @@ watch(() => genTask.phase, (p) => {
 </style>
 
 <style scoped>
+.composer-stage:not(.is-processing) :deep(.markdown-composer) { flex: 1 1 auto; min-height: 0; }
 .prompt-history-search input { background-color: transparent; }
 </style>

@@ -102,7 +102,7 @@ npm run dev
 | --- | --- |
 | [`src/pages/`](src/pages/) / [`src/components/`](src/components/) | 页面与共享组件；对话页 `ChatPage.vue`、生成进度 `GenerateProgress.vue` |
 | [`src/styles/lattice.css`](src/styles/lattice.css) / [`src/ui/lattice.ts`](src/ui/lattice.ts) | 共享窗棂外观、角花与运行态动画；设计基准见 [`ref/refer.html`](ref/refer.html)，技能卡面暂时保留原样 |
-| [`src/styles/typography.css`](src/styles/typography.css) | 顶栏品牌与 chat / skill 导航用 Minecrafter，其他固定文案用全量江西拙楷，输入与生成内容用钉钉进步体；动态内容标记 `data-font="dynamic"`，字体文件存放在 `public/` |
+| [`src/styles/typography.css`](src/styles/typography.css) | 顶栏品牌与 chat / craft 导航用 Minecrafter，其他固定文案用全量江西拙楷，输入与生成内容用钉钉进步体；动态内容标记 `data-font="dynamic"`，字体文件存放在 `public/` |
 | [`src/logic/`](src/logic/) | 对话、生成状态、恢复与 Learning 续跑；优先看 `chatHandler.ts`、`generateHandler.ts`、`generateState.ts` |
 | [`src/api/deepseek.ts`](src/api/deepseek.ts) | 预检、信息提取与前端流式调用 |
 | [`.deprecated/`](.deprecated/) | 已停用功能与重构片段归档；旧 IDE 及其追加需求实现见 `.deprecated/ide/` |
