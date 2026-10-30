@@ -14,7 +14,7 @@
     <nav v-if="open" id="header-links-menu" v-lattice:two class="header-menu-panel" aria-label="快捷入口">
       <button v-if="authState.loaded && !authState.user" v-lattice type="button" class="header-menu-item" @click="signIn">登录</button>
       <a v-lattice class="header-menu-item" href="https://minecraft-dev.pages.dev/" rel="noreferrer" @click="close()">文档</a>
-      <a v-lattice class="header-menu-item" href="https://qm.qq.com/q/l2PcLa4nqU" target="_blank" rel="noopener noreferrer" @click="close()">QQ 群</a>
+      <a v-lattice class="header-menu-item" href="https://qm.qq.com/q/GQbHFjEp4k" target="_blank" rel="noopener noreferrer" @click="close()">QQ 群</a>
     </nav>
   </div>
 </template>

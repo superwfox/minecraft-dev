@@ -14,7 +14,7 @@ hero:
       link: /guide/quick-start
     - theme: alt
       text: 加入 QQ 群
-      link: https://qm.qq.com/q/QicMlpHp6c
+      link: https://qm.qq.com/q/GQbHFjEp4k
     - theme: sponsor
       text: 访问平台
       link: https://tahai.xyz/

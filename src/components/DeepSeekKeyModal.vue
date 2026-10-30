@@ -11,9 +11,8 @@
             <KeyRound :size="22"/>
           </div>
           <h2 id="deepseek-key-title">配置 DeepSeek API Key</h2>
-          <p class="key-apology">抱歉，Deepseek涨价幅度过大，我们取消了免费额度。</p>
           <p class="key-description">
-            填写你自己的 DeepSeek API Key 后即可继续使用；已有充值额度仍然保留，也可以不填写 Key 直接使用充值额度。
+            填写你的 Key 开始使用；也可以通过充值次数额度支持我们。
           </p>
 
           <div v-if="reasonMessage" data-font="dynamic" class="key-warning" role="alert">{{ reasonMessage }}</div>

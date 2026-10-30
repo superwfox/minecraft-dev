@@ -38,19 +38,13 @@
     background: var(--surface-0);
   }
 
-  .header-title, .center, .focus-welcome h1, .floor-text, .typing-wrap { color: var(--text-primary); }
-  .typing-wrap { text-shadow: none; }
+  .header-title, .center, .focus-welcome h1 { color: var(--text-primary); }
   .quota-logout { color: var(--text-secondary); }
   .glass2-nav::before { display: none; }
   .glass2-nav { height: 88px; }
   .topnav, .topnav-tabs { height: auto; gap: 12px; }
   .topnav-status { top: calc(100% + 5px); color: var(--text-muted); }
   .tab::after { display: none; }
-  .floor-section { margin: 40px 5vw; min-height: 70vh; padding: 48px 3vw; gap: 32px; }
-  .floor-text { flex: 1 1 30%; }
-  .floor-img-wrap { flex: 1 1 60%; border-radius: 0; }
-  .floor-img { border-radius: 0; }
-  .floor-img-wrap::before, .floor-img-wrap::after { display: none; }
 
   .composer-stage { height: 230px; flex-basis: 230px; }
   .composer-stage:not(.is-processing) {

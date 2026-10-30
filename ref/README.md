@@ -3,6 +3,8 @@
 参考资料统一存放在 `ref/`；`reference/`、`参考/` 等称呼按目录别名理解，不再新建同用途目录。此目录不参与应用运行或构建。
 
 - [refer.html](refer.html)：窗棂卡片、按钮与层级的独立设计样稿，保留设计存档时的样式。
+- [首页山谷参考与 Prompt](home-valley-prompts.md)：ImageGen 完整构图、独立透明景层与网页素材说明；对应 `/home` 的滚轮视差实现。
+- [首页矩形构图参考](home-block-layout-reference.png)：用户提供的黑底浅黄色错落块面草图，用于下方文档和 QQ 群板块；首屏继续使用山谷。
 
 ## 工具调用动画参考
 

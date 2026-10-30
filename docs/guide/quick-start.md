@@ -4,7 +4,7 @@
 
 ## 准备：登录并配置 Key
 
-1. 打开 [https://tahai.xyz](https://tahai.xyz)。
+1. 打开 [https://tahai.xyz](https://tahai.xyz)，默认进入对话页。
 2. 点右上角「···」里的 **登录**，用 GitHub 账号授权。
 3. 首次登录会弹出 Key 窗口，填入自己的 [DeepSeek API Key](https://platform.deepseek.com/)。Key 只保存在当前浏览器；不填时使用已有的充值余额。
 4. 之后鼠标移到左上角头像，可以查看剩余额度，也可以重新管理 Key。
@@ -67,6 +67,6 @@ Paper 1.21.4。玩家进服后被踢出并提示正在维护，
 - 效果不对或想加功能：在同一个工程里继续输入新需求，见[工程历史](/features/project-history)。
 - 已经有插件 JAR 想修改：把 JAR 拖进对话框，见[导入 JAR](/features/jar-import)。
 - 生成失败或表现和预期不符：[发布反馈](/features/feedback)。
-- [常见问题](/guide/faq) · [生成示例](/guide/demo-showcase) · [进群提问](https://qm.qq.com/q/QicMlpHp6c)
+- [常见问题](/guide/faq) · [生成示例](/guide/demo-showcase) · [进群提问](https://qm.qq.com/q/GQbHFjEp4k)
 
 <a class="detail-link" href="/technical/generation-pipeline">了解细节：生成流水线 →</a>

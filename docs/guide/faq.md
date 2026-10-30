@@ -50,4 +50,4 @@ Key 只保存在当前浏览器。生成请求会临时带上 Key，服务端不
 
 ## 还有问题
 
-[进 QQ 群](https://qm.qq.com/q/QicMlpHp6c)找作者，或者在平台里[发布反馈](/features/feedback)。
+[进 QQ 群](https://qm.qq.com/q/GQbHFjEp4k)找作者，或者在平台里[发布反馈](/features/feedback)。

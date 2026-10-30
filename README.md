@@ -2,6 +2,8 @@
 
 用自然语言描述 Minecraft 插件需求，在浏览器中完成需求确认、代码生成、构建与 JAR 下载。
 
+打开站点默认进入 `/chat` 对话页；`/home` 首屏以生成的远景、山壁、岩台三层素材呈现山谷视差，下方文档和 QQ 群入口采用用户草图中的黑底浅黄色矩形叠层，参考与 Prompt 见 [ref/home-valley-prompts.md](ref/home-valley-prompts.md)。旧首页四张介绍卡片已移除，打字机组件保留在 [`.deprecated/home-typewriter/`](.deprecated/home-typewriter/)。
+
 这是一个 Vue 3 前端与 Cloudflare Pages Functions 组成的 Web 平台。插件项目由多个专职 AI 角色协作生成，再交给独立的 GitHub Actions 构建仓编译；本仓库本身不是 Minecraft 插件。
 
 **开始阅读**：[快速使用](docs/guide/quick-start.md) · [核心变更与接力记录](CHANGELOG.md) · [开发与部署](docs/technical/development.md) · [API 参考](docs/technical/api-reference.md)

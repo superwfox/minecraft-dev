@@ -30,6 +30,8 @@ flowchart LR
 
 技术栈为 Vue 3（`<script setup>`）、TypeScript、Vite 和 Vue Router，生产依赖只有 `vue`、`vue-router`、`jszip` 和 `lucide-vue-next`。状态使用模块级 `reactive`／`ref`，不引入 Vuex 或 Pinia；顶栏中部文案等跨层级状态通过 `provide`／`inject` 传递。
 
+根路径 `/` 默认跳转到 `/chat`，`/home` 为独立的山谷滚轮视差试验页，以生成的远景、透明山壁和透明岩台三层 WebP 素材构成画面；使用原生滚动、`requestAnimationFrame` 和 CSS `transform`，在视口外预留图像边缘并遵循系统的减少动态效果设置。旧首页介绍卡片已移除，打字机组件归档于 `.deprecated/home-typewriter/`。
+
 | 位置 | 职责 |
 | --- | --- |
 | `pages/ChatPage.vue` | 需求输入、核心与版本选择、需求确认、历史记录、任务重置 |
