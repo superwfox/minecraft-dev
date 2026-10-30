@@ -7,7 +7,7 @@
         @pointerenter="openQuota"
         @pointerleave="scheduleQuotaClose"
       >
-        <img class="header-icon" :src="logoSrc" alt="icon" @click="goHome">
+        <img class="header-icon" :src="logoSrc" alt="icon" @click="router.push('/home')">
       </div>
       <span class="header-title" @click="goHome">tahai</span>
     </div>
@@ -30,7 +30,7 @@
       @pointerleave="scheduleQuotaClose"
     >
       <template v-if="authState.user">
-        <div class="quota-line">充值额度：<b data-font="dynamic">{{ authState.quota?.paidBalance ?? 0 }}</b></div>
+        <div class="quota-line">充值额度：<b>{{ authState.quota?.paidBalance ?? 0 }}</b></div>
         <button v-lattice class="recharge-btn" type="button" @click="openSponsor">充值额度</button>
       </template>
       <template v-else>
@@ -259,6 +259,7 @@ body {
 }
 
 .quota-line b {
+  font-family: var(--font-brand);
   color: var(--line-strong);
   font-size: 17px;
 }

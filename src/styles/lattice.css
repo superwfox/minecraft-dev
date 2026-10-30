@@ -39,7 +39,6 @@
   }
 
   .header-title, .center, .focus-welcome h1 { color: var(--text-primary); }
-  .quota-logout { color: var(--text-secondary); }
   .glass2-nav::before { display: none; }
   .glass2-nav { height: 88px; }
   .topnav, .topnav-tabs { height: auto; gap: 12px; }
@@ -210,7 +209,9 @@
   .lattice-button > svg:not(.lattice-corner) { flex-shrink: 0; }
   .lattice-button > .lattice-corner { top: 1px; left: 1px; width: 27px; height: 27px; color: currentColor; }
   .lattice-button > .lattice-corner.lattice-end { top: auto; left: auto; bottom: 1px; right: 1px; }
-  .lattice-button:is(.recharge-btn, .key-manage-btn, .sp-btn) { width: 100%; }
+  .lattice-button:is(.recharge-btn, .key-manage-btn, .quota-logout, .sp-btn) { width: 100%; }
+  .lattice-button.quota-logout { background: var(--surface-3); border-color: var(--line); color: var(--text-primary); }
+  .lattice-button.quota-logout:hover:not(:disabled):not([aria-disabled=true]) { background: var(--line); border-color: var(--line-strong); color: var(--text-primary); }
   .lattice-button.prompt-history-main { flex: 1 1 auto; min-width: 0; flex-direction: column; align-items: flex-start; text-align: left; }
   .lattice-button:is(.sp-tier) { flex-direction: column; }
   .lattice-button.learning-toggle { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
